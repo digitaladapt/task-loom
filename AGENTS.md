@@ -17,7 +17,7 @@ will always fail. Don't try them, don't work around them:
 - Branch from `main` for every change. Branch names use one of these prefixes:
   `feat/`, `fix/`, `cleanup/`, or `chore/`.
 - When the change is complete, run the quality gates before pushing — at minimum
-  `php bin/phpunit` and `vendor/bin/php-cs-fixer fix` (when installed; see Code
+ `php vendor/bin/phpstan`, `php bin/phpunit`, and `vendor/bin/php-cs-fixer fix` (when installed; see Code
   style below). Fix or revert anything they flag.
 - Push the branch and open a pull request against `main`.
 - Notify the user with the PR link. The user merges.
