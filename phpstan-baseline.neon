@@ -1,0 +1,18 @@
+# phpstan-baseline.neon — intentionally empty.
+#
+# This file exists so phpstan.neon.dist's `includes:` target always resolves.
+# A missing include is a hard error in NEON, not a silent skip.
+#
+# When you adopt PHPStan in a repo that already has violations, run:
+#
+#   vendor/bin/phpstan analyse --generate-baseline
+#
+# and this file will be overwritten with the real baseline. From then on:
+#   - the baseline should only ever SHRINK
+#   - a growing baseline means the ratchet is going backwards
+#   - never hand-add entries here to silence a new error
+#
+# See GUIDING-LIGHT §2.2.
+
+parameters:
+    ignoreErrors: []

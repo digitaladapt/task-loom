@@ -1,0 +1,63 @@
+/* TaskLoom base styles.
+ *
+ * Mobile rules (portfolio-wide, §3.3a / §8.8):
+ *  - form controls render at ≥16px (fixes iOS auto-zoom at the source)
+ *  - never disable pinch-zoom (WCAG 1.4.4)
+ *  - tap targets ≥44×44px, visible focus styles
+ *  - touch-action: manipulation (removes the 300ms tap delay)
+ */
+
+:root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --text: #e8e8f0;
+    --accent: #4e7cff;
+    --danger: #ff5c5c;
+    --ok: #3ddc97;
+    --muted: #9aa0b5;
+}
+
+html {
+    touch-action: manipulation;
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 1rem;
+    line-height: 1.5;
+}
+
+/* Form controls: the iOS zoom root cause — never below 16px. */
+input,
+select,
+textarea,
+button {
+    font-size: max(16px, 1rem);
+    font-family: inherit;
+    color: inherit;
+    background: var(--surface);
+    border: 1px solid var(--muted);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    min-height: 44px;
+}
+
+button {
+    background: var(--accent);
+    border-color: var(--accent);
+    cursor: pointer;
+    color: #fff;
+}
+
+/* Visible focus for keyboard users. */
+:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+a {
+    color: var(--accent);
+}

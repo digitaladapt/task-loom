@@ -1,0 +1,7 @@
+# TaskLoom example Caddyfile — reverse proxy in front of the container.
+#
+# TLS is terminated here; the container serves plain HTTP on :80.
+
+example.internal {
+	reverse_proxy localhost:8080
+}

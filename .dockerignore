@@ -1,0 +1,27 @@
+# Canonical .dockerignore leaf — vendored from guiding-light (never hand-merged).
+# config/ is never dockerignored (§6.3); vendor/, tests/, var/ are.
+
+/.env
+/.env.*
+/config/secrets/
+/public/bundles/
+/tests/
+/var/
+/vendor/
+/node_modules/
+/.git/
+/.github/
+/.gitea/
+/.ci/
+/docker/
+/docs/
+/compose.override.yaml
+/phpunit.cache/
+/.phpunit.cache/
+/.php-cs-fixer.cache
+/*.md
+!/README.md
+/.php-cs-fixer.php
+/.php-cs-fixer.dist.php
+/phpstan*
+/importmap.php

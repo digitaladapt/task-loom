@@ -1,0 +1,33 @@
+# TaskLoom Caddyfile — FrankenPHP app config.
+#
+# TLS is terminated by the external proxy; this container serves plain HTTP
+# on :80. SERVER_NAME=:80 is set in the Dockerfile.
+
+{
+	# Production: no admin endpoints exposed. The local admin :2019 is used
+	# only by the container healthcheck.
+	admin off
+}
+
+:80 {
+	# Static assets with long cache (importmap-served, hashed filenames).
+	handle /assets/* {
+		header Cache-Control "public, max-age=31536000, immutable"
+	}
+
+	# The admin UI and MCP task-tools server both ride the same server block;
+	# routes are owned by Symfony.
+	root * /app/public
+	encode gzip zstd
+
+	# Security headers (§8.9). The legacy XSS filter header is deliberately
+	# absent — deprecated and harmful in modern browsers.
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	php_server
+}

@@ -1,0 +1,28 @@
+# TaskLoom root compose — development/convenience file.
+#
+# The documented deployment is docs/examples/compose.yaml (production-shaped:
+# the app image, one data volume, env-driven config). This root file exists
+# for local development of the app itself: build from source, expose the
+# admin UI, mount the source tree read-only is NOT done here — use
+# `symfony serve` for hot-reload development instead.
+
+services:
+  taskloom:
+    build: .
+    image: taskloom:dev
+    restart: unless-stopped
+    environment:
+      APP_ENV: dev
+      APP_SECRET: ${APP_SECRET:?set APP_SECRET in .env}
+      TASKLOOM_ADMIN_PASSWORD: ${TASKLOOM_ADMIN_PASSWORD:?set TASKLOOM_ADMIN_PASSWORD in .env}
+      TASKLOOM_LLM_BASE_URL: ${TASKLOOM_LLM_BASE_URL:-http://host.docker.internal:11434}
+      TASKLOOM_LLM_MODEL: ${TASKLOOM_LLM_MODEL:-qwen3:14b}
+      TASKLOOM_LLM_MAX_CONCURRENCY: ${TASKLOOM_LLM_MAX_CONCURRENCY:-1}
+      DATABASE_URL: sqlite:///%kernel.project_dir%/data/taskloom.db
+    volumes:
+      - taskloom-data:/app/data
+    ports:
+      - "8080:80"
+
+volumes:
+  taskloom-data:

@@ -1,0 +1,48 @@
+# Tests — per guiding-light/templates/tests.yaml (TEMPLATE — copied and adjusted).
+
+name: Tests
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'feat*'
+      - 'fix*'
+      - 'cleanup*'
+      - 'chore*'
+  pull_request:
+    branches:
+      - 'main'
+
+# The reusable workflow runs, in order: composer validate --strict
+# --no-check-publish, composer install, composer audit, the vendored
+# conformance check, php-cs-fixer (dry-run), PHPStan, and PHPUnit with
+# pcov coverage. All of that lives in lyra/ci — this file only passes the
+# per-repo knobs.
+
+jobs:
+  test:
+    # Pin to a tag, not a branch. `@v1` means "the current v1"; change it here
+    # when you cut v2. Never point this at `main` — that would make CI output
+    # non-reproducible and let an upstream change break five repos at once.
+    uses: lyra/ci/.gitea/workflows/php-test.yaml@v1
+    with:
+      php-version: '8.5'
+
+      # task-loom is a web application (admin UI, phone-first).
+      profile: web-app
+
+      # Coverage: pcov is the default (fast). The gate starts at 0 and should
+      # be ratcheted up as coverage improves — 100 is required before Rector
+      # runs (GUIDING-LIGHT §2.3).
+      coverage: 'pcov'
+      coverage-min: '0'
+
+      # Keep conformance non-blocking until the existing violations are burned
+      # down, then flip to 'true'.
+      conformance-blocking: false
+
+    secrets:
+      # Required: Composer hits api.github.com and an unauthenticated run is
+      # rate-limited to 60 req/hour, which these lockfiles exceed immediately.
+      SYNC_GITHUB_TOKEN: ${{ secrets.SYNC_GITHUB_TOKEN }}
