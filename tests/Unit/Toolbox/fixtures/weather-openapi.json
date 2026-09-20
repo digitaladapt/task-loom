@@ -1,0 +1,30 @@
+{
+  "openapi": "3.0.0",
+  "info": {"title": "Weather", "version": "1.0"},
+  "paths": {
+    "/v1/current": {
+      "get": {
+        "operationId": "get_current_weather",
+        "summary": "Current weather",
+        "parameters": [
+          {"name": "city", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "unit", "in": "query", "required": false, "schema": {"type": "string", "enum": ["celsius", "fahrenheit"]}}
+        ]
+      }
+    },
+    "/v1/forecast/{city}": {
+      "get": {
+        "summary": "Forecast for a city",
+        "parameters": [
+          {"name": "city", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"$ref": "#/components/parameters/Days"}
+        ]
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Days": {"name": "days", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 7}}
+    }
+  }
+}
