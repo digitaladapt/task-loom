@@ -134,6 +134,12 @@ jobs:
           fi
           vendor/bin/phpstan analyse --no-progress --error-format=github
 
+      # Functional tests hit a real SQLite database (var/taskloom_test.db per
+      # .env.test). A fresh CI checkout has no db file, so apply the same
+      # migrations prod applies (docker/entrypoint.sh) before running PHPUnit.
+      - name: Prepare test database
+        run: php bin/console --env=test doctrine:migrations:migrate --no-interaction
+
       - name: Run tests
         id: phpunit
         shell: bash
