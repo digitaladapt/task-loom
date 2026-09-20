@@ -1623,7 +1623,7 @@
             "version": "dev-feat/symfony-8-support",
             "source": {
                 "type": "git",
-                "url": "ssh://git@code.devgnome.com/public/php-mcp-server.git",
+                "url": "https://code.devgnome.com/public/php-mcp-server.git",
                 "reference": "bce7f1670a88f26763cbd6eae7ba359decd3c07d"
             },
             "require": {

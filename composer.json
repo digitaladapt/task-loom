@@ -99,6 +99,6 @@
     "repositories": [{
         "name": "php-mcp-server",
         "type": "vcs",
-        "url": "ssh://git@code.devgnome.com/public/php-mcp-server.git"
+        "url": "https://code.devgnome.com/public/php-mcp-server.git"
     }]
 }
