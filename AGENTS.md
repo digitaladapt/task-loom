@@ -1,5 +1,29 @@
 # AGENTS.md
 
+## Permission boundaries — read this before touching anything
+
+Some operations are not merely discouraged; you lack permission, and any attempt
+will always fail. Don't try them, don't work around them:
+
+- Changing **anything** under `.gitea/workflows/`. (A server-side pre-receive
+  hook rejects pushes that modify workflow files from untrusted refs.)
+- Merging into or pushing to `main`.
+- Reviewing, approving, or merging pull requests.
+- Creating or pushing tags beginning with `v` — those are reserved for
+  versioning.
+
+## Required workflow
+
+- Branch from `main` for every change. Branch names use one of these prefixes:
+  `feat/`, `fix/`, `cleanup/`, or `chore/`.
+- When the change is complete, run the quality gates before pushing — at minimum
+  `php bin/phpunit` and `vendor/bin/php-cs-fixer fix` (when installed; see Code
+  style below). Fix or revert anything they flag.
+- Push the branch and open a pull request against `main`.
+- Notify the user with the PR link. The user merges.
+
+## Project overview
+
 This is a Symfony project. Check `composer.json` for the exact Symfony/PHP version
 in use, and read `symfony.lock` to see which recipes ran. Don't assume Doctrine,
 Twig, API Platform, Messenger, or Lock are installed unless one of those says so.
