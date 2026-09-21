@@ -1,5 +1,8 @@
-# Canonical .dockerignore leaf — vendored from guiding-light (never hand-merged).
-# config/ is never dockerignored (§6.3); vendor/, tests/, var/ are.
+# .dockerignore — project-local file, NOT vendored from guiding-light (§8.2(2):
+# no canonical leaf exists; conformance checks cover it instead).
+# config/ and docker/ are never dockerignored (§6.3) — the Dockerfile COPYs
+# docker/php.ini, docker/Caddyfile and docker/entrypoint.sh into the image.
+# vendor/, tests/, var/ are.
 
 /.env
 /.env.*
@@ -13,7 +16,6 @@
 /.github/
 /.gitea/
 /.ci/
-/docker/
 /docs/
 /compose.override.yaml
 /phpunit.cache/
@@ -24,4 +26,5 @@
 /.php-cs-fixer.php
 /.php-cs-fixer.dist.php
 /phpstan*
-/importmap.php
+/assets/vendor/
+/importmap.php/config/reference.php

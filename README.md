@@ -42,6 +42,9 @@ Docker:
 ```bash
 cp docs/examples/.env.example .env    # set APP_SECRET + TASKLOOM_ADMIN_PASSWORD
 docker compose -f docs/examples/compose.yaml up -d
+# schema is an explicit deployment step, never a per-boot side effect (§8.6):
+docker compose -f docs/examples/compose.yaml run --rm taskloom \
+    php bin/console doctrine:migrations:migrate --no-interaction
 # admin UI: http://localhost:8080
 ```
 

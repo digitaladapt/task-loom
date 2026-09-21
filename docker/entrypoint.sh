@@ -3,18 +3,21 @@
 # TaskLoom container entrypoint.
 #
 # Responsibilities:
-#   1. Run migrations (idempotent) so the schema matches the image.
-#   2. Warm the prod cache with the injected secrets.
-#   3. Hand off to CMD (FrankenPHP server, or a console worker override:
+#   1. Warm the prod cache with the injected secrets.
+#   2. Hand off to CMD (FrankenPHP server, or a console worker override:
 #      `docker compose run taskloom php bin/console messenger:consume`).
+#
+# Migrations are NOT run here — GUIDING-LIGHT §8.6: schema changes are an
+# explicit deployment step (`docker compose run --rm taskloom php bin/console
+# doctrine:migrations:migrate --no-interaction`), not a per-boot side effect.
+# Running them from every container breaks the moment a second replica or
+# worker boots against the same volume.
 #
 # Secrets are env vars injected at runtime, never baked into images (§8.12).
 
 set -e
 
 if [ "${APP_ENV:-prod}" = "prod" ]; then
-    echo "Running migrations..."
-    php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration
     echo "Warming cache..."
     php bin/console cache:warmup
 

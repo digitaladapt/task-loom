@@ -1,4 +1,5 @@
-// TaskLoom app.js — register the service worker; nothing else in v1.
+// TaskLoom app.js — import the stylesheet, register the service worker.
+import './styles/app.css';
 
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {

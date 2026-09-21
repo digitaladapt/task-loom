@@ -27,3 +27,11 @@
 # SQLite runtime data (keep the dir, ignore its contents)
 /data/*
 !/data/.gitkeep
+
+###> symfony/asset-mapper ###
+/public/assets/
+/assets/vendor/
+###< symfony/asset-mapper ###
+
+# Regenerated vendor dump (config:dump-reference) — never committed
+/config/reference.php
