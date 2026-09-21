@@ -26,4 +26,4 @@
 /.php-cs-fixer.php
 /.php-cs-fixer.dist.php
 /phpstan*
-/importmap.php
+/assets/vendor/

@@ -31,6 +31,7 @@ FROM deps AS build
 COPY . .
 
 RUN composer dump-autoload --classmap-authoritative --no-dev \
+    && php bin/console asset-map:compile \
     && rm -rf var/cache/* var/log/*
 
 # Attempt a build-time cache warm. The prod boot guard (Kernel::boot)
