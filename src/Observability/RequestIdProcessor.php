@@ -6,7 +6,6 @@ namespace App\Observability;
 
 use Monolog\LogRecord;
 use Monolog\Processor\ProcessorInterface;
-use Override;
 use Symfony\Component\HttpFoundation\RequestStack;
 
 /**
@@ -23,7 +22,7 @@ final class RequestIdProcessor implements ProcessorInterface
     ) {
     }
 
-    #[Override]
+    #[\Override]
     public function __invoke(LogRecord $record): LogRecord
     {
         $request = $this->requestStack->getCurrentRequest();
