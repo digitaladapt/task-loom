@@ -17,7 +17,6 @@
         "symfony/asset": "8.1.*",
         "symfony/asset-mapper": "8.1.*",
         "symfony/console": "8.1.*",
-        "symfony/dotenv": "8.1.*",
         "symfony/flex": "^2",
         "symfony/form": "8.1.*",
         "symfony/framework-bundle": "8.1.*",
@@ -96,6 +95,7 @@
         "phpunit/phpunit": "^13.3",
         "symfony/browser-kit": "8.1.*",
         "symfony/css-selector": "8.1.*",
+        "symfony/dotenv": "8.1.*",
         "symfony/maker-bundle": "^1.68"
     },
     "repositories": [{
