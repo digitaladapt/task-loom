@@ -46,7 +46,7 @@ class McpServerRepository extends ServiceEntityRepository
         return $this->createQueryBuilder('s')
             ->andWhere('s.enabled = :enabled')
             ->setParameter('enabled', true)
-            ->orderBy('s.name', 'ASC')
+            ->orderBy('s.name', \SortDirection::Ascending)
             ->getQuery()
             ->getResult();
     }
