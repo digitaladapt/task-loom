@@ -98,9 +98,10 @@ Three specifics worth spelling out, because they are easy to get wrong:
 - If Doctrine ORM is installed, schema changes go through migrations
   (`bin/console make:migration`, then `doctrine:migrations:migrate`), never
   `doctrine:schema:update` or hand-written SQL.
-- `.env` is committed and holds defaults only. Real secrets belong in `.env.local`
-  (git-ignored) or the secrets vault (`bin/console secrets:set`), read via
-  `%env(...)%`.
+- `.env` is git-ignored; `.env.example` at the repo root is the committed
+  template documenting every variable (copy it to `.env` and fill in values).
+  Real secrets belong in `.env`/`.env.local` (git-ignored) or the secrets vault
+  (`bin/console secrets:set`), read via `%env(...)%`.
 
 ## Testing
 
