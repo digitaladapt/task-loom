@@ -18,7 +18,7 @@ WORKDIR /app
 # php-mcp/server is referenced via a VCS repo (our fork with the Symfony 8
 # constraint fix) — composer needs git to resolve it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git unzip \
     && rm -rf /var/lib/apt/lists/*
 
 COPY composer.json composer.lock symfony.lock ./
@@ -31,14 +31,20 @@ FROM deps AS build
 COPY . .
 
 RUN composer dump-autoload --classmap-authoritative --no-dev \
-    && php bin/console asset-map:compile \
+    && APP_ENV=prod APP_DEBUG=0 APP_SECRET=build-secret \
+    APP_RUNTIME_OPTIONS='{"disable_dotenv":true}' php bin/console asset-map:compile \
     && rm -rf var/cache/* var/log/*
 
 # Attempt a build-time cache warm. The prod boot guard (Kernel::boot)
 # rejects APP_SECRET=build-secret — a placeholder — so this ALWAYS fails;
 # the warm-up is a no-op that also exercises the autoloader. The real
 # warm-up runs at container start with injected secrets (entrypoint).
-RUN APP_ENV=prod APP_SECRET=build-secret bin/console cache:warmup || true \
+# (asset-map:compile above also sets APP_ENV=prod: with no APP_ENV the
+# runtime defaults to dev, which boots MakerBundle — dev-only, absent
+# from the --no-dev autoloader — and fatals.)
+RUN APP_ENV=prod APP_SECRET=build-secret \
+    APP_RUNTIME_OPTIONS='{"disable_dotenv":true}' \
+    bin/console cache:warmup || true \
     && rm -rf var/cache/*
 
 # ── Stage: app — the runtime image ─────────────────────────────────────────
@@ -71,7 +77,8 @@ USER app
 # FrankenPHP listens on :80; TLS is terminated by the external proxy.
 ENV APP_ENV=prod \
     APP_DEBUG=0 \
-    SERVER_NAME=:80
+    SERVER_NAME=:80 \
+    APP_RUNTIME_OPTIONS='{"disable_dotenv":true}'
 
 EXPOSE 80
 
