@@ -5,7 +5,7 @@
 # image. SQLite (WAL) lives on the taskloom-data volume.
 #
 # Usage:
-#   cp docs/examples/.env.example .env      # compose reads .env from this directory
+#   cp ../../.env.example .env              # compose reads .env from this directory
 #   edit .env                              # set APP_SECRET + TASKLOOM_ADMIN_PASSWORD
 #   docker compose -f docs/examples/compose.yaml up -d
 #   docker compose -f docs/examples/compose.yaml run --rm taskloom \

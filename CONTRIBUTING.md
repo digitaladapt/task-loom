@@ -18,7 +18,7 @@ Thanks for your interest in contributing.
 
 ```bash
 composer install
-cp docs/examples/.env.example .env
+cp .env.example .env
 php bin/console doctrine:migrations:migrate
 ```
 

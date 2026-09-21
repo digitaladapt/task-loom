@@ -31,7 +31,7 @@ Requirements: PHP 8.5, Composer 2, SQLite.
 
 ```bash
 composer install
-cp docs/examples/.env.example .env    # then set APP_SECRET + TASKLOOM_ADMIN_PASSWORD
+cp .env.example .env           # then set APP_SECRET + TASKLOOM_ADMIN_PASSWORD
 php bin/console doctrine:migrations:migrate
 php bin/console app:taskloom:admin-user    # creates the admin user from TASKLOOM_ADMIN_PASSWORD
 symfony serve                          # or: php -S 127.0.0.1:8000 -t public/
@@ -40,7 +40,7 @@ symfony serve                          # or: php -S 127.0.0.1:8000 -t public/
 Docker:
 
 ```bash
-cp docs/examples/.env.example .env    # set APP_SECRET + TASKLOOM_ADMIN_PASSWORD
+cp .env.example .env           # set APP_SECRET + TASKLOOM_ADMIN_PASSWORD
 docker compose -f docs/examples/compose.yaml up -d
 # schema is an explicit deployment step, never a per-boot side effect (§8.6):
 docker compose -f docs/examples/compose.yaml run --rm taskloom \
@@ -50,7 +50,7 @@ docker compose -f docs/examples/compose.yaml run --rm taskloom \
 
 ## Configuration
 
-See [`docs/examples/.env.example`](docs/examples/.env.example) — every variable documented
+See [`.env.example`](.env.example) — every variable documented
 inline. Key knobs:
 
 | Variable | Purpose |
