@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "682ff674fa0a49ac073a7e2dd08736f1",
+    "content-hash": "c65ae104981a8b87656ac62a6c3c8f9a",
     "packages": [
         {
             "name": "doctrine/collections",
@@ -1620,7 +1620,7 @@
         },
         {
             "name": "php-mcp/server",
-            "version": "dev-feat/symfony-8-support",
+            "version": "3.3.99",
             "source": {
                 "type": "git",
                 "url": "https://code.devgnome.com/public/php-mcp-server.git",
@@ -10496,9 +10496,7 @@
     ],
     "aliases": [],
     "minimum-stability": "stable",
-    "stability-flags": {
-        "php-mcp/server": 20
-    },
+    "stability-flags": {},
     "prefer-stable": true,
     "prefer-lowest": false,
     "platform": {

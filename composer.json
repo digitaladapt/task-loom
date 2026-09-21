@@ -13,7 +13,7 @@
         "doctrine/doctrine-migrations-bundle": "^4.0",
         "doctrine/orm": "^3.7",
         "php-mcp/client": "^1.0",
-        "php-mcp/server": "dev-feat/symfony-8-support",
+        "php-mcp/server": "~3.3.99",
         "symfony/asset": "8.1.*",
         "symfony/console": "8.1.*",
         "symfony/dotenv": "8.1.*",
