@@ -27,3 +27,6 @@
 # SQLite runtime data (keep the dir, ignore its contents)
 /data/*
 !/data/.gitkeep
+
+# Regenerated vendor dump (config:dump-reference) — never committed
+/config/reference.php
