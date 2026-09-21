@@ -8,7 +8,13 @@
 #   cp docs/examples/.env.example .env      # compose reads .env from this directory
 #   edit .env                              # set APP_SECRET + TASKLOOM_ADMIN_PASSWORD
 #   docker compose -f docs/examples/compose.yaml up -d
+#   docker compose -f docs/examples/compose.yaml run --rm taskloom \
+#       php bin/console doctrine:migrations:migrate --no-interaction
 #   → admin UI: http://localhost:8080
+#
+# Migrations run as the explicit one-shot command above, NOT in the
+# container entrypoint (GUIDING-LIGHT §8.6) — safe with any number of
+# replicas/workers sharing the volume.
 #
 # The compose file is environment-agnostic: every value comes from the
 # environment (a .env file next to it, or real env vars in prod). Core
