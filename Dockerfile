@@ -18,7 +18,7 @@ WORKDIR /app
 # php-mcp/server is referenced via a VCS repo (our fork with the Symfony 8
 # constraint fix) — composer needs git to resolve it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git unzip \
     && rm -rf /var/lib/apt/lists/*
 
 COPY composer.json composer.lock symfony.lock ./
