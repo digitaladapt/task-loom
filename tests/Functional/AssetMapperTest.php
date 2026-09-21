@@ -22,6 +22,11 @@ final class AssetMapperTest extends WebTestCase
 
         self::assertStringContainsString('importmap', $html);
         self::assertStringContainsString('/assets/app-', $html, 'AssetMapper should emit a hashed entrypoint script.');
-        self::assertStringNotContainsString('styles/app.css', $html, 'Legacy plain asset() CSS link should be gone.');
+        // The stylesheet is now imported by app.js, so the mapper emits a hashed
+        // <link> (or importmap entry keyed by its logical path) — not the legacy
+        // unhashed asset() link. Assert on the tag, not the bare string: the
+        // logical path "styles/app.css" legitimately appears in the importmap.
+        self::assertStringNotContainsString('href="/styles/app.css"', $html, 'Legacy unhashed asset() CSS link should be gone.');
+        self::assertStringContainsString('href="/assets/styles/app-', $html, 'AssetMapper should emit a hashed stylesheet link.');
     }
 }
