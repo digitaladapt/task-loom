@@ -44,3 +44,24 @@ services:
             $readers:
                 mcp: '@App\Toolbox\McpServerReader'
                 openapi: '@App\Toolbox\OpenApiServerReader'
+
+    # Run engine (SPEC §3, §5): loop, prompt compiler, budgets.
+    App\Llm\LlmClient:
+        arguments:
+            $baseUrl: '%env(TASKLOOM_LLM_BASE_URL)%'
+            $model: '%env(TASKLOOM_LLM_MODEL)%'
+            $apiKey: '%env(TASKLOOM_LLM_API_KEY)%'
+            $timeoutSeconds: '%env(int:TASKLOOM_LLM_TIMEOUT)%'
+
+    App\Context\ContextWindow:
+        arguments:
+            $contextLimitTokens: '%env(int:TASKLOOM_CONTEXT_LIMIT)%'
+            $maxToolOutputPct: '%env(float:TASKLOOM_MAX_TOOL_OUTPUT_PCT)%'
+            $windowTailExchanges: '%env(int:TASKLOOM_WINDOW_TAIL_EXCHANGES)%'
+
+    App\RunEngine\RunEngine:
+        arguments:
+            $budgets:
+                step_budget: '%env(int:TASKLOOM_STEP_BUDGET)%'
+                tool_retries: '%env(int:TASKLOOM_TOOL_RETRIES)%'
+                circuit_breaker: '%env(int:TASKLOOM_CIRCUIT_BREAKER)%'
