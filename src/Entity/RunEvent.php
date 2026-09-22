@@ -17,6 +17,7 @@ use Doctrine\ORM\Mapping as ORM;
  */
 #[ORM\Entity(repositoryClass: RunEventRepository::class)]
 #[ORM\Index(name: 'idx_run_event_run_seq', columns: ['run_id', 'seq'])]
+#[ORM\HasLifecycleCallbacks]
 class RunEvent
 {
     #[ORM\Id]
