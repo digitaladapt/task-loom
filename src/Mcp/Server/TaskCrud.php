@@ -131,6 +131,13 @@ final class TaskCrud
             throw EntityNotFoundException::fromClassNameAndIdentifier(Task::class, ['id' => (string) $taskId]);
         }
 
+        // The MCP serve process is long-lived; entities cached in its
+        // identity map go stale when tasks are enabled or archived out of
+        // band (admin UI, DB, run lifecycle). The write gate's decision must
+        // be based on the persisted row, not a cached snapshot — otherwise an
+        // enabled task looks like an editable draft and the gate is bypassed.
+        $this->tasks->refresh($task);
+
         return $task;
     }
 }

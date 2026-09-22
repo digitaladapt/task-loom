@@ -68,6 +68,18 @@ final class TaskRepository extends ServiceEntityRepository
             ->getQuery()->getResult();
     }
 
+    /**
+     * Re-read a task's persisted state, discarding any stale in-memory
+     * snapshot. TaskCrud refreshes before every write-gate decision (SPEC
+     * §4.3): the MCP serve process is long-lived, and entities cached in
+     * its identity map go stale when tasks are enabled or archived out of
+     * band. The gate must judge the persisted row, not a cached snapshot.
+     */
+    public function refresh(Task $task): void
+    {
+        $this->getEntityManager()->refresh($task);
+    }
+
     public function save(Task $task): void
     {
         $this->getEntityManager()->persist($task);
