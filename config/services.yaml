@@ -23,6 +23,21 @@ services:
         arguments:
             $httpClient: '@http_client'
 
+    # The MCP server role needs the full Symfony container so tool handler
+    # classes resolve from real DI (repositories, entity manager, logging).
+    App\Mcp\Server\TaskServerFactory:
+        public: true
+        arguments:
+            $container: '@service_container'
+
+    # Referenced by name from the MCP tool handler resolution (and the
+    # gating tests, which must exercise the real persisted gate).
+    App\Mcp\Server\TaskCrud:
+        public: true
+
+    App\Mcp\Server\TaskTools:
+        public: true
+
     # Protocol → reader map for the catalog synchronizer (SPEC §7).
     App\Toolbox\ServerReaderRegistry:
         arguments:
