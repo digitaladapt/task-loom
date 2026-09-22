@@ -53,6 +53,12 @@ services:
             $apiKey: '%env(TASKLOOM_LLM_API_KEY)%'
             $timeoutSeconds: '%env(int:TASKLOOM_LLM_TIMEOUT)%'
 
+    # HTTP Basic admin auth (SPEC §4.3): one env-provided password, one
+    # admin principal, constant-time comparison. Fail closed when unset.
+    App\Security\AdminAuthenticator:
+        arguments:
+            $adminPassword: '%env(TASKLOOM_ADMIN_PASSWORD)%'
+
     App\Context\ContextWindow:
         arguments:
             $contextLimitTokens: '%env(int:TASKLOOM_CONTEXT_LIMIT)%'

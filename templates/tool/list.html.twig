@@ -1,0 +1,44 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Tool catalog — TaskLoom{% endblock %}
+
+{% block body %}
+<header class="page-header">
+    <h1>Tool catalog</h1>
+    <nav><a href="{{ path('app_task_list') }}">← Tasks</a></nav>
+</header>
+
+{% for label, messages in app.flashes %}
+    {% for message in messages %}
+        <p class="flash flash-{{ label }}" role="status">{{ message }}</p>
+    {% endfor %}
+{% endfor %}
+
+{% if known_tags is not empty %}
+<p class="muted">Known tags: {% for tag in known_tags %}<code>{{ tag }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+{% endif %}
+
+{% if tools is empty %}
+    <p class="muted">No tools discovered yet. Register servers and run the catalog sync.</p>
+{% else %}
+    <ul class="cards">
+    {% for tool in tools %}
+        <li class="card">
+            <div class="card-title"><code>{{ tool.server.name }}.{{ tool.name }}</code></div>
+            <p class="muted">{% set desc = tool.description|default('') %}{% if desc|length > 160 %}{{ desc|slice(0, 160) }}…{% else %}{{ desc|default('(no description)') }}{% endif %}</p>
+            <form method="post" action="{{ path('app_tool_tags', {id: tool.id}) }}" class="tag-form">
+                <input type="hidden" name="_token" value="{{ csrf_token('tool-tags') }}">
+                <label for="tool-tags-{{ tool.id }}" class="visually-hidden">Tags for {{ tool.name }}</label>
+                <input id="tool-tags-{{ tool.id }}" type="text" name="tags" value="{{ tool.tags|join(', ') }}"
+                       placeholder="tags, comma-separated" inputmode="text" autocomplete="off">
+                <button type="submit">Save tags</button>
+            </form>
+            <p class="muted">
+                {% if tool.pinned %}pinned{% else %}discovered{% endif %}
+                {% if tool.hasSideEffect %} · side effects{% endif %}
+            </p>
+        </li>
+    {% endfor %}
+    </ul>
+{% endif %}
+{% endblock %}

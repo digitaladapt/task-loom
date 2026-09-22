@@ -1,0 +1,138 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}#{{ task.id }} {{ task.title }} — TaskLoom{% endblock %}
+
+{% block body %}
+<header class="page-header">
+    <h1>#{{ task.id }} — {{ task.title }}</h1>
+    <nav><a href="{{ path('app_task_list') }}">← All tasks</a></nav>
+</header>
+
+{% for label, messages in app.flashes %}
+    {% for message in messages %}
+        <p class="flash flash-{{ label }}" role="status">{{ message }}</p>
+    {% endfor %}
+{% endfor %}
+
+<dl class="record">
+    <dt>Status</dt>
+    <dd>
+        {% if task.archived %}archived
+        {% elseif task.enabled %}enabled
+        {% elseif task.replacementFor %}replacement draft (for #{{ task.replacementFor.id }})
+        {% else %}draft{% endif %}
+    </dd>
+
+    <dt>Brief</dt>
+    <dd>{{ task.brief }}</dd>
+
+    <dt>Kind</dt>
+    <dd>{{ task.kind.value }}</dd>
+
+    <dt>Toolbox mode</dt>
+    <dd>{{ task.toolboxMode.value }}</dd>
+
+    <dt>Toolbox (declared)</dt>
+    <dd><code>{{ task.toolbox|join(', ') }}</code></dd>
+
+    <dt>Author</dt>
+    <dd>{{ task.createdBy.value }}</dd>
+
+    {% if task.schedule %}
+        <dt>Schedule</dt>
+        <dd><code>{{ task.schedule }}</code></dd>
+    {% endif %}
+
+    {% if task.replacementFor %}
+        <dt>Replacement for</dt>
+        <dd>#{{ task.replacementFor.id }} — {{ task.replacementFor.title }}</dd>
+    {% endif %}
+
+    {% if task.supersededBy %}
+        <dt>Superseded by</dt>
+        <dd>#{{ task.supersededBy.id }} — {{ task.supersededBy.title }}</dd>
+    {% endif %}
+</dl>
+
+<section aria-labelledby="preview-heading" class="preview">
+    <h2 id="preview-heading">Toolbox preview</h2>
+
+    {% if preview.resolved is not empty %}
+        <p class="muted">{{ preview.resolved|length }} tool(s) would be available at run start:</p>
+        <ul class="cards">
+        {% for tool in preview.resolved %}
+            <li class="card"><code>{{ tool.server.name }}.{{ tool.name }}</code></li>
+        {% endfor %}
+        </ul>
+    {% else %}
+        <p class="flash flash-error">Resolves to an empty toolbox — the run would fail at dispatch.</p>
+    {% endif %}
+
+    {% if preview.problems is not empty %}
+        <ul class="problems">
+        {% for problem in preview.problems %}
+            <li>{{ problem }}</li>
+        {% endfor %}
+        </ul>
+    {% endif %}
+</section>
+
+<section aria-labelledby="actions-heading">
+    <h2 id="actions-heading">Actions</h2>
+
+    {% if not task.archived and not task.replacementFor and not task.enabled %}
+        <form method="post" action="{{ path('app_task_enable', {id: task.id}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('task-enable') }}">
+            <button type="submit">Enable</button>
+        </form>
+        <form method="post" action="{{ path('app_task_archive', {id: task.id}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('task-archive') }}">
+            <button type="submit" class="danger">Discard draft</button>
+        </form>
+    {% elseif task.replacementFor and not task.archived %}
+        <form method="post" action="{{ path('app_task_approve', {id: task.id}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('task-approve') }}">
+            <button type="submit">Approve replacement</button>
+        </form>
+        <form method="post" action="{{ path('app_task_reject', {id: task.id}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('task-reject') }}">
+            <button type="submit" class="danger">Reject</button>
+        </form>
+    {% elseif task.enabled %}
+        <p class="muted">Enabled tasks are immutable — any edit lands as a replacement draft (SPEC §4.4).</p>
+    {% endif %}
+</section>
+
+{% if replacement_drafts is not empty %}
+<section aria-labelledby="drafts-heading">
+    <h2 id="drafts-heading">Replacement drafts</h2>
+    <ul class="cards">
+    {% for draft in replacement_drafts %}
+        <li class="card">
+            <a class="card-title" href="{{ path('app_task_detail', {id: draft.id}) }}">#{{ draft.id }} — {{ draft.title }}</a>
+            {% if draft.archived %}<span class="muted">(rejected)</span>{% endif %}
+        </li>
+    {% endfor %}
+    </ul>
+</section>
+{% endif %}
+
+<section aria-labelledby="runs-heading">
+    <h2 id="runs-heading">Runs</h2>
+    {% if runs is empty %}
+        <p class="muted">No runs yet.</p>
+    {% else %}
+        <ul class="cards">
+        {% for run in runs %}
+            <li class="card">
+                <span class="card-title">Run #{{ run.id }}</span>
+                <p class="muted">
+                    {{ run.status.value }}{% if run.finishedAt %} · finished {{ run.finishedAt|date('Y-m-d H:i') }}{% endif %}
+                    {% if run.errorClass %} · {{ run.errorClass.value }}{% endif %}
+                </p>
+            </li>
+        {% endfor %}
+        </ul>
+    {% endif %}
+</section>
+{% endblock %}

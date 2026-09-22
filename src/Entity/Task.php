@@ -333,6 +333,26 @@ class Task
     }
 
     /**
+     * Archive a plain (non-replacement) draft the human does not want — the
+     * approval-queue 'discard' action (SPEC §8). Enabled tasks are never
+     * archivable this way (SPEC §4.4); superseded/archived rows stay dead.
+     */
+    public function archiveAsDraft(): void
+    {
+        if ($this->enabled) {
+            throw new \LogicException('Cannot archive an enabled task — replace it first (SPEC §4.4).');
+        }
+        if ($this->isArchived()) {
+            throw new \LogicException('Cannot archive an already-archived task.');
+        }
+        if ($this->isSuperseded()) {
+            throw new \LogicException('Cannot archive a superseded task — it is already a dead record.');
+        }
+
+        $this->archivedAt = new \DateTimeImmutable();
+    }
+
+    /**
      * Content mutation guard (SPEC §4.4): enabled tasks are immutable — an
      * enabled task only ever receives lifecycle flags.
      */

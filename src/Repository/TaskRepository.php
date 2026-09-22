@@ -68,6 +68,19 @@ final class TaskRepository extends ServiceEntityRepository
             ->getQuery()->getResult();
     }
 
+    /**
+     * Archived tasks, oldest first — the dead records (SPEC §4.4).
+     *
+     * @return list<Task>
+     */
+    public function findArchived(): array
+    {
+        return $this->createQueryBuilder('t')
+            ->where('t.archivedAt IS NOT NULL')
+            ->orderBy('t.archivedAt', 'DESC')
+            ->getQuery()->getResult();
+    }
+
     public function save(Task $task): void
     {
         $this->getEntityManager()->persist($task);
