@@ -6,8 +6,11 @@ namespace App\Toolbox;
 
 use App\Entity\McpServer;
 use App\Entity\ServerProtocol;
+use App\Toolbox\Transport\StreamableTransportFactory;
 use PhpMcp\Client\ClientBuilder;
+use PhpMcp\Client\ClientConfig;
 use PhpMcp\Client\Enum\TransportType;
+use PhpMcp\Client\Model\Capabilities as ClientCapabilities;
 use PhpMcp\Client\ServerConfig;
 
 /**
@@ -48,6 +51,9 @@ final readonly class McpServerReader implements ServerReader
         $client = ClientBuilder::make()
             ->withClientInfo('task-loom', self::CLIENT_VERSION)
             ->withServerConfig($config)
+            ->withTransportFactory(new StreamableTransportFactory(
+                new ClientConfig('task-loom', self::CLIENT_VERSION, ClientCapabilities::forClient()),
+            ))
             ->build();
 
         $client->initialize();

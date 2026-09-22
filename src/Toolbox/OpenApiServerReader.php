@@ -121,22 +121,25 @@ final readonly class OpenApiServerReader implements ServerReader
         return $tools;
     }
 
+    private const int MAX_REF_HOPS = 10;
+
     /**
      * Resolve in-document $ref pointers (e.g. "#/components/parameters/Foo").
      *
-     * @param array<string, mixed> $node
+     * The depth guard counts $ref hops, not array nesting: a spec decoded
+     * from JSON is a tree, so plain nesting cannot recurse infinitely —
+     * only a $ref chain can (directly or transitively self-referential).
+     * Counting nesting instead would reject perfectly valid specs whose
+     * response schemas simply nest deeply.
      *
-     * @return array<string, mixed>
-     */
-    /**
      * @param array<string, mixed> $node
      * @param array<string, mixed> $spec
      *
      * @return array<string, mixed>
      */
-    private function resolveRefs(array $node, array $spec, int $depth = 0): array
+    private function resolveRefs(array $node, array $spec, int $refHops = 0): array
     {
-        if ($depth > 10) {
+        if ($refHops > self::MAX_REF_HOPS) {
             throw new \RuntimeException('OpenAPI $ref chain too deep (max 10).');
         }
 
@@ -150,13 +153,13 @@ final readonly class OpenApiServerReader implements ServerReader
                     unset($node['$ref']);
                     $out = array_merge($resolved, $node);
 
-                    return $this->resolveRefs($out, $spec, $depth + 1);
+                    return $this->resolveRefs($out, $spec, $refHops + 1);
                 }
                 continue;
             }
 
             if (\is_array($value)) {
-                $out[$key] = $this->resolveRefs($value, $spec, $depth + 1);
+                $out[$key] = $this->resolveRefs($value, $spec, $refHops);
                 continue;
             }
 
