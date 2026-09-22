@@ -230,7 +230,7 @@ class Tool
             if ($this->description !== $description) {
                 $drift[] = 'description';
             }
-            if ($this->schema !== $schema) {
+            if (!$this->schemasEqual($this->schema, $schema)) {
                 $drift[] = 'schema';
             }
 
@@ -241,11 +241,39 @@ class Tool
             $drift[] = 'description';
             $this->description = $description;
         }
-        if ($this->schema !== $schema) {
+        if (!$this->schemasEqual($this->schema, $schema)) {
             $drift[] = 'schema';
             $this->schema = $schema;
         }
 
         return $drift;
+    }
+
+    /**
+     * Structural schema equality. Freshly built schemas represent empty
+     * JSON objects as stdClass while Doctrine's JSON round-trip decodes
+     * them to empty arrays — strict !== would report phantom drift on
+     * every sync. Both sides are normalized (stdClass cast to arrays,
+     * recursively) before comparing.
+     *
+     * @param array<string, mixed> $a
+     * @param array<string, mixed> $b
+     */
+    private function schemasEqual(array $a, array $b): bool
+    {
+        return self::normalizeSchemaValue($a) === self::normalizeSchemaValue($b);
+    }
+
+    private static function normalizeSchemaValue(mixed $value): mixed
+    {
+        if ($value instanceof \stdClass) {
+            $value = (array) $value;
+        }
+
+        if (\is_array($value)) {
+            return array_map(self::normalizeSchemaValue(...), $value);
+        }
+
+        return $value;
     }
 }
