@@ -13,7 +13,7 @@ use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
  * JSON-RPC initialize + tools/list + tools/call against the actual
  * ReactPHP socket, exactly as an external agent would see it (SPEC §11).
  *
- * The gate assertion here is the whole point: a tools/call for task.create
+ * The gate assertion here is the whole point: a tools/call for task_create
  * must land in the DB as a disabled task (SPEC §4.3), and the write tools'
  * input schemas must contain no 'enabled' parameter.
  *
@@ -142,7 +142,7 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
         self::assertSame(200, $list['code']);
         $names = array_map(static fn (array $t): string => $t['name'], $list['body']['result']['tools']);
         sort($names);
-        self::assertSame(['task.create', 'task.get', 'task.list', 'task.update'], $names);
+        self::assertSame(['task_create', 'task_get', 'task_list', 'task_update'], $names);
     }
 
     public function testToolsListWriteSchemasHaveNoEnabledParameter(): void
@@ -163,7 +163,7 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
     public function testToolsCallTaskCreatePersistsDisabled(): void
     {
         $response = $this->rpc('tools/call', [
-            'name' => 'task.create',
+            'name' => 'task_create',
             'arguments' => [
                 'title' => 'E2E Gated Task',
                 'brief' => 'Created over real MCP.',
@@ -185,7 +185,7 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
         $tasks = static::getContainer()->get(TaskRepository::class);
         $task = $tasks->find($taskId);
 
-        self::assertNotNull($task, 'task.create did not persist a row');
+        self::assertNotNull($task, 'task_create did not persist a row');
         self::assertFalse($task->isEnabled(), 'SPEC §4.3 gate breached: agent write persisted enabled');
         self::assertSame(TaskAuthor::Agent, $task->getCreatedBy());
         self::assertSame('E2E Gated Task', $task->getTitle());
@@ -194,7 +194,7 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
     public function testToolsCallInvalidArgumentsReturnsStructuredError(): void
     {
         $response = $this->rpc('tools/call', [
-            'name' => 'task.create',
+            'name' => 'task_create',
             'arguments' => [
                 'title' => '', // minLength 1
                 'brief' => 'x',

@@ -132,7 +132,7 @@ final class RunEngineLoopTest extends KernelTestCase
         // The model tries to call a tool that is NOT in the toolbox —
         // classic injected-instruction shape. Must never dispatch.
         $this->llm->method('chat')->willReturnOnConsecutiveCalls(
-            $this->response(toolCalls: [['id' => 'c1', 'name' => 'task.update', 'arguments' => []]]),
+            $this->response(toolCalls: [['id' => 'c1', 'name' => 'task_update', 'arguments' => []]]),
             $this->response(content: 'Could not edit tasks.'),
         );
 
@@ -144,7 +144,7 @@ final class RunEngineLoopTest extends KernelTestCase
         $events = $this->eventTypes($run);
         self::assertContains(RunEventType::ToolValidationError, $events);
         $payload = $this->eventPayload($run, RunEventType::ToolValidationError);
-        self::assertSame('task.update', $payload['tool']);
+        self::assertSame('task_update', $payload['tool']);
     }
 
     public function testInvalidArgumentsFeedBackToModel(): void
