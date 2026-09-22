@@ -12,8 +12,8 @@ use Psr\Container\ContainerInterface;
 use Psr\Log\LoggerInterface;
 
 /**
- * Builds the task-loom MCP server role (SPEC §11): task.create, task.update,
- * task.list, task.get over Streamable HTTP.
+ * Builds the task-loom MCP server role (SPEC §11): task_create, task_update,
+ * task_list, task_get over Streamable HTTP.
  *
  * The builder's withTool() hand-registers each handler method with an
  * explicit JSON input schema. Explicit schemas keep the wire contract
@@ -39,8 +39,8 @@ final class TaskServerFactory
             ->withCapabilities(ServerCapabilities::make())
             ->withInstructions(implode("\n", [
                 'Task management for task-loom (SPEC §10).',
-                'Writes are gated: every task.create and task.update persists disabled and lands in the human approval queue (SPEC §4.3). You cannot create or enable tasks directly.',
-                'Read tools: task.list, task.get. Write tools: task.create, task.update.',
+                'Writes are gated: every task_create and task_update persists disabled and lands in the human approval queue (SPEC §4.3). You cannot create or enable tasks directly.',
+                'Read tools: task_list, task_get. Write tools: task_create, task_update.',
             ]))
             ->withLogger($this->logger)
             ->withContainer($this->container);
@@ -55,7 +55,7 @@ final class TaskServerFactory
         $builder
             ->withTool(
                 handler: [TaskTools::class, 'create'],
-                name: 'task.create',
+                name: 'task_create',
                 description: 'Create a new task. The task is persisted disabled and appears in the human approval queue — there is no way to create an enabled task through this tool (SPEC §4.3).',
                 annotations: ToolAnnotations::make(
                     title: 'Create task',
@@ -79,7 +79,7 @@ final class TaskServerFactory
             )
             ->withTool(
                 handler: [TaskTools::class, 'update'],
-                name: 'task.update',
+                name: 'task_update',
                 description: 'Update a task. Enabled tasks are immutable (SPEC §4.4): updating one returns a disabled replacement draft; the original keeps running. Draft tasks are edited in place.',
                 annotations: ToolAnnotations::make(
                     title: 'Update task',
@@ -111,7 +111,7 @@ final class TaskServerFactory
             )
             ->withTool(
                 handler: [TaskTools::class, 'list'],
-                name: 'task.list',
+                name: 'task_list',
                 description: 'List tasks, newest first. Read-only.',
                 annotations: ToolAnnotations::make(
                     title: 'List tasks',
@@ -129,7 +129,7 @@ final class TaskServerFactory
             )
             ->withTool(
                 handler: [TaskTools::class, 'get'],
-                name: 'task.get',
+                name: 'task_get',
                 description: "Get one task's full record, including its replacement chain. Read-only.",
                 annotations: ToolAnnotations::make(
                     title: 'Get task',

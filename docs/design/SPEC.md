@@ -6,7 +6,7 @@
 
 ### Locked decisions
 
-1. **Tasks are editable drafts until enabled, then immutable — for everyone.** A `task.update`
+1. **Tasks are editable drafts until enabled, then immutable — for everyone.** A `task_update`
    on an enabled task never mutates it; it creates a replacement draft (§4.4). This applies
    to **user** updates too, not just agent updates: we keep the record of every version.
 2. **`php-mcp/client` and `php-mcp/server` are adopted.** No spike; SDK use is the design,
@@ -67,11 +67,11 @@ alternatives that were rejected on the way here.
 │  Admin UI (Twig)      Run Engine              Task Tools   │
 │  ─────────────        ───────────             ──────────   │
 │  task CRUD            compile prompt           MCP server  │
-│  approval queue       → LLM (OpenAI-compat)   (task.create,│
-│  run history/logs     → validate tool calls    task.update,│
-│  run-now / inspect    → execute via MCP client task.list,  │
-│                       → append results         task.get,   │
-│  Scheduler (v1.1)     → checkpoint             run.read_log)│
+│  approval queue       → LLM (OpenAI-compat)   (task_create,│
+│  run history/logs     → validate tool calls    task_update,│
+│  run-now / inspect    → execute via MCP client task_list,  │
+│                       → append results         task_get,   │
+│  Scheduler (v1.1)     → checkpoint             run_read_log)│
 │                       → retry / fail / done                │
 │                                                            │
 │  LLM slot semaphore · attempt ledger · task store          │
@@ -305,8 +305,8 @@ task — so the improvement cycle is provable in v1 even without sessions.
 A seeded **reviewer task** — an ordinary `run` task whose toolbox is the harness's own task
 tools:
 
-- `task.list`, `task.get`, `run.read_log` (read-only)
-- `task.create`, `task.update` (write; always gated — §4.3)
+- `task_list`, `task_get`, `run_read_log` (read-only)
+- `task_create`, `task_update` (write; always gated — §4.3)
 
 On a schedule (or manually in v1), it reads recent run logs and failure-class rollups and
 proposes edits: tighten a brief, adjust a toolbox that repeatedly validated wrong

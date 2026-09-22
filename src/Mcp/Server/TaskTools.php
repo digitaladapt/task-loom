@@ -10,7 +10,7 @@ use App\Entity\ToolboxMode;
 
 /**
  * The task tools exposed over the MCP server role (SPEC §10: the seeded
- * reviewer task's toolbox — task.list, task.get, task.create, task.update).
+ * reviewer task's toolbox — task_list, task_get, task_create, task_update).
  *
  * Handlers are plain methods on this service; the server factory
  * registers them via ServerBuilder::withTool() with explicit input

@@ -35,11 +35,11 @@ final class McpServeCommand extends Command
             ->addOption('port', null, InputOption::VALUE_REQUIRED, 'Listen port', '8080')
             ->addOption('stateless', null, InputOption::VALUE_NONE, 'Run without MCP sessions (one JSON-RPC POST = one response)')
             ->setHelp(<<<'TXT'
-                Serves the task tools (task.create, task.update, task.list,
-                task.get) over MCP Streamable HTTP (SPEC §11).
+                Serves the task tools (task_create, task_update, task_list,
+                task_get) over MCP Streamable HTTP (SPEC §11).
 
                 The endpoint is POST /mcp. Writes are gated (SPEC §4.3):
-                every task.create and task.update persists disabled and
+                every task_create and task_update persists disabled and
                 lands in the human approval queue.
                 TXT);
     }
