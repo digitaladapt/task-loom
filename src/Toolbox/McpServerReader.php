@@ -18,6 +18,14 @@ use PhpMcp\Client\ServerConfig;
  */
 final readonly class McpServerReader implements ServerReader
 {
+    /**
+     * The client identity advertised in the MCP initialize handshake.
+     * Per the SDK this is informational only, but php-mcp/client 1.0.1+
+     * requires it before build() — a missing name throws the cryptic
+     * "Name must be provided using withName()." ConfigurationException.
+     */
+    private const CLIENT_VERSION = '1.0.0';
+
     public function __construct(
         private ?int $timeoutSeconds = null,
     ) {
@@ -38,6 +46,7 @@ final readonly class McpServerReader implements ServerReader
         );
 
         $client = ClientBuilder::make()
+            ->withClientInfo('task-loom', self::CLIENT_VERSION)
             ->withServerConfig($config)
             ->build();
 
