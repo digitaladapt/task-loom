@@ -1,0 +1,77 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Tasks — TaskLoom{% endblock %}
+
+{% block body %}
+<header class="page-header">
+    <h1>Tasks</h1>
+    <nav><a href="{{ path('app_tool_list') }}">Tool catalog</a></nav>
+</header>
+
+{% for label, messages in app.flashes %}
+    {% for message in messages %}
+        <p class="flash flash-{{ label }}" role="status">{{ message }}</p>
+    {% endfor %}
+{% endfor %}
+
+<section aria-labelledby="approval-heading">
+    <h2 id="approval-heading">Approval queue</h2>
+    {% if approval_queue is empty %}
+        <p class="muted">Nothing waiting for review.</p>
+    {% else %}
+        <ul class="cards">
+        {% for task in approval_queue %}
+            <li class="card">
+                <a class="card-title" href="{{ path('app_task_detail', {id: task.id}) }}">
+                    #{{ task.id }} — {{ task.title }}
+                </a>
+                <p class="muted">
+                    {% if task.replacementFor %}
+                        replacement for #{{ task.replacementFor.id }} ({{ task.replacementFor.title }})
+                    {% else %}
+                        new task · {{ task.createdBy.value }}
+                    {% endif %}
+                </p>
+            </li>
+        {% endfor %}
+        </ul>
+    {% endif %}
+</section>
+
+<section aria-labelledby="enabled-heading">
+    <h2 id="enabled-heading">Enabled</h2>
+    {% if enabled is empty %}
+        <p class="muted">No enabled tasks. Run-now needs an enabled task.</p>
+    {% else %}
+        <ul class="cards">
+        {% for task in enabled %}
+            <li class="card">
+                <a class="card-title" href="{{ path('app_task_detail', {id: task.id}) }}">
+                    #{{ task.id }} — {{ task.title }}
+                </a>
+            </li>
+        {% endfor %}
+        </ul>
+    {% endif %}
+</section>
+
+<section aria-labelledby="archived-heading">
+    <h2 id="archived-heading">Archived</h2>
+    {% if archived is empty %}
+        <p class="muted">No archived tasks.</p>
+    {% else %}
+        <details>
+            <summary>{{ archived|length }} archived</summary>
+            <ul class="cards">
+            {% for task in archived %}
+                <li class="card">
+                    <a class="card-title" href="{{ path('app_task_detail', {id: task.id}) }}">
+                        #{{ task.id }} — {{ task.title }}
+                    </a>
+                </li>
+            {% endfor %}
+            </ul>
+        </details>
+    {% endif %}
+</section>
+{% endblock %}
