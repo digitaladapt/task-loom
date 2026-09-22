@@ -35,12 +35,12 @@ use Symfony\Component\HttpClient\HttpClient;
  * live endpoint via environment variables, so CI (which has no network
  * credentials) never runs it:
  *
- *   TASKLOOM_E2E_LLM_BASE_URL=https://llm.devgnome.com \
- *   TASKLOOM_E2E_LLM_MODEL=K2Horizon-36B-A4B-InfinimindCreations \
+ *   TASKLOOM_E2E_LLM_BASE_URL=https://llm.example.com \
+ *   TASKLOOM_E2E_LLM_MODEL=Qwen3.5-4B \
  *   TASKLOOM_E2E_LLM_API_KEY=... \
  *   php vendor/bin/phpunit tests/Functional/RunEngine/RunEngineLiveE2eTest.php
  *
- * TASKLOOM_E2E_MCP_URL (default https://mcp.devgnome.com/mcp) must expose
+ * TASKLOOM_E2E_MCP_URL (default https://mcp.example.com/mcp) must expose
  * the dependency-free `echo` tool — the run drives a real tools/call
  * round-trip, no external weather APIs involved.
  */
@@ -79,7 +79,7 @@ final class RunEngineLiveE2eTest extends KernelTestCase
         $baseUrl = $this->e2e('TASKLOOM_E2E_LLM_BASE_URL');
         $model = $this->e2e('TASKLOOM_E2E_LLM_MODEL');
         $apiKey = $this->e2e('TASKLOOM_E2E_LLM_API_KEY');
-        $mcpUrl = $this->e2e('TASKLOOM_E2E_MCP_URL', 'https://mcp.devgnome.com/mcp');
+        $mcpUrl = $this->e2e('TASKLOOM_E2E_MCP_URL', 'https://mcp.example.com/mcp');
 
         $server = new McpServer('context-shuttle', $mcpUrl, ServerProtocol::Mcp);
         $this->em->persist($server);
