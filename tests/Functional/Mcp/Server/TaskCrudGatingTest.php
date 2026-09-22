@@ -120,6 +120,36 @@ final class TaskCrudGatingTest extends KernelTestCase
         $this->crud->update(999999, ['title' => 'x']);
     }
 
+    public function testUpdateSeesOutOfBandEnable(): void
+    {
+        // Regression (live incident): a long-lived serve process had already
+        // loaded a task into its identity map when the user flipped
+        // enabled=1 directly in the DB. findOrThrow() returned the cached
+        // entity (enabled=false), the update treated it as a draft, and the
+        // toolbox edit landed on the enabled row — the write gate was
+        // bypassed. findOrThrow must refresh so the gate reads the DB truth.
+        $task = $this->crud->create('Orig', 'B', TaskKind::Run, ToolboxMode::Tags, ['a'], null);
+
+        // Simulate the out-of-band DB flip: the row changes, but the
+        // already-managed entity in this process is stale.
+        $this->em()->getConnection()->executeStatement(
+            'UPDATE task SET enabled = 1 WHERE id = ?',
+            [$task->getId()],
+        );
+
+        $draft = $this->crud->update($task->getId(), ['title' => 'Should Not Touch Original']);
+
+        // SPEC §4.4: the enabled original must be untouched; the update must
+        // produce a disabled replacement draft instead.
+        $this->em()->refresh($task);
+        self::assertTrue($task->isEnabled());
+        self::assertSame('Orig', $task->getTitle());
+        self::assertNotSame($task->getId(), $draft->getId());
+        self::assertFalse($draft->isEnabled());
+        self::assertSame($task->getId(), $draft->getReplacementFor()?->getId());
+        self::assertSame('Should Not Touch Original', $draft->getTitle());
+    }
+
     public function testGetReturnsTaskAndListFiltersArchived(): void
     {
         $visible = $this->crud->create('Visible', 'B', TaskKind::Run, ToolboxMode::Tags, [], null);
