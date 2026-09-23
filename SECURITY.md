@@ -8,7 +8,7 @@
 
 ## Reporting a Vulnerability
 
-Report vulnerabilities privately to **security@devgnome.com** (or open a private
+Report vulnerabilities privately to **security@digitaladapt.com** (or open a private
 security advisory on the repository). Please include reproduction steps and affected
 versions. You will receive an acknowledgement within 48 hours and a status update at
 least weekly until resolution.

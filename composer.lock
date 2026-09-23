@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "76a43fc771038adcce8cb2f545f0ea26",
+    "content-hash": "56c5255ac447c2ec539fbccb72eb198c",
     "packages": [
         {
             "name": "composer/semver",
@@ -1698,7 +1698,7 @@
             "version": "3.3.99",
             "source": {
                 "type": "git",
-                "url": "https://code.devgnome.com/public/php-mcp-server.git",
+                "url": "https://code.digitaladapt.com/public/php-mcp-server.git",
                 "reference": "715b4622312c2ef4cda174483ed2670e274c9bf4"
             },
             "require": {
