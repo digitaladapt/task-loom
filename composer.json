@@ -101,6 +101,6 @@
     "repositories": [{
         "name": "php-mcp-server",
         "type": "vcs",
-        "url": "https://code.devgnome.com/public/php-mcp-server.git"
+        "url": "https://code.digitaladapt.com/public/php-mcp-server.git"
     }]
 }
