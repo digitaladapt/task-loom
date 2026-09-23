@@ -22,8 +22,10 @@ Successor to task-loop (Python) and task-weaver (PHP/Symfony). Design docs:
 - **Gated autonomy.** Agents may create and edit tasks via the task MCP tools, but every
   agent-authored change persists disabled; a human enables it. Enabled tasks are immutable
   records — updates create replacement drafts, never mutations.
-- **Local-first concurrency.** `LLM_MAX_CONCURRENCY` semaphore on LLM wire time; tasks
-  interleave naturally during tool I/O.
+- **Local-first concurrency.** `TASKLOOM_LLM_MAX_CONCURRENCY` is a semaphore on LLM
+  wire time: the run engine is turn-based (one LLM request = one queued message), and
+  `N` `llm` workers mean at most `N` requests in flight. Tasks interleave naturally
+  during tool I/O — see "Concurrency" below.
 
 ## Quick start
 
@@ -48,6 +50,43 @@ docker compose -f docs/examples/compose.yaml run --rm taskloom \
 # admin UI: http://localhost:8080
 ```
 
+The compose example starts the app plus `worker-llm` / `worker-tools`
+Messenger workers; scale the llm lane to your concurrency setting:
+`docker compose ... up -d --scale worker-llm=2`.
+
+## Concurrency
+
+The run engine runs as **turns on two Messenger lanes** (`config/packages/messenger.yaml`),
+backed by the Doctrine transport (one shared `messenger_messages` table, lanes selected
+by `queue_name`):
+
+- `llm` — **one LLM request per message.** This is the semaphore unit: each worker
+  holds at most one request on the wire, so the number of `llm` workers *is*
+  `TASKLOOM_LLM_MAX_CONCURRENCY`. Re-enqueued turns go to the back of the lane, so
+  FIFO between runs — a long multi-step task never starves others.
+- `tools` — executes the pending tool calls of an exchange. A slow tool never blocks
+  the `llm` lane, and runs release their LLM slot while on tool I/O.
+- `failed` — messages a worker could not process (infrastructure errors); inspect with
+  `messenger:failed:show`, requeue with `messenger:failed:retry`. Classified run
+  failures never land here — they are recorded in the run's ledger (the engine owns all
+  retry semantics; the transport's own retry is disabled).
+
+Run a task through the lanes:
+
+```bash
+php bin/console app:run:now <task-id> --queue     # enqueue
+php bin/console messenger:consume llm tools      # one llm worker + one tools worker
+# N workers for concurrency N (e.g. 1 on a single local GPU):
+php bin/console messenger:consume llm            # start N of these, plus one `tools`
+```
+
+Reliability properties, by construction: a turn's checkpoint and its successor message
+commit in one database transaction (no "committed but not dispatched" window); a
+duplicate or late delivery is dropped against committed state; a dead worker's turn is
+re-covered by transport redelivery or, for messages lost outside the transport's sight
+(purged queue, restored backup), by `php bin/console app:run:requeue`. Run state lives
+in the `run` row + checkpoint, so any worker can pick up any turn.
+
 ## Configuration
 
 See [`.env.example`](.env.example) — every variable documented
@@ -56,9 +95,10 @@ inline. Key knobs:
 | Variable | Purpose |
 |---|---|
 | `TASKLOOM_LLM_BASE_URL` / `TASKLOOM_LLM_MODEL` | OpenAI-compatible endpoint (Ollama / vLLM / llama.cpp) |
-| `TASKLOOM_LLM_MAX_CONCURRENCY` | Concurrent LLM requests (1 on a single local GPU) |
+| `TASKLOOM_LLM_MAX_CONCURRENCY` | Concurrent LLM requests — run this many `messenger:consume llm` workers (1 on a single local GPU) |
 | `TASKLOOM_STEP_BUDGET` | Max tool-call exchanges per run (fail closed) |
 | `TASKLOOM_CONTEXT_LIMIT` | Context window for the fail-closed token budget |
+| `MESSENGER_TRANSPORT_DSN` | Doctrine-backed lane table; `auto_setup=0` — create it with `doctrine:migrations:migrate` |
 
 ## Development
 

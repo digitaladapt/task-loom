@@ -10,23 +10,73 @@ use App\Entity\ErrorClass;
 use App\Entity\Run;
 use App\Entity\RunEvent;
 use App\Entity\RunEventType;
+use App\Entity\RunStatus;
 use App\Entity\Task;
 use App\Entity\Tool;
 use App\Llm\LlmClientInterface;
 use App\Llm\LlmRequestException;
+use App\Message\LlmTurnMessage;
+use App\Message\ToolTurnMessage;
 use App\Repository\RunRepository;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\EntityNotFoundException;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\Messenger\MessageBusInterface;
 
 /**
- * The run loop (SPEC §3, §5): compile prompt → LLM → (validate → execute →
- * append results) → checkpoint → repeat, until a justified completion
- * declaration or a budget failure. Every exchange is a typed RunEvent row
- * in the attempt ledger (§5.3), persisted before the next LLM request
- * (checkpoint, §5.5).
+ * The run engine (SPEC §3, §5, §6): compile prompt → LLM → (validate →
+ * execute → append results) → checkpoint → repeat, until a justified
+ * completion declaration or a budget failure. Every exchange is a typed
+ * RunEvent row in the attempt ledger (§5.3), persisted before the next LLM
+ * request (checkpoint, §5.5).
+ *
+ * The engine is TURN-BASED: one LLM exchange is two deliverable units — an
+ * LLM turn (one model request) and a tool turn (the calls of that
+ * exchange). Each turn is a short-lived call that reloads the run's whole
+ * state from the row (checkpoint + snapshot), so a fresh worker is never
+ * assumed (§6). run() drives the same turns inline (the synchronous path
+ * behind app:run:now); start() + the Messenger handlers drive them across
+ * two lanes, where the number of `llm` workers IS the
+ * TASKLOOM_LLM_MAX_CONCURRENCY semaphore.
+ *
+ * Delivery contract — the part that makes at-least-once safe:
+ *
+ *   1. A turn's state commit and its successor message are written in the
+ *      SAME database transaction (`doctrine://default` puts the transport
+ *      table on the connection this engine flushes to). The invariant that
+ *      buys us: the committed state has advanced ⟺ the next turn's message
+ *      exists. There is no "committed but not dispatched" window for a
+ *      crash to fall into.
+ *   2. A delivered turn is therefore judged by state alone: it executes
+ *      when the state says its turn is still owed, and is dropped as stale
+ *      otherwise. A duplicate delivery (redelivery after a worker died
+ *      post-commit, a manual requeue racing a live carrier) cannot fork
+ *      the run or spawn phantom messages.
+ *   3. Turns additionally take an EXECUTION CLAIM on the run row — one
+ *      atomic UPDATE (the claim predicate is the mutex, lock_version the
+ *      ownership token). The decision state is re-read under the claim, so
+ *      two carriers of the same turn cannot execute it concurrently; the
+ *      loser drops. A claim abandoned by a dead worker is taken over after
+ *      CLAIM_STALE_SECONDS (below the lanes' redeliver_timeout).
+ *
+ * For a message lost in ways the transport cannot see (queue table purged,
+ * database restored from a backup), app:run:requeue re-derives the owed
+ * turn from the same state and dispatches it — safe at any time, because
+ * (2) makes an extra delivery a no-op.
  */
 final class RunEngine
 {
+    /**
+     * How long an execution claim is honored before another worker may take
+     * it over (a dead worker must not wedge a run forever). Bounds the
+     * worst-case turn duration by construction: keep it comfortably above
+     * any legitimate single turn (one LLM request ≤ TASKLOOM_LLM_TIMEOUT;
+     * one tool turn ≤ its calls' timeouts × attempts) and comfortably below
+     * the transport lanes' redeliver_timeout (7200s), so a redelivered
+     * message can always take over a claim its dead owner abandoned.
+     */
+    private const int CLAIM_STALE_SECONDS = 3600;
+
     /**
      * @param array<string, int> $budgets step_budget, tool_retries, circuit_breaker
      */
@@ -40,59 +90,34 @@ final class RunEngine
         private readonly EntityManagerInterface $em,
         private readonly LoggerInterface $logger,
         private readonly array $budgets = [],
+        private readonly ?MessageBusInterface $bus = null,
     ) {
     }
 
     /**
-     * Run a task to completion (v1: synchronous, one run at a time —
-     * the LLM_MAX_CONCURRENCY semaphore is chunk 4's Messenger work).
+     * Run a task to completion, synchronously, driving the turn cores
+     * inline. The command path behind app:run:now (without --queue).
      */
     public function run(Task $task): Run
     {
-        // Resolve + freeze the toolbox before anything else (SPEC §4.1).
-        $tools = $this->resolver->resolve($task);
-
-        $toolMap = [];
-        foreach ($tools as $tool) {
-            $toolMap[$tool->getName()] = $tool;
-        }
-
-        $promptHead = $this->prompts->compile($task, $tools);
-        $openAiTools = $this->prompts->toolsToOpenAi($tools);
-
-        $run = new Run($task);
-        $run->setToolboxSnapshot(array_map(
-            static fn (Tool $t): array => [
-                'server' => $t->getServer()->getName(),
-                'tool' => $t->getName(),
-                'schema' => $t->getSchema(),
-            ],
-            $tools,
-        ));
-        $run->markStarted();
-        $this->runs->save($run);
-
-        $state = new LoopState(
-            stepBudget: $this->budgets['step_budget'] ?? 50,
-            toolRetries: $this->budgets['tool_retries'] ?? 2,
-            circuitBreakerThreshold: $this->budgets['circuit_breaker'] ?? 3,
-        );
+        $run = $this->begin($task);
+        $state = $this->stateFor($run);
 
         try {
-            $this->loop($run, $task, $promptHead, $openAiTools, $toolMap, $state);
-        } catch (ContextExhaustedException $e) {
-            $run->markFailed($e->errorClass);
-            $this->appendEvent($run, RunEventType::Failure, ['reason' => $e->getMessage()], errorClass: $e->errorClass);
-        } catch (LlmRequestException $e) {
-            $run->markFailed($e->errorClass);
-            $this->appendEvent($run, RunEventType::Failure, ['reason' => $e->getMessage()], errorClass: $e->errorClass);
-        } catch (ToolExecutionException $e) {
-            $run->markFailed($e->errorClass);
-            $this->appendEvent($run, RunEventType::Failure, ['reason' => $e->getMessage()], errorClass: $e->errorClass);
-        } catch (RunTerminatedException $e) {
-            // Circuit breaker already marked the run needs_attention and
-            // wrote its event; the run is deliberately stopped, not failed.
+            while (true) {
+                $result = $this->performLlmTurn($run, $state, $state->step + 1, async: false);
+                if (RunTurnResult::AwaitToolTurn !== $result) {
+                    break;
+                }
+
+                $result = $this->performToolTurn($run, $state, async: false);
+                if (RunTurnResult::AwaitLlmTurn !== $result) {
+                    break;
+                }
+            }
         } catch (\Throwable $e) {
+            // Unclassified escape (the turn cores classify their own
+            // failures): fail the run loudly rather than leave it running.
             $run->markFailed(ErrorClass::Unknown);
             $this->appendEvent($run, RunEventType::Failure, ['reason' => $e->getMessage()], errorClass: ErrorClass::Unknown);
         }
@@ -103,95 +128,335 @@ final class RunEngine
     }
 
     /**
-     * @param array{system: string, user: string} $promptHead
-     * @param list<array<string, mixed>>          $openAiTools
-     * @param array<string, Tool>                 $toolMap
+     * Create a run for the async engine: frozen toolbox snapshot, initial
+     * checkpoint (budgets + compiled prompt head), status `queued`. The
+     * caller dispatches the first LlmTurnMessage (see nextTurnMessage()); a
+     * queued run is a task waiting for the `llm` lane — the persisted,
+     * FIFO-ordered wait that survives restarts (SPEC §6).
      */
-    private function loop(
-        Run $run,
-        Task $task,
-        array $promptHead,
-        array $openAiTools,
-        array $toolMap,
-        LoopState $state,
-    ): void {
-        while (true) {
-            if ($state->step >= $state->stepBudget) {
+    public function start(Task $task): Run
+    {
+        return $this->begin($task);
+    }
+
+    /**
+     * The message that advances this run, or null when it is terminal and
+     * needs nothing — derived from committed state only. Used by
+     * app:run:now --queue for the first turn and by app:run:requeue for
+     * recovery after a message was lost.
+     */
+    public function nextTurnMessage(Run $run): LlmTurnMessage|ToolTurnMessage|null
+    {
+        if (!\in_array($run->getStatus(), [RunStatus::Queued, RunStatus::Running], true)) {
+            return null;
+        }
+
+        $state = $this->stateFor($run);
+
+        if (null !== $state->pendingToolTurn) {
+            return new ToolTurnMessage((int) $run->getId(), $state->pendingToolTurn->step);
+        }
+
+        return new LlmTurnMessage((int) $run->getId(), $state->step + 1);
+    }
+
+    /**
+     * One LLM turn of a run, from a queue delivery: takes the claim, judges
+     * the delivery against committed state under the claim, and executes
+     * only when this step's LLM turn is still owed. Everything else — a
+     * duplicate, a late redelivery, a terminal run — is dropped as stale.
+     *
+     * When the turn requests tools, the pending tool turn and the tool
+     * lane's message commit together; when it completes the run, nothing
+     * follows.
+     */
+    public function llmTurn(int $runId, int $step): RunTurnResult
+    {
+        $run = $this->runs->find($runId);
+        if (!$run instanceof Run) {
+            $this->logger->debug('Dropping LlmTurnMessage: run {run} no longer exists.', ['run' => $runId]);
+
+            return RunTurnResult::Stale;
+        }
+
+        // No pre-claim checks: status and step are judged under the claim,
+        // on state as committed — not on a snapshot that may already be
+        // stale by the time the claim is won.
+        $token = $this->claim($run);
+        if (null === $token) {
+            $this->logger->debug('Run {run}: LlmTurnMessage step {step} lost the claim race; dropping.', ['run' => $runId, 'step' => $step]);
+
+            return RunTurnResult::Stale;
+        }
+
+        try {
+            if (!$this->refresh($run)) {
+                return RunTurnResult::Stale;
+            }
+
+            if (!\in_array($run->getStatus(), [RunStatus::Queued, RunStatus::Running], true)) {
+                $this->logger->debug('Run {run}: dropping LlmTurnMessage (status {status} under claim).', ['run' => $runId, 'status' => $run->getStatus()->value]);
+
+                return RunTurnResult::Stale;
+            }
+
+            $state = $this->stateFor($run);
+
+            if (null !== $state->pendingToolTurn) {
+                // The LLM turn already committed — and with it the tool
+                // turn's message. Nothing is owed by this delivery.
+                return RunTurnResult::Stale;
+            }
+
+            if ($step !== $state->step + 1) {
+                $this->logger->debug('Run {run}: dropping LlmTurnMessage step {step} (run step {current}).', ['run' => $runId, 'step' => $step, 'current' => $state->step]);
+
+                return RunTurnResult::Stale;
+            }
+
+            return $this->performLlmTurn($run, $state, $step, async: true, claimToken: $token);
+        } finally {
+            $this->release($run, $token);
+        }
+    }
+
+    /**
+     * One tool turn of a run, from a queue delivery: executes the calls the
+     * model requested (resuming at the persisted position if a previous
+     * worker died mid-turn) and commits the exchange together with the next
+     * LLM turn's message. A delivery with no pending turn is stale — the
+     * pending checkpoint and the lane message are committed atomically, so
+     * "no pending turn" means a successor already exists (or the run moved
+     * past it / ended).
+     */
+    public function toolTurn(int $runId, int $step): RunTurnResult
+    {
+        $run = $this->runs->find($runId);
+        if (!$run instanceof Run) {
+            $this->logger->debug('Dropping ToolTurnMessage: run {run} no longer exists.', ['run' => $runId]);
+
+            return RunTurnResult::Stale;
+        }
+
+        $token = $this->claim($run);
+        if (null === $token) {
+            $this->logger->debug('Run {run}: ToolTurnMessage step {step} lost the claim race; dropping.', ['run' => $runId, 'step' => $step]);
+
+            return RunTurnResult::Stale;
+        }
+
+        try {
+            if (!$this->refresh($run)) {
+                return RunTurnResult::Stale;
+            }
+
+            if (RunStatus::Running !== $run->getStatus()) {
+                $this->logger->debug('Run {run}: dropping ToolTurnMessage (status {status} under claim).', ['run' => $runId, 'status' => $run->getStatus()->value]);
+
+                return RunTurnResult::Stale;
+            }
+
+            $state = $this->stateFor($run);
+
+            if (null === $state->pendingToolTurn || $state->pendingToolTurn->step !== $step) {
+                $this->logger->debug('Run {run}: dropping ToolTurnMessage step {step} (nothing pending for it).', ['run' => $runId, 'step' => $step]);
+
+                return RunTurnResult::Stale;
+            }
+
+            return $this->performToolTurn($run, $state, async: true, claimToken: $token);
+        } finally {
+            $this->release($run, $token);
+        }
+    }
+
+    /**
+     * Create the run with its frozen constitution (SPEC §4.1): resolved
+     * toolbox snapshot (enriched, so no turn ever needs the catalog) and
+     * the initial checkpoint — budgets, the compiled prompt head, empty
+     * window. Saved as `queued`; it becomes `running` when its first LLM
+     * turn actually starts.
+     */
+    private function begin(Task $task): Run
+    {
+        $tools = $this->resolver->resolve($task);
+
+        $run = new Run($task);
+        $run->setToolboxSnapshot(ToolboxSnapshot::fromTools($tools));
+
+        $state = new LoopState(
+            stepBudget: $this->budgets['step_budget'] ?? 50,
+            toolRetries: $this->budgets['tool_retries'] ?? 2,
+            circuitBreakerThreshold: $this->budgets['circuit_breaker'] ?? 3,
+            promptHead: $this->prompts->compile($task, $tools),
+        );
+        $run->setCheckpoint($state->toCheckpoint());
+
+        $this->runs->save($run);
+
+        return $run;
+    }
+
+    /**
+     * One LLM request (SPEC §5.4): request event → the wire → response
+     * event → either terminal (completion / malformed) or a pending tool
+     * turn whose lane message is committed with the checkpoint. In async
+     * mode the commit and the tool lane's enqueue are one transaction: the
+     * response, the pending state, and the successor message live or die
+     * together.
+     */
+    private function performLlmTurn(Run $run, LoopState $state, int $step, bool $async, ?int $claimToken = null): RunTurnResult
+    {
+        if ($step > $state->stepBudget) {
+            $run->markIncomplete();
+            $this->appendEvent(
+                $run,
+                RunEventType::Failure,
+                ['reason' => \sprintf('step budget exhausted: %d exchanges, no completion declaration', $state->stepBudget)],
+                errorClass: ErrorClass::BudgetExceeded,
+            );
+            $this->em->flush();
+            $this->logger->warning('Run {run}: step budget exhausted.', ['run' => $run->getId()]);
+
+            return RunTurnResult::Done;
+        }
+
+        if (RunStatus::Queued === $run->getStatus()) {
+            // First turn of a queued run: the wait is over, the wire slot
+            // has been entered. Flushed with the request event below.
+            $run->markStarted();
+        }
+
+        $state->step = $step;
+        $run->incrementStepCount(); // requests issued — counts a crash-redelivered request honestly
+
+        $this->appendEvent($run, RunEventType::LlmRequest, [
+            'step' => $step,
+            'exchangesSoFar' => \count($state->exchanges),
+        ]);
+        $this->em->flush();
+
+        // The toolbox comes from the run's snapshot, never the catalog: the
+        // run's constitution does not move (SPEC §4.1), even mid-run, even
+        // if the tool was renamed, re-schematized, or deleted in between.
+        $tools = ToolboxSnapshot::toTools($run->getToolboxSnapshot());
+        $state->promptHead ??= $this->prompts->compile($run->getTask(), $tools);
+
+        try {
+            $messages = $this->context->buildMessages($state->promptHead, $state->exchanges);
+            $response = $this->llm->chat($messages, $this->prompts->toolsToOpenAi($tools));
+        } catch (ContextExhaustedException $e) {
+            return $this->failRun($run, $e->errorClass, $e->getMessage());
+        } catch (LlmRequestException $e) {
+            return $this->failRun($run, $e->errorClass, $e->getMessage());
+        }
+
+        $responsePayload = [
+            'step' => $step,
+            'finishReason' => $response->finishReason,
+            'content' => $response->content,
+            'reasoningContent' => $response->reasoningContent,
+            'usage' => $response->usage,
+        ];
+
+        if (!$response->wantsToolCall()) {
+            // Terminal message: completion must BE the result (SPEC §5.4).
+            // Response event and terminal status commit together.
+            $this->appendEvent($run, RunEventType::LlmResponse, $responsePayload, durationMs: $response->durationMs);
+
+            if (null !== $response->content && '' !== trim($response->content)) {
+                $run->markSucceeded();
+                $this->appendEvent($run, RunEventType::Completion, ['result' => $response->content]);
+            } else {
                 $run->markIncomplete();
                 $this->appendEvent(
                     $run,
                     RunEventType::Failure,
-                    ['reason' => \sprintf('step budget exhausted: %d exchanges, no completion declaration', $state->stepBudget)],
-                    errorClass: ErrorClass::BudgetExceeded,
+                    ['reason' => 'terminal message with no content — no completion declaration'],
+                    errorClass: ErrorClass::LlmMalformedResponse,
                 );
-                $this->logger->warning('Run {run}: step budget exhausted.', ['run' => $run->getId()]);
-
-                return;
             }
-
-            ++$state->step;
-            $run->incrementStepCount();
-
-            $this->appendEvent($run, RunEventType::LlmRequest, [
-                'step' => $state->step,
-                'exchangesSoFar' => \count($state->exchanges),
-            ]);
             $this->em->flush();
 
-            $messages = $this->context->buildMessages($promptHead, $state->exchanges);
-            $response = $this->llm->chat($messages, $openAiTools);
+            return RunTurnResult::Done;
+        }
 
-            $this->appendEvent(
-                $run,
-                RunEventType::LlmResponse,
-                [
-                    'step' => $state->step,
-                    'finishReason' => $response->finishReason,
-                    'content' => $response->content,
-                    'reasoningContent' => $response->reasoningContent,
-                    'usage' => $response->usage,
-                ],
-                durationMs: $response->durationMs,
+        // Tool calls: the work item is persisted — and, when async, the
+        // tool lane's message enqueued — in one commit. A worker that dies
+        // anywhere before this commit leaves no trace and the redelivered
+        // LLM turn re-executes; after it, the tool turn has a carrier.
+        $this->commitTurn(function () use ($run, $state, $step, $response, $responsePayload): void {
+            $this->appendEvent($run, RunEventType::LlmResponse, $responsePayload, durationMs: $response->durationMs);
+            $state->pendingToolTurn = new PendingToolTurn(
+                step: $step,
+                assistantContent: $response->content,
+                calls: $response->getToolCalls(),
             );
+            $run->setCheckpoint($state->toCheckpoint());
             $this->em->flush();
+        }, $async ? new ToolTurnMessage((int) $run->getId(), $step) : null, $async ? $run : null, $async ? $claimToken : null);
 
-            if (!$response->wantsToolCall()) {
-                // Terminal message: completion must BE the result (SPEC §5.4).
-                if (null !== $response->content && '' !== trim($response->content)) {
-                    $run->markSucceeded();
-                    $this->appendEvent($run, RunEventType::Completion, ['result' => $response->content]);
-                } else {
-                    $run->markIncomplete();
-                    $this->appendEvent(
-                        $run,
-                        RunEventType::Failure,
-                        ['reason' => 'terminal message with no content — no completion declaration'],
-                        errorClass: ErrorClass::LlmMalformedResponse,
-                    );
-                }
+        return RunTurnResult::AwaitToolTurn;
+    }
+
+    /**
+     * One tool turn: run every pending call in order, each a validate →
+     * dispatch → retry-with-feedback cycle (SPEC §5.1, §5.2). Every
+     * completed call is a durable point (result + resume position written
+     * back first), so a crash re-runs at most the one call that was in
+     * flight. Completion appends the exchange, checkpoints — and, when
+     * async, enqueues the next LLM turn — in one commit.
+     */
+    private function performToolTurn(Run $run, LoopState $state, bool $async, ?int $claimToken = null): RunTurnResult
+    {
+        $pending = $state->pendingToolTurn;
+        if (null === $pending) {
+            return RunTurnResult::Done; // defensive; callers only invoke with a pending turn
+        }
+
+        $toolMap = [];
+        foreach (ToolboxSnapshot::toTools($run->getToolboxSnapshot()) as $tool) {
+            $toolMap[$tool->getName()] = $tool;
+        }
+
+        try {
+            while ($pending->nextIndex < \count($pending->calls)) {
+                $call = $pending->calls[$pending->nextIndex];
+                $pending->results[] = $this->executeToolCall($run, $toolMap, $state, $call);
+                ++$pending->nextIndex;
+
+                // Durable point: the resume position moves with every
+                // completed call. Worst case after a crash is one
+                // in-flight call re-executed — not the whole turn.
+                $run->setCheckpoint($state->toCheckpoint());
                 $this->em->flush();
-
-                return;
             }
+        } catch (RunTerminatedException) {
+            // Circuit breaker tripped: the run is needs_attention and the
+            // chain deliberately stops here (no next turn is dispatched).
+            return RunTurnResult::Done;
+        }
 
-            $toolResults = [];
-            foreach ($response->getToolCalls() as $call) {
-                $toolResults[] = $this->executeToolCall($run, $toolMap, $state, $call);
-            }
-
+        // The checkpoint event says an exchange is complete; the exchange
+        // itself and the next LLM turn's message commit together.
+        $nextStep = $state->step + 1;
+        $this->commitTurn(function () use ($run, $state, $pending): void {
             $state->exchanges[] = [
                 'assistant' => [
-                    'content' => $response->content,
-                    'toolCalls' => $response->getToolCalls(),
+                    'content' => $pending->assistantContent,
+                    'toolCalls' => $pending->calls,
                 ],
-                'toolResults' => $toolResults,
+                'toolResults' => $pending->results,
             ];
+            $state->pendingToolTurn = null;
 
             // Checkpoint: every exchange persisted before the next request (§5.5).
-            $run->setCheckpoint(['step' => $state->step]);
+            $run->setCheckpoint($state->toCheckpoint());
             $this->appendEvent($run, RunEventType::Checkpoint, ['step' => $state->step]);
             $this->em->flush();
-        }
+        }, $async ? new LlmTurnMessage((int) $run->getId(), $nextStep) : null);
+
+        return RunTurnResult::AwaitLlmTurn;
     }
 
     /**
@@ -313,6 +578,180 @@ final class RunEngine
 
             return ['toolCallId' => $callId, 'content' => $cappedContent];
         }
+    }
+
+    /**
+     * The single commit point of a turn: writes the final state, and — when
+     * a next message is given — enqueues it in the SAME transaction. The
+     * transport shares this engine's Doctrine connection (doctrine://default),
+     * so the INSERT joins the flush: committed state and successor message
+     * are one atomic step (§6), and the claim release rides along with them
+     * (no window where the state is committed but the claim is still held —
+     * a successor delivered in that window would be dropped against a dead
+     * owner's claim). Without a next message (sync mode, terminal outcomes)
+     * this is a plain flush of $finalize.
+     *
+     * @param callable(): void $finalize     in-memory state changes + em flush
+     * @param Run|null         $releaseRun   run whose claim to clear
+     * @param int|null         $releaseToken claim ownership token
+     */
+    private function commitTurn(callable $finalize, ?object $nextTurn, ?Run $releaseRun = null, ?int $releaseToken = null): void
+    {
+        if (null === $nextTurn) {
+            $finalize();
+
+            return;
+        }
+
+        $connection = $this->em->getConnection();
+        $ownsTransaction = !$connection->isTransactionActive();
+        if ($ownsTransaction) {
+            $connection->beginTransaction();
+        }
+
+        try {
+            $finalize();
+            $this->enqueue($nextTurn);
+
+            // The claim clears in the same commit: successor exists ⟺
+            // owner has let go. (The finally-release in the turn entry
+            // points is then an idempotent no-op on this path.)
+            if (null !== $releaseRun && null !== $releaseToken) {
+                $this->release($releaseRun, $releaseToken);
+            }
+
+            if ($ownsTransaction) {
+                $connection->commit();
+            }
+        } catch (\Throwable $e) {
+            if ($ownsTransaction && $connection->isTransactionActive()) {
+                $connection->rollBack();
+                $this->em->clear(); // torn entities must not leak into the next turn
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
+     * Enqueue the successor turn. Only reached in async mode — the MessageBus
+     * is a constructor dependency precisely so the enqueue is available
+     * inside commitTurn()'s transaction.
+     */
+    private function enqueue(object $message): void
+    {
+        $bus = $this->bus ?? throw new \LogicException('RunEngine has no message bus configured — async turn dispatch requires it.');
+
+        $bus->dispatch($message);
+    }
+
+    /**
+     * Rebuild the loop state for a run: the checkpoint first (the run's own
+     * history wins — including its budgets), configured values only as
+     * fallback for runs that predate checkpointed budgets.
+     */
+    private function stateFor(Run $run): LoopState
+    {
+        return LoopState::fromCheckpoint(
+            $run->getCheckpoint(),
+            $this->budgets['step_budget'] ?? 50,
+            $this->budgets['tool_retries'] ?? 2,
+            $this->budgets['circuit_breaker'] ?? 3,
+        );
+    }
+
+    /**
+     * Re-read the run under the claim: the execute / drop decision must be
+     * made on the state as committed, not on what was loaded before the
+     * claim was won — another worker may have advanced the run in between
+     * (that duplicate-delivery race is exactly what the claim adjudicates).
+     * Also re-checks existence: the row may have been deleted concurrently.
+     *
+     * @return bool false when the run no longer exists
+     */
+    private function refresh(Run $run): bool
+    {
+        try {
+            $this->em->refresh($run);
+
+            return true;
+        } catch (EntityNotFoundException) {
+            return false;
+        }
+    }
+
+    /**
+     * Take the execution claim on the run row for one turn: one atomic
+     * UPDATE whose WHERE clause IS the mutex — it succeeds only when no
+     * live claim is held (a claim abandoned for CLAIM_STALE_SECONDS may be
+     * taken over). lock_version is the ownership token handed back here;
+     * release() clears the claim only while the token still matches, so a
+     * worker whose claim was taken over cannot clear its successor's.
+     *
+     * Written via raw SQL so entity flushes cannot interact with it: the
+     * entity only ever reads lock_version/claimed_at, and Doctrine writes
+     * changed fields only, so an ORM flush can never clobber them. The
+     * token is read back after the UPDATE; until the fresh claimed_at goes
+     * stale (an hour), nobody else may alter either column, so the read is
+     * race-free by construction.
+     *
+     * @return int|null the claim token, or null when another worker holds a
+     *                  live claim (the delivery must drop)
+     */
+    private function claim(Run $run): ?int
+    {
+        $id = $run->getId();
+        if (null === $id) {
+            return null;
+        }
+
+        $now = time();
+
+        $updated = $this->em->getConnection()->executeStatement(
+            'UPDATE run SET lock_version = lock_version + 1, claimed_at = :now WHERE id = :id AND (claimed_at IS NULL OR claimed_at <= :staleBefore)',
+            [
+                'now' => $now,
+                'id' => $id,
+                'staleBefore' => $now - self::CLAIM_STALE_SECONDS,
+            ],
+        );
+
+        if (1 !== $updated) {
+            return null;
+        }
+
+        $token = $this->em->getConnection()->fetchOne('SELECT lock_version FROM run WHERE id = :id', ['id' => $id]);
+
+        return \is_numeric($token) ? (int) $token : null;
+    }
+
+    /**
+     * Release the claim — only if it is still ours (a takeover by another
+     * worker incremented the version and must not be cleared).
+     */
+    private function release(Run $run, int $token): void
+    {
+        $id = $run->getId();
+        if (null === $id) {
+            return;
+        }
+
+        $this->em->getConnection()->executeStatement(
+            'UPDATE run SET claimed_at = NULL WHERE id = :id AND lock_version = :token',
+            ['id' => $id, 'token' => $token],
+        );
+    }
+
+    /**
+     * Terminal classified failure (LLM/context), shared by the turn cores.
+     */
+    private function failRun(Run $run, ErrorClass $errorClass, string $reason): RunTurnResult
+    {
+        $run->markFailed($errorClass);
+        $this->appendEvent($run, RunEventType::Failure, ['reason' => $reason], errorClass: $errorClass);
+        $this->em->flush();
+
+        return RunTurnResult::Done;
     }
 
     private function tripCircuitBreaker(Run $run, string $toolName, ErrorClass $errorClass): void

@@ -39,6 +39,21 @@ final class RunRepository extends ServiceEntityRepository
     }
 
     /**
+     * Every active run (queued or running), oldest first: the recovery pass
+     * behind app:run:requeue re-dispatches the turn each one is owed.
+     *
+     * @return list<Run>
+     */
+    public function findActive(): array
+    {
+        return $this->createQueryBuilder('r')
+            ->where('r.status IN (:statuses)')
+            ->setParameter('statuses', [RunStatus::Queued, RunStatus::Running])
+            ->orderBy('r.id', 'ASC')
+            ->getQuery()->getResult();
+    }
+
+    /**
      * The attention queue (SPEC §8): needs_attention and incomplete runs,
      * newest first.
      *
