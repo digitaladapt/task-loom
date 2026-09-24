@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace App\Admin;
 
 use App\Entity\Task;
+use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
+use App\StepModel\StepGraphException;
+use App\StepModel\StepGraphValidator;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
@@ -18,11 +21,18 @@ use Doctrine\ORM\EntityManagerInterface;
  *
  * Every action is one atomic flush: lifecycle decisions must never land
  * half-applied (SPEC §4.4's approve is an atomic swap of two rows).
+ *
+ * Enable and approve are also the step-graph enforcement gate (SPEC
+ * §13.2): a task whose step DAG is invalid — a cycle, a self-dependency,
+ * an edge to another task's step — is refused before its rows move. An
+ * invalid graph never becomes an enabled task.
  */
 final class TaskAdminService
 {
     public function __construct(
         private readonly TaskRepository $tasks,
+        private readonly StepRepository $steps,
+        private readonly StepGraphValidator $stepGraph,
         private readonly EntityManagerInterface $em,
     ) {
     }
@@ -41,6 +51,8 @@ final class TaskAdminService
         if (null !== $task->getReplacementFor()) {
             throw new TaskLifecycleException(\sprintf('Task %d is a replacement draft — approve it instead (SPEC §4.4).', $taskId));
         }
+
+        $this->guardStepGraph($task, 'enable');
 
         try {
             $task->enable();
@@ -63,6 +75,8 @@ final class TaskAdminService
     public function approveTask(int $taskId): Task
     {
         $task = $this->findOrThrow($taskId);
+
+        $this->guardStepGraph($task, 'approve');
 
         try {
             $task->approve();
@@ -119,6 +133,20 @@ final class TaskAdminService
         $this->em->flush();
 
         return $task;
+    }
+
+    /**
+     * Step-graph enforcement gate (SPEC §13.2): an invalid graph never
+     * becomes an enabled task. Runs before the enable/approve flip; a
+     * failure leaves the rows untouched (nothing was flushed yet).
+     */
+    private function guardStepGraph(Task $task, string $action): void
+    {
+        try {
+            $this->stepGraph->assertValid($this->steps->findForTask($task));
+        } catch (StepGraphException $e) {
+            throw new TaskLifecycleException(\sprintf('Cannot %s task %d — %s', $action, $task->getId(), $e->getMessage()), 0, $e);
+        }
     }
 
     private function findOrThrow(int $taskId): Task
