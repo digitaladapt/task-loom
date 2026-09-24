@@ -37,9 +37,11 @@ class Run
 
     /**
      * The resolved tools, frozen at run start (SPEC §4.1): a list of
-     * [server, tool, schema] tuples.
+     * {server, serverUrl, protocol, tool, description, schema} tuples —
+     * everything a fresh worker needs to rebuild the toolbox for a turn
+     * without consulting the catalog (see App\RunEngine\ToolboxSnapshot).
      *
-     * @var list<array{server: string, tool: string, schema: array<string, mixed>}>
+     * @var list<array<string, mixed>>
      */
     #[ORM\Column(type: 'json')]
     private array $toolboxSnapshot = [];
@@ -61,6 +63,25 @@ class Run
 
     #[ORM\Column]
     private int $stepCount = 0;
+
+    /**
+     * Execution-claim token (SPEC §6): incremented by the engine's
+     * claimRun() when a worker takes ownership of a turn, so a duplicate
+     * delivery (at-least-once transport, repair dispatch) can detect that
+     * an owner is already at work and drop. Written via raw SQL — never
+     * through the ORM — so entity flushes cannot accidentally release or
+     * bump it.
+     */
+    #[ORM\Column(options: ['default' => 0])]
+    private int $lockVersion = 0;
+
+    /**
+     * Unix time the current owner took the claim, or null when free. A
+     * claim is only honored for CLAIM_STALE_SECONDS (see RunEngine): a
+     * worker that dies mid-turn cannot leave the run claimed forever.
+     */
+    #[ORM\Column(nullable: true)]
+    private ?int $claimedAt = null; // @phpstan-ignore property.unusedType (Doctrine hydrates the raw-SQL-written value)
 
     /** Terminal error class, when the run failed (SPEC §5.3). */
     #[ORM\Column(length: 32, nullable: true, enumType: ErrorClass::class)]
@@ -96,14 +117,14 @@ class Run
         $this->status = $status;
     }
 
-    /** @return list<array{server: string, tool: string, schema: array<string, mixed>}> */
+    /** @return list<array<string, mixed>> */
     public function getToolboxSnapshot(): array
     {
         return $this->toolboxSnapshot;
     }
 
     /**
-     * @param list<array{server: string, tool: string, schema: array<string, mixed>}> $tools
+     * @param list<array<string, mixed>> $tools
      */
     public function setToolboxSnapshot(array $tools): void
     {
@@ -143,6 +164,20 @@ class Run
     public function getStepCount(): int
     {
         return $this->stepCount;
+    }
+
+    /**
+     * The claim token as of the last load — what a worker presents to
+     * claimRun() to prove nobody else has moved the run since (§6).
+     */
+    public function getLockVersion(): int
+    {
+        return $this->lockVersion;
+    }
+
+    public function getClaimedAt(): ?int
+    {
+        return $this->claimedAt;
     }
 
     public function incrementStepCount(): void

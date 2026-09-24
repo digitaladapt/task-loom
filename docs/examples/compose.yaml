@@ -1,8 +1,9 @@
-# TaskLoom compose example — one app, one volume.
+# TaskLoom compose example — one app, one volume, workers from the same image.
 #
 # TaskLoom is a single Symfony app: admin UI + run engine + MCP task-tools
-# server in one container; the scheduler tick worker (v1.1) runs from the same
-# image. SQLite (WAL) lives on the taskloom-data volume.
+# server in one container; the run engine's turns are consumed by Messenger
+# workers (llm / tools lanes) started from the same image. SQLite (WAL) lives
+# on the taskloom-data volume and is shared by the app and every worker.
 #
 # Usage:
 #   cp ../../.env.example .env              # compose reads .env from this directory
@@ -11,6 +12,10 @@
 #   docker compose -f docs/examples/compose.yaml run --rm taskloom \
 #       php bin/console doctrine:migrations:migrate --no-interaction
 #   → admin UI: http://localhost:8080
+#
+# Scale llm workers to match TASKLOOM_LLM_MAX_CONCURRENCY (each worker holds
+# at most one LLM request on the wire):
+#   docker compose -f docs/examples/compose.yaml up -d --scale worker-llm=2
 #
 # Migrations run as the explicit one-shot command above, NOT in the
 # container entrypoint (GUIDING-LIGHT §8.6) — safe with any number of
@@ -39,6 +44,39 @@ services:
       - taskloom-data:/app/data
     ports:
       - "8080:80"
+
+  # The llm lane: one worker per concurrent LLM request. Scale with
+  # `--scale worker-llm=N` (N = TASKLOOM_LLM_MAX_CONCURRENCY).
+  worker-llm:
+    build: ../..
+    image: taskloom:latest
+    restart: unless-stopped
+    command: ['php', 'bin/console', 'messenger:consume', 'llm', '--time-limit=3600', '--memory-limit=256M']
+    environment:
+      APP_SECRET: ${APP_SECRET:?set APP_SECRET in .env}
+      TASKLOOM_ADMIN_PASSWORD: ${TASKLOOM_ADMIN_PASSWORD:?set TASKLOOM_ADMIN_PASSWORD in .env}
+      TASKLOOM_LLM_BASE_URL: ${TASKLOOM_LLM_BASE_URL:-http://host.docker.internal:11434}
+      TASKLOOM_LLM_MODEL: ${TASKLOOM_LLM_MODEL:-qwen3:14b}
+      # Workers don't sync the catalog; the app container owns that.
+      TASKLOOM_SYNC_ON_BOOT: '0'
+      DATABASE_URL: ${DATABASE_URL:-sqlite:///%kernel.project_dir%/data/taskloom.db}
+    volumes:
+      - taskloom-data:/app/data
+
+  # The tools lane: executes tool calls; independent of llm wire time, so
+  # one worker is usually enough (they mostly wait on external servers).
+  worker-tools:
+    build: ../..
+    image: taskloom:latest
+    restart: unless-stopped
+    command: ['php', 'bin/console', 'messenger:consume', 'tools', '--time-limit=3600', '--memory-limit=256M']
+    environment:
+      APP_SECRET: ${APP_SECRET:?set APP_SECRET in .env}
+      TASKLOOM_ADMIN_PASSWORD: ${TASKLOOM_ADMIN_PASSWORD:?set TASKLOOM_ADMIN_PASSWORD in .env}
+      TASKLOOM_SYNC_ON_BOOT: '0'
+      DATABASE_URL: ${DATABASE_URL:-sqlite:///%kernel.project_dir%/data/taskloom.db}
+    volumes:
+      - taskloom-data:/app/data
 
 volumes:
   taskloom-data:

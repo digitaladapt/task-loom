@@ -30,6 +30,7 @@ use PHPUnit\Framework\MockObject\MockObject;
 use Psr\Log\NullLogger;
 use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
 use Symfony\Component\Console\Tester\CommandTester;
+use Symfony\Component\Messenger\MessageBusInterface;
 
 /**
  * The run-now command (SPEC §8): argument handling, task lookup, the
@@ -155,6 +156,7 @@ final class RunNowCommandTest extends KernelTestCase
         return new CommandTester(new RunNowCommand(
             $container->get(TaskRepository::class),
             $engine,
+            $container->get(MessageBusInterface::class),
         ));
     }
 

@@ -1,22 +1,83 @@
 framework:
     messenger:
-        # Uncomment this (and the failed transport below) to send failed messages to this transport for later handling.
-        # failure_transport: failed
+        # Failed messages: anything a worker could not process (an infra
+        # crash, a DB error — never a classified run failure; the engine
+        # swallows and records those itself) lands in the `failed` lane on
+        # the SAME messenger_messages table. Inspect with
+        # `messenger:failed:show`, requeue with `messenger:failed:retry`.
+        # This is the operator-visible dead-letter queue for the two lanes.
+        failure_transport: failed
 
         transports:
-            # https://symfony.com/doc/current/messenger.html#transport-configuration
-            # async: '%env(MESSENGER_TRANSPORT_DSN)%'
-            # failed: 'doctrine://default?queue_name=failed'
+            # Two lanes on one shared doctrine-backed table: both use the
+            # same MESSENGER_TRANSPORT_DSN, each lane selects its rows by
+            # queue_name (the messenger_messages table already has an
+            # indexed queue_name column — no schema change).
+            #
+            #   llm   — one LLM call per message. Concurrency = number of
+            #           workers running `messenger:consume llm`; that is
+            #           the TASKLOOM_LLM_MAX_CONCURRENCY semaphore. N
+            #           workers → N simultaneous LLM requests, FIFO
+            #           between runs (a re-enqueued turn goes to the back
+            #           of the queue, so a long multi-step task cannot
+            #           starve others).
+            #   tools — executes the pending tool calls of a turn. A slow
+            #           tool never blocks the llm lane and vice versa.
+            #
+            # queue_name is passed as a transport option, not appended to
+            # the DSN, so it composes with whatever query params the DSN
+            # already carries (e.g. auto_setup).
+            #
+            # No built-in retry-with-delay on the run lanes: the run
+            # engine owns all retry semantics (tool retries with error
+            # feedback, circuit breaker) and records every attempt in the
+            # run's ledger — a Messenger retry would be a second, invisible
+            # source of truth. A handler that throws means infrastructure
+            # broke, and that belongs in `failed`. max_retries: 0 sends
+            # the envelope straight there.
+            #
+            # redeliver_timeout: the Doctrine transport redelivers a
+            # message whose worker died mid-handling after this many
+            # seconds. Keep it comfortably above any legitimate turn (LLM
+            # wire ≤ TASKLOOM_LLM_TIMEOUT, default 300) and comfortably
+            # above the engine's claim staleness window (3600s): a
+            # redelivery must be able to take over the dead worker's
+            # claim, which requires the claim to have gone stale.
+            llm:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+                options:
+                    queue_name: llm
+                    redeliver_timeout: 7200
+                retry_strategy:
+                    max_retries: 0
+            tools:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+                options:
+                    queue_name: tools
+                    redeliver_timeout: 7200
+                retry_strategy:
+                    max_retries: 0
+            failed:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+                options:
+                    queue_name: failed
             sync: 'sync://'
 
         routing:
-            # Route your messages to the transports
-            # 'App\Message\YourMessage': async
+            App\Message\LlmTurnMessage: llm
+            App\Message\ToolTurnMessage: tools
 
-# when@test:
-#    framework:
-#        messenger:
-#            transports:
-#                # replace with your transport name here (e.g., my_transport: 'in-memory://')
-#                # For more Messenger testing tools, see https://github.com/zenstruck/messenger-test
-#                async: 'in-memory://'
+when@test:
+    framework:
+        messenger:
+            # In-memory lanes for the test env: routing, turn dispatch, and
+            # staleness can be asserted from the tests without a Doctrine
+            # table (and without a running worker). Tests get the transport
+            # services from the test container and pump them directly.
+            transports:
+                llm:
+                    dsn: 'in-memory://'
+                tools:
+                    dsn: 'in-memory://'
+                failed:
+                    dsn: 'in-memory://'
