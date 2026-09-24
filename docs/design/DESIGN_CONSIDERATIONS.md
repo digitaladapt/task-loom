@@ -40,13 +40,54 @@ The user confirmed this direction: "in-process, single app." The residual risk a
 the harness process itself is trusted; anything outside that boundary (the MCP servers)
 is only ever reached through the toolbox gate and per-server credentials.
 
-### 2.2 Per-step tool scoping (task-weaver's finer-grained scoping) — deferred
+### 2.2 The step model — decided (v1.1): run-per-step, no orchestrator
 
-Task-weaver scoped tools per *step* within a multi-step task shape. TaskLoom scopes per
-*task*, fixed at run start. Per-step scoping requires a step model and a "two task shapes"
-contract (parallel steps + final consumer), which is the machinery we are dropping. The
-toolbox snapshot per run preserves the audit trail. Per-step scoping can layer on later
-without redesign.
+Task-weaver scoped tools per *step* within a multi-step task shape, with an orchestrator
+task driving the steps. TaskLoom v1 dropped that wholesale and scoped per *task*, fixed
+at run start. What v1.1 adds back is the *authoring capability* (decompose a task into a
+DAG of steps) without any of the machinery that made task-weaver's version accrete:
+
+**The decision — run-per-step.** Each step is its own Run of the one engine, and the
+"final step" is the task itself (task brief/toolbox = final consumer). This keeps one
+step shape, makes steps fully optional (a task with zero steps runs exactly as v1), and
+makes parallelism a non-feature: sibling steps are independent runs, so the
+`TASKLOOM_LLM_MAX_CONCURRENCY` semaphore, execution claims, and FIFO interleave already
+govern them. The dispatcher that launches root steps and the dispatcher that launches
+"all satisfied steps" are the same code. The full design is SPEC §13.
+
+**The shape that was rejected — steps inside a run.** The cheap-looking option was to
+store a step list on the task and have one run execute it (serially, or with a parallel
+branch). It is the expensive option: the v1 engine's entire concurrency safety rests on
+a Run being a single, linear stream of turn state — one `LoopState`, one checkpoint JSON,
+one claim token, one exchange window. Parallel steps inside one run mean two LLM turns
+in flight against the same run row: diverging LoopStates, a checkpoint that becomes a
+tree, turn messages needing step scoping, and a claim protocol that must become
+per-(run, step). That is a rewrite of exactly the machinery the concurrency work just
+battle-tested. The cheap-looking option is the expensive one.
+
+**The other rejected shapes:**
+
+- **A separate "final step" entity** — two step shapes to support forever, and steps stop
+  being optional. The task itself is the final consumer (locked decision 5).
+- **An orchestrator task / orchestrator run** — new liveness to babysit: an orchestrator
+  that dies mid-graph leaves the DAG wedged with no way to derive owed work. Rejected
+  for the same reason the in-process loop was chosen (§2.1): supervision as a problem
+  space. Advancement instead happens in the same transaction as the terminal state
+  commit — the same dispatch-from-committed-state pattern the turn engine trusts.
+- **Per-step behavioral knobs** (budgets, retries, thresholds) — the task-weaver lesson
+  wasn't that steps were wrong; it was that the *step machinery* accreted. Per-run
+  budgets are already effectively per-step under run-per-step. The Step entity stays
+  dumb: brief + toolbox + deps.
+- **Nested steps / runtime-computed graphs** — one level of decomposition, author-declared
+  only. The model cannot restructure the graph mid-run; runtime branching is a `session`
+  concern (SPEC §9).
+
+**Per-step tool scoping falls out for free.** Task-weaver needed a separate mechanism
+because tools were scoped to the task while steps needed different tools. Under
+run-per-step, scoping is per-run (SPEC §4.1) — which *is* per-step for stepped tasks,
+without a separate mechanism. This section supersedes the v1 deferral note; the old
+"Per-step tool scoping (finer than per-task)" entry in the v1.x list was closed when
+this decision was made (see ROADMAP).
 
 ### 2.3 LLM-driven compaction — rejected
 

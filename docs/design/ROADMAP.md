@@ -36,10 +36,30 @@
 
 ## v1.1
 
+- **Step model (SPEC §13)** — DAG-of-steps authoring on tasks, run-per-step execution,
+  parent-run aggregation, Inputs-block output flow, strict fail-closed failure policy.
+  No orchestrator, no per-step behavioral knobs, no separate final-step entity.
 - Scheduler tick (cron → Messenger, task-weaver's proven pattern) + schedules on tasks
 - Seeded reviewer task; improvement cycle live
 - Auto-tagging at task creation (cheap LLM turn, task-loop pattern)
 - Run digests / needs-attention notifications
+
+**v1.1 step-model exit criteria:**
+
+- A task with zero steps runs exactly as v1 (byte-identical path: same messages,
+  same events) — steps are provably additive.
+- The Morning Briefing, re-authored as steps (weather | calendar | transactions →
+  final consumer), completes with all step outputs in the final consumer's Inputs
+  block.
+- A two-level DAG with a forced mid-DAG failure lands the parent in
+  `needs_attention` with the failing step's error class; the final consumer never
+  runs; downstream steps never dispatch.
+- A parallel sibling pair (with `LLM_MAX_CONCURRENCY > 1`) executes concurrently,
+  and an interleaved event ordering is observable in the ledger.
+- An invalid graph (cycle / self-dep / cross-task dep) is rejected at task
+  create/update and again at enable/approve.
+- A lost dispatch (simulated) is repaired by the requeue sweep: no step is wedged,
+  no duplicate execution (verified by claim + state checks).
 
 ## v1.x (each needs its own design note before build)
 
@@ -48,7 +68,6 @@
 - Per-task priority / queue jumping
 - External-agent access to the task MCP server (auth story)
 - Model types (fast/coder/…) per task
-- Per-step tool scoping (finer than per-task)
 
 ---
 

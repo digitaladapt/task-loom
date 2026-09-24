@@ -14,6 +14,9 @@
 3. **Project name: TaskLoom**, repo `task-loom`.
 4. **Context trimming never prunes the initial user section (the task prompt).** Only
    excessively old **assistant** messages from the LLM itself are pruned (§5.6).
+5. **The step model is run-per-step.** Multi-step tasks decompose into a DAG of steps; each
+   step is its own run of the one engine, and the final consumer is the task itself
+   (§13). The final step is never a separate entity.
 
 ---
 
@@ -262,12 +265,16 @@ ToolCall      id, run_event_id, tool, arguments (JSON), result (JSON),
               error_class, attempt_no, duration_ms, server
 McpServer     id, name, url, protocol (mcp|openapi), enabled, cred_var (env var name — never the value)
 Tool          id, server_id, name, description, tags, schema (JSON), side_effect
+Step          (v1.1 — §13) id, task_id, position, title, brief, toolbox_mode, toolbox (JSON),
+              depends_on (list of step ids — the DAG edges)
 ```
 
 - `toolbox_snapshot` on the run is the audit trail of *exactly what the model could see* —
   useful both for security review and for reproducing failures.
 - The tool catalog is **discovered** from servers at sync time: explicit/pinned definitions
   win over discovered ones; drift is logged; a down server never wipes known tools.
+- `Run.step_count` counts engine turns within a run; it is not the step model (§13).
+  A task with no steps runs as exactly one run, unchanged from v1.
 
 ---
 
@@ -376,3 +383,123 @@ task-loom/
     ├── design/           # SPEC.md, DESIGN_CONSIDERATIONS.md, ROADMAP.md
     └── examples/
 ```
+
+---
+
+## 13. The step model (v1.1) — a DAG of runs
+
+*Deferred no longer. The rationale and the rejected shapes live in
+`DESIGN_CONSIDERATIONS.md` §2.2; this section is the design.*
+
+### 13.1 What a step is
+
+A step is a **brief + a toolbox + dependency edges** — nothing else. No per-step budgets,
+retries, circuit-breaker thresholds, or other behavioral knobs: per-run budgets (§5.2) are
+already effectively per-step under this model. The Step entity is deliberately dumb; all
+behavior lives in the engine. This is the direct counter to the task-weaver lesson that
+step *machinery* accretes (considerations doc §2.2).
+
+A **task with zero steps** behaves exactly as v1: `begin()` creates one run and the task's
+own brief/toolbox are the run's brief/toolbox. The task brief/toolbox is the **final
+consumer** of the step graph — the only thing that runs after all steps are terminal.
+There is no separate "final step" entity; one step shape only. Steps are fully optional.
+
+### 13.2 The graph
+
+```
+Step: id, task_id, position (display order), title, brief,
+      toolbox_mode, toolbox (JSON),
+      depends_on (list of step ids)
+```
+
+- `depends_on` is the canonical storage — the edges of a DAG. The authoring/wire/display
+  format is **nested arrays** (`[[step, step], [step]]` — each level runs in parallel,
+  levels run in sequence). Arrays in, edges stored, arrays rendered back out. The two are
+  equivalent in expressiveness (both are leveled DAGs); arrays are structural no-loop by
+  construction, but `depends_on` matches how "comes after step X" is actually thought
+  about and keeps a single step editable without re-leveling the authoring tree.
+- **Validation** (no cycles, no self-deps, deps reference steps of the same task) runs at
+  task create/update — and again at enable/approve time, where it is the enforcement
+  gate. An invalid graph never runs, and never becomes an enabled task.
+
+### 13.3 Execution — run-per-step, no orchestrator
+
+A task run is a **parent Run** plus one child Run per step. The parent is the unit the
+admin UI shows as "the run of the task"; child runs carry the actual engine work and
+aggregate into the parent's status.
+
+- `begin(task)` creates the parent run, then dispatches child runs for the **root steps**
+  (no unmet dependencies). Tasks without steps skip straight to a single ordinary run —
+  the same code path, one child that *is* the whole task.
+
+- **Advancement is state-derived, event-driven.** When a step's run reaches a terminal
+  state, the same transaction that commits that state: (a) computes steps whose
+  dependencies are now all satisfied and dispatches their runs, and (b) when all steps
+  are terminal, finalizes the parent. No orchestrator process, no orchestrator run, no
+  new liveness to babysit — the same dispatch-from-committed-state pattern the turn
+  engine already trusts (the engine's delivery contract, §5.5 + the claim protocol,
+  §6).
+
+- **Parallelism is free.** Sibling steps are independent runs: the
+  `TASKLOOM_LLM_MAX_CONCURRENCY` semaphore already counts them, execution claims already
+  protect them, the FIFO queue already interleaves them. Under run-per-step, the
+  dispatcher that launches root steps and the dispatcher that launches "all satisfied
+  steps" are the same code. Serializing would be the extra work; the machinery that would
+  make parallel dangerous — shared per-run state — does not exist here.
+
+- **Crash safety.** A dispatch lost in ways the transport can't see is repaired by the
+  same state-derived sweep pattern as `app:run:requeue` — re-derive owed work from
+  committed state, dispatch; claim + state checks make an extra dispatch a no-op.
+
+### 13.4 Output flow
+
+A **step output** is one thing: the step run's justified completion artifact (the
+`completion` RunEvent's result, §5.4). Not exchanges, not tool results. One string,
+labeled with the step title, frozen at terminal.
+
+- Each run's frozen prompt head (§5.6 — it is never pruned) gets an **Inputs block**:
+  the declared outputs of its dependencies, labeled by step title. For the final
+  consumer, the inputs are **all** step outputs, labeled — not just the leaves'.
+  Predictable beats minimal: for briefing-scale tasks the token cost is trivial, and
+  dependency-edge trimming is exactly the kind of context work v1.x defers anyway.
+- Step outputs are **data, not instructions** (§4.2): same untrusted-content rules as
+  tool results. A weather step's output cannot reconfigure the final consumer's
+  toolbox — that is frozen at run start regardless.
+
+### 13.5 Failure policy — strict, fail closed
+
+Any step fails (terminal `incomplete`/`failed`/`needs_attention`) → the parent run is
+marked with the failing step's terminal state and error class, and the final consumer
+never runs. Downstream steps of a failing step are likewise never dispatched.
+
+This matches the engine's fail-closed philosophy (§5.2, §5.6): a briefing assembled from
+a dead weather server lands in the attention queue with a precise diagnosis (which step,
+which error class) instead of a silently degraded briefing.
+
+A `degrade` policy (mark the step output "unavailable", proceed with the final consumer)
+is a clean one-field extension later — the data model doesn't preclude it — but v1.1 does
+not build it. Strict/degrade, when it comes, is a decision made once at the task level,
+not per step.
+
+### 13.6 Admin UI
+
+The run surface groups by parent run: child runs of one task run render as a grouped
+timeline (levels for display, statuses from the child run statuses), and the run detail
+view is where steps become visible. The scheduler strip may show several runs of one
+task on the `llm` lane at once — the run list groups them under the parent. The attention
+queue needs no new surface: a parent run carrying a failed step carries the step's error
+class already.
+
+### 13.7 What the step model is not
+
+- **Not a second task shape.** One engine, one loop, one budget semantics. Steps are
+  declarative structure on top of runs, not a parallel execution model.
+- **Not per-step tool scoping as a new mechanism.** Toolbox scoping is per-run (§4.1) —
+  which, under run-per-step, *is* per-step for stepped tasks, without a separate
+  mechanism.
+- **Not conditional logic.** The DAG is declared by the author, not computed by the
+  model. The model cannot add, remove, or reorder steps mid-run. Runtime branching is a
+  `session`-kind concern (§9), deliberately out of scope here.
+- **Not nested steps.** One level of decomposition: task → steps. No steps of steps.
+  If a step needs finer structure, write a better step brief — justified completion
+  already forces a real artifact out of each step.
