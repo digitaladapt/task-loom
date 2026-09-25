@@ -4,60 +4,105 @@ declare(strict_types=1);
 
 namespace App\Mcp\Server;
 
-use PhpMcp\Schema\ServerCapabilities;
-use PhpMcp\Schema\ToolAnnotations;
-use PhpMcp\Server\Server;
-use PhpMcp\Server\ServerBuilder;
+use Mcp\Schema\ToolAnnotations;
+use Mcp\Server;
+use Mcp\Server\Builder;
+use Mcp\Server\Session\Psr16SessionStore;
+use Mcp\Server\Session\SessionManager;
+use Psr\Cache\CacheItemPoolInterface;
 use Psr\Container\ContainerInterface;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\Cache\Psr16Cache;
 
 /**
- * Builds the task-loom MCP server role (SPEC §11): task_create, task_update,
- * task_list, task_get over Streamable HTTP.
+ * Builds the task-loom MCP server role (SPEC §10, §11): task_create,
+ * task_update, task_list, task_get over Streamable HTTP.
  *
- * The builder's withTool() hand-registers each handler method with an
- * explicit JSON input schema. Explicit schemas keep the wire contract
- * stable regardless of how the SDK's docblock schema generation evolves,
- * and they document the gate visually: there is no 'enabled' parameter
- * anywhere in any write tool's schema.
+ * Each handler is registered with an explicit JSON input schema. Explicit
+ * schemas keep the wire contract stable regardless of how the SDK's schema
+ * generation evolves, and they document the gate visually: there is no
+ * 'enabled' parameter anywhere in any write tool's schema.
+ *
+ * The server is built per request and driven by the controller — the SDK's
+ * HTTP transport is a PSR-7 request handler, not a web server, so there is no
+ * socket and no event loop here (see docs/design/MCP_SDK_MIGRATION.md).
  */
 final class TaskServerFactory
 {
     private const SERVER_NAME = 'task-loom';
     private const SERVER_VERSION = '1.0.0';
 
+    /** One hour, matching the SDK's documented default. */
+    private const SESSION_TTL_SECONDS = 3600;
+
+    private ?Psr16SessionStore $sessionStore = null;
+
+    /**
+     * @param CacheItemPoolInterface $sessionPool the `mcp_sessions` cache pool
+     *                                            (PSR-6, adapted for the SDK below)
+     */
     public function __construct(
         private readonly ContainerInterface $container,
         private readonly LoggerInterface $logger,
+        private readonly CacheItemPoolInterface $sessionPool,
     ) {
     }
 
     public function build(): Server
     {
-        $builder = new ServerBuilder()
-            ->withServerInfo(self::SERVER_NAME, self::SERVER_VERSION)
-            ->withCapabilities(ServerCapabilities::make())
-            ->withInstructions(implode("\n", [
+        $builder = Server::builder()
+            ->setServerInfo(self::SERVER_NAME, self::SERVER_VERSION)
+            ->setInstructions(implode("\n", [
                 'Task management for task-loom (SPEC §10).',
                 'Writes are gated: every task_create and task_update persists disabled and lands in the human approval queue (SPEC §4.3). You cannot create or enable tasks directly.',
                 'Read tools: task_list, task_get. Write tools: task_create, task_update.',
             ]))
-            ->withLogger($this->logger)
-            ->withContainer($this->container);
+            ->setLogger($this->logger)
+            // The container is what makes handler resolution work: TaskTools
+            // and TaskCrud are services with constructor dependencies, and the
+            // SDK resolves them through PSR-11 at call time.
+            ->setContainer($this->container)
+            ->setSession($this->sessionStore());
 
         $this->registerTaskTools($builder);
 
         return $builder->build();
     }
 
-    private function registerTaskTools(ServerBuilder $builder): void
+    /**
+     * Mints and destroys sessions for callers that drive the server
+     * in-process (the functional tests, which do not perform a handshake).
+     */
+    public function sessionManager(): SessionManager
+    {
+        return new SessionManager($this->sessionStore(), $this->logger);
+    }
+
+    /**
+     * Backing store for MCP sessions.
+     *
+     * The SDK wants PSR-16 while a Symfony cache pool is PSR-6, so the pool is
+     * adapted here rather than at every call site. The pool is a named one
+     * (`mcp_sessions`) so sessions can be flushed or relocated to Redis
+     * without disturbing the application cache.
+     */
+    public function sessionStore(): Psr16SessionStore
+    {
+        return $this->sessionStore ??= new Psr16SessionStore(
+            cache: new Psr16Cache($this->sessionPool),
+            prefix: 'mcp-session-',
+            ttl: self::SESSION_TTL_SECONDS,
+        );
+    }
+
+    private function registerTaskTools(Builder $builder): void
     {
         $builder
-            ->withTool(
+            ->addTool(
                 handler: [TaskTools::class, 'create'],
                 name: 'task_create',
                 description: 'Create a new task. The task is persisted disabled and appears in the human approval queue — there is no way to create an enabled task through this tool (SPEC §4.3).',
-                annotations: ToolAnnotations::make(
+                annotations: new ToolAnnotations(
                     title: 'Create task',
                     readOnlyHint: false,
                     destructiveHint: false,
@@ -77,11 +122,11 @@ final class TaskServerFactory
                     'required' => ['title', 'brief', 'kind', 'toolboxMode', 'toolbox'],
                 ],
             )
-            ->withTool(
+            ->addTool(
                 handler: [TaskTools::class, 'update'],
                 name: 'task_update',
                 description: 'Update a task. Enabled tasks are immutable (SPEC §4.4): updating one returns a disabled replacement draft; the original keeps running. Draft tasks are edited in place.',
-                annotations: ToolAnnotations::make(
+                annotations: new ToolAnnotations(
                     title: 'Update task',
                     readOnlyHint: false,
                     destructiveHint: false,
@@ -109,11 +154,11 @@ final class TaskServerFactory
                     'required' => ['taskId', 'changes'],
                 ],
             )
-            ->withTool(
+            ->addTool(
                 handler: [TaskTools::class, 'list'],
                 name: 'task_list',
                 description: 'List tasks, newest first. Read-only.',
-                annotations: ToolAnnotations::make(
+                annotations: new ToolAnnotations(
                     title: 'List tasks',
                     readOnlyHint: true,
                     destructiveHint: false,
@@ -127,11 +172,11 @@ final class TaskServerFactory
                     ],
                 ],
             )
-            ->withTool(
+            ->addTool(
                 handler: [TaskTools::class, 'get'],
                 name: 'task_get',
                 description: "Get one task's full record, including its replacement chain. Read-only.",
-                annotations: ToolAnnotations::make(
+                annotations: new ToolAnnotations(
                     title: 'Get task',
                     readOnlyHint: true,
                     destructiveHint: false,
