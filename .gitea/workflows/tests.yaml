@@ -28,6 +28,9 @@ jobs:
       # * api-gateway:  skip interface checks
       profile: web-app
 
+      # run migrations before tests
+      pre-test-command: php bin/console --env=test doctrine:migrations:migrate --no-interaction
+
       # coverage defines how to check test-coverage:
       # * pcov: recommended (default)
       # * xdebug
