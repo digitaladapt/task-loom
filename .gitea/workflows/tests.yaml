@@ -1,14 +1,6 @@
-# Tests — inlined from lyra/ci/.gitea/workflows/php-test.yaml@v1.
+# Tests - ensure code quality, via the shared workflow.
 #
-# TEMPORARY: the cross-repo `uses: lyra/ci/...@v1` form is not working yet on
-# this Gitea instance (task-loom is the first project to try it — pushes match
-# the trigger, the workflow registers as active, but zero runs appear). This
-# file runs the SAME steps directly, with this repo's knob values baked in:
-# php-version 8.5, profile web-app, coverage pcov (gate at 0), conformance
-# non-blocking, env-setup .env.test.
-#
-# When the shared reusable workflow starts working, replace this file with
-# the 6-line `uses:` form again (see git history for the original).
+# Checks include: PHPStan, PHPUnit, and PHP-CS-Fixer.
 
 name: Tests
 
@@ -26,142 +18,26 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    outputs:
-      coverage: ${{ steps.phpunit.outputs.coverage }}
+    uses: private/ci/.gitea/workflows/php-test.yaml@v1
+    with:
+      php-version: '8.5'
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # profiles defines what to test:
+      # * web-app:      full test suite (default)
+      # * auth-gateway: skip template check
+      # * api-gateway:  skip interface checks
+      profile: web-app
 
-      - name: Resolve PHPUnit config
-        id: cfg
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f phpunit.dist.xml ]; then
-            cfg="phpunit.dist.xml"
-          elif [ -f phpunit.xml.dist ]; then
-            cfg="phpunit.xml.dist"
-          else
-            echo "::error::No PHPUnit config found. Expected phpunit.dist.xml or phpunit.xml.dist."
-            exit 1
-          fi
-          echo "path=$cfg" >> "$GITHUB_OUTPUT"
-          echo "Using PHPUnit config: $cfg"
+      # coverage defines how to check test-coverage:
+      # * pcov: recommended (default)
+      # * xdebug
+      coverage: 'pcov'
+      # 0-100 percentage of test-coverage required
+      coverage-min: '50'
 
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.5'
-          extensions: >-
-            ctype, iconv, pdo, pdo_sqlite, mbstring, xml, curl, dom,
-            filter, json, xmlwriter, libxml, tokenizer
-          coverage: pcov
-          tools: composer:v2
+      # does failing our "conformance" check make the test suite fail
+      conformance-blocking: false
 
-      # Composer resolves packages via api.github.com. Unauthenticated that is
-      # 60 req/hour, which the lockfile can blow through. Tolerant of a missing
-      # secret: install may still succeed unauthenticated on small runs.
-      - name: Configure GitHub OAuth token
-        env:
-          GITHUB_TOKEN: ${{ secrets.SYNC_GITHUB_TOKEN }}
-        run: |
-          if [ -n "$GITHUB_TOKEN" ]; then
-            composer config --global github-oauth.github.com "$GITHUB_TOKEN"
-          else
-            echo "SYNC_GITHUB_TOKEN not set — continuing without GitHub OAuth."
-          fi
-
-      - name: Validate composer.json
-        run: composer validate --strict --no-check-publish
-
-      - name: Get composer cache directory
-        id: composer-cache
-        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache composer dependencies
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.composer-cache.outputs.dir }}
-          key: ${{ runner.os }}-php8.5-composer-${{ hashFiles('**/composer.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-php8.5-composer-
-            ${{ runner.os }}-composer-
-
-      # NOTE ON WHERE conformance.sh LIVES — it is VENDORED into the project
-      # at .ci/conformance.sh rather than fetched from lyra/ci at run time
-      # (lyra/ci is private; a fetch would 404 and silently no-op). Leaf
-      # artifact: overwrite, never merge (sync-configs.sh owns it).
-      - name: Create .env
-        run: cp .env.test .env
-
-      - name: Install dependencies
-        run: composer install --no-interaction --prefer-dist --no-progress
-
-      # Audits the LOCKFILE — no network resolution, no install.
-      - name: Composer audit
-        run: composer audit --no-interaction
-
-      - name: Run conformance check
-        shell: bash
-        run: |
-          set -euo pipefail
-          tool="$GITHUB_WORKSPACE/.ci/conformance.sh"
-          if [ ! -f "$tool" ]; then
-            echo "::notice::No '.ci/conformance.sh' in this repo — skipping."
-            exit 0
-          fi
-          if [ ! -x "$tool" ]; then chmod +x "$tool"; fi
-          # Report-only mode (conformance-blocking: false): annotate but
-          # never fail. The violations still appear in the log.
-          "$tool" --profile="web-app" || \
-            echo "::warning::Conformance violations found (non-blocking this run)."
-
-      # NOTE: php-cs-fixer 3.x has no `--no-progress` flag. CI-friendly quiet
-      # output is `--show-progress=none`.
-      - name: Run php-cs-fixer
-        run: vendor/bin/php-cs-fixer fix --dry-run --diff --show-progress=none
-
-      - name: Run PHPStan
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ ! -f phpstan.neon.dist ] && [ ! -f phpstan.neon ]; then
-            echo "::warning::No phpstan config in this repo — skipping. See GUIDING-LIGHT §2.2."
-            exit 0
-          fi
-          vendor/bin/phpstan analyse --no-progress --error-format=github
-
-      # Functional tests hit a real SQLite database (var/taskloom_test.db per
-      # .env.test). A fresh CI checkout has no db file, so apply the same
-      # migrations prod applies (docker/entrypoint.sh) before running PHPUnit.
-      - name: Prepare test database
-        run: php bin/console --env=test doctrine:migrations:migrate --no-interaction
-
-      - name: Run tests
-        id: phpunit
-        shell: bash
-        env:
-          XDEBUG_MODE: coverage
-        run: |
-          set -euo pipefail
-          cfg="${{ steps.cfg.outputs.path }}"
-          vendor/bin/phpunit --configuration "$cfg" --coverage-text | tee /tmp/phpunit-coverage.txt
-
-          pct=$(grep -oE 'Lines:\s+[0-9.]+' /tmp/phpunit-coverage.txt | grep -oE '[0-9.]+' | head -1 || true)
-          if [ -z "$pct" ]; then
-            echo "::warning::Could not parse a coverage percentage from PHPUnit output."
-            exit 0
-          fi
-          echo "coverage=$pct" >> "$GITHUB_OUTPUT"
-          echo "Line coverage: ${pct}%"
-
-          # coverage-min is 0 for now — ratchet up as coverage improves
-          # (GUIDING-LIGHT §2.3: 100 required before Rector runs).
-          min="0"
-          if [ "$min" != "0" ] && awk "BEGIN{exit !($pct < $min)}"; then
-            echo "::error::Coverage ${pct}% is below the required ${min}%."
-            exit 1
-          fi
+    secrets:
+      # github token so composer can download dependencies
+      SYNC_GITHUB_TOKEN: ${{ secrets.SYNC_GITHUB_TOKEN }}

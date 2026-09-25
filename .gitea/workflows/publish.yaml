@@ -1,0 +1,24 @@
+# Sync GitHub - upload branch change to github, via the shared workflow
+
+name: Sync GitHub
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'feat*'
+      - 'fix*'
+      - 'cleanup*'
+      - 'chore*'
+
+jobs:
+  sync:
+    uses: private/ci/.gitea/workflows/sync-github.yaml@v1
+    with:
+      sync-target: ${{ vars.SYNC_GITHUB_TARGET }}
+
+      # by default we do not alter existing github tags, but that can be changed here.
+      # force-tags: true
+
+    secrets:
+      SYNC_GITHUB_TOKEN: ${{ secrets.SYNC_GITHUB_TOKEN }}

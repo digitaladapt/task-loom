@@ -1,0 +1,26 @@
+# Push Develop - update the "develop" rolling docker image tag, via the shared workflow
+#
+# The build is defined in docker-bake.hcl.
+
+name: Push Develop
+
+on:
+  push:
+    branches:
+      - 'main'
+
+jobs:
+  docker:
+    uses: private/ci/.gitea/workflows/docker-publish.yaml@v1
+    with:
+      mode: develop
+
+      # Passed explicitly from repo vars
+      image-target: ${{ vars.DOCKERHUB_TARGET }}
+
+      # docker-bake.hcl controls building
+      build-backend: 'bake'
+
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
