@@ -13,7 +13,7 @@ use App\Entity\ToolboxMode;
  * reviewer task's toolbox — task_list, task_get, task_create, task_update).
  *
  * Handlers are plain methods on this service; the server factory
- * registers them via ServerBuilder::withTool() with explicit input
+ * registers them via Builder::addTool() with explicit input
  * schemas. Handlers always return plain arrays — never entities — so the
  * SDK's CallToolResult formatting stays a boring, predictable JSON blob.
  *

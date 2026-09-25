@@ -6,27 +6,33 @@ namespace App\Toolbox;
 
 use App\Entity\McpServer;
 use App\Entity\ServerProtocol;
-use App\Toolbox\Transport\StreamableTransportFactory;
-use PhpMcp\Client\ClientBuilder;
-use PhpMcp\Client\ClientConfig;
-use PhpMcp\Client\Enum\TransportType;
-use PhpMcp\Client\Model\Capabilities as ClientCapabilities;
-use PhpMcp\Client\ServerConfig;
+use Mcp\Client;
+use Mcp\Client\Transport\HttpTransport;
 
 /**
- * Reads tools from an MCP server (Streamable HTTP) via the php-mcp/client SDK.
+ * Reads tools from an MCP server (Streamable HTTP) via the official PHP MCP SDK.
  *
- * Blocking initialize() + listTools() — the SDK owns the event loop for the
- * duration of the read; callers must not hold a loop across requests.
+ * Blocking — connect(), listTools() and disconnect() all run inside this call.
+ * There is no event loop to own any more: the SDK's HTTP transport uses PSR-18
+ * and returns, so callers may hold this across requests safely.
+ *
+ * This class used to install a hand-rolled Streamable HTTP transport because
+ * php-mcp/client's built-in one opened a legacy HTTP+SSE stream (a GET) that
+ * modern servers answer with 405. The official SDK's transport POSTs, handles
+ * both JSON and SSE response framing, and manages the session header itself, so
+ * that workaround — and its 250-line transport — is gone.
+ * See docs/design/MCP_SDK_MIGRATION.md.
  */
 final readonly class McpServerReader implements ServerReader
 {
     /**
      * The client identity advertised in the MCP initialize handshake.
-     * Per the SDK this is informational only, but php-mcp/client 1.0.1+
-     * requires it before build() — a missing name throws the cryptic
-     * "Name must be provided using withName()." ConfigurationException.
+     *
+     * Informational to the server, but required by the SDK before build() —
+     * hence a named constant rather than a literal, so the identity is
+     * greppable when it shows up in a server's logs.
      */
+    private const CLIENT_NAME = 'task-loom';
     private const CLIENT_VERSION = '1.0.0';
 
     public function __construct(
@@ -41,22 +47,22 @@ final readonly class McpServerReader implements ServerReader
             throw new \LogicException(\sprintf('McpServerReader cannot read a %s server.', $server->getProtocol()->value));
         }
 
-        $config = new ServerConfig(
-            name: $server->getName(),
-            transport: TransportType::Http,
-            url: $server->getUrl(),
-            timeout: $this->timeoutSeconds ?? 30.0,
-        );
+        $timeout = $this->timeoutSeconds ?? 30;
 
-        $client = ClientBuilder::make()
-            ->withClientInfo('task-loom', self::CLIENT_VERSION)
-            ->withServerConfig($config)
-            ->withTransportFactory(new StreamableTransportFactory(
-                new ClientConfig('task-loom', self::CLIENT_VERSION, ClientCapabilities::forClient()),
-            ))
+        $client = Client::builder()
+            ->setClientInfo(self::CLIENT_NAME, self::CLIENT_VERSION)
+            ->setInitTimeout($timeout)
+            ->setRequestTimeout($timeout)
+            // A catalog sync is an explicit, operator-triggered action: retrying
+            // a dead server four times only makes the failure slower to report.
+            // The synchronizer already decides what a down server means
+            // (SPEC §7: never wipes known tools).
+            ->setMaxRetries(0)
             ->build();
 
-        $client->initialize();
+        // Streamable HTTP only: no stdio, no SSE (SPEC §11). The URL is the
+        // full endpoint, which is what HttpTransport expects.
+        $client->connect(new HttpTransport(endpoint: $server->getUrl()));
 
         try {
             $tools = $client->listTools();
@@ -65,7 +71,7 @@ final readonly class McpServerReader implements ServerReader
         }
 
         $discovered = [];
-        foreach ($tools as $tool) {
+        foreach ($tools->tools as $tool) {
             $discovered[] = new DiscoveredTool(
                 name: $tool->name,
                 description: $tool->description,
