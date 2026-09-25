@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Controller;
 
+use App\Admin\StepOverviewPresenter;
 use App\Admin\TaskAdminService;
 use App\Admin\TaskLifecycleException;
 use App\Entity\Task;
@@ -35,6 +36,7 @@ final class TaskAdminController extends AbstractController
         private readonly RunRepository $runs,
         private readonly TaskAdminService $admin,
         private readonly ToolboxPreviewer $previewer,
+        private readonly StepOverviewPresenter $stepOverview,
     ) {
     }
 
@@ -56,6 +58,7 @@ final class TaskAdminController extends AbstractController
         return $this->render('task/detail.html.twig', [
             'task' => $task,
             'preview' => $this->previewer->preview($task),
+            'step_overview' => $this->stepOverview->present($task),
             'runs' => $this->runs->findForTask($task),
             'replacement_drafts' => $this->tasks->findReplacementDraftsFor($task),
         ]);

@@ -11,6 +11,9 @@ use App\Entity\TaskKind;
 use App\Entity\ToolboxMode;
 use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
+use App\StepModel\StepGraphCodec;
+use App\StepModel\StepGraphValidator;
+use App\StepModel\StepSpec;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\EntityNotFoundException;
 
@@ -26,14 +29,23 @@ use Doctrine\ORM\EntityNotFoundException;
  * This service also implements the SPEC §4.4 replacement semantics for
  * updates: an update to an enabled task creates a disabled replacement
  * draft; the original is never touched. The draft carries the task's
- * step graph too (SPEC §13: steps are task content) — the depends_on
- * edges are remapped onto the cloned step rows.
+ * step graph too (SPEC §13: steps are task content) — replaced when the
+ * update supplies a new graph, cloned with remapped edges when it does
+ * not.
+ *
+ * Step graphs arrive in the authoring/wire format (nested arrays, SPEC
+ * §13.2) and are translated to depends_on edges here, in the same
+ * transaction as the task write: a half-written graph never persists.
+ * Graph shape problems (StepFormatException) are raised before any
+ * database work.
  */
 final class TaskCrud
 {
     public function __construct(
         private readonly TaskRepository $tasks,
         private readonly StepRepository $steps,
+        private readonly StepGraphCodec $codec,
+        private readonly StepGraphValidator $graphValidator,
         private readonly EntityManagerInterface $em,
     ) {
     }
@@ -43,6 +55,9 @@ final class TaskCrud
      * the enabled flag does not exist as an argument.
      *
      * @param list<string> $toolbox
+     * @param mixed        $steps   wire-format step graph (nested arrays, SPEC §13.2); null = no steps
+     *
+     * @throws \App\StepModel\StepFormatException when the steps input is malformed
      */
     public function create(
         string $title,
@@ -51,13 +66,23 @@ final class TaskCrud
         ToolboxMode $toolboxMode,
         array $toolbox,
         ?string $schedule,
+        mixed $steps = null,
     ): Task {
+        $specs = $this->codec->parse($steps);
+
         $task = new Task($title, $brief, $kind, $toolboxMode, $toolbox, TaskAuthor::Agent);
         $task->setSchedule($schedule);
 
-        $this->tasks->save($task);
+        return $this->inTransaction(function () use ($task, $specs): Task {
+            $this->em->persist($task);
+            $this->em->flush();
 
-        return $task;
+            if ([] !== $specs) {
+                $this->replaceSteps($task, $specs);
+            }
+
+            return $task;
+        });
     }
 
     /**
@@ -65,24 +90,40 @@ final class TaskCrud
      * returns a disabled replacement draft carrying the edits; the
      * original keeps running untouched. Draft tasks are edited in place.
      *
-     * @param array{title?: string, brief?: string, kind?: TaskKind, toolbox_mode?: ToolboxMode, toolbox?: list<string>, schedule?: ?string} $changes
+     * The `steps` change key (SPEC §13.2) replaces the task's entire step
+     * graph with the supplied wire-format graph; an empty array clears
+     * it. When the key is absent, the graph is left untouched — and for a
+     * replacement draft, the original's graph is cloned onto it.
+     *
+     * @param array{title?: string, brief?: string, kind?: TaskKind|string, toolbox_mode?: ToolboxMode|string, toolbox?: list<string>, schedule?: ?string, steps?: mixed} $changes
+     *
+     * @throws \App\StepModel\StepFormatException when the steps input is malformed
      */
     public function update(int $taskId, array $changes): Task
     {
         $task = $this->findOrThrow($taskId);
 
-        if ($task->isEnabled()) {
-            return $this->createReplacementDraft($task, $changes);
-        }
-
         if ($task->isArchived()) {
             throw new EntityNotFoundException("Task {$taskId} is archived and cannot be updated.");
         }
 
-        $this->applyChanges($task, $changes);
-        $this->tasks->save($task);
+        $hasSteps = \array_key_exists('steps', $changes);
+        $specs = $hasSteps ? $this->codec->parse($changes['steps']) : null;
 
-        return $task;
+        if ($task->isEnabled()) {
+            return $this->createReplacementDraft($task, $changes, $specs);
+        }
+
+        return $this->inTransaction(function () use ($task, $changes, $hasSteps, $specs): Task {
+            $this->applyChanges($task, $changes);
+            $this->em->flush();
+
+            if ($hasSteps) {
+                $this->replaceSteps($task, $specs ?? []);
+            }
+
+            return $task;
+        });
     }
 
     /**
@@ -103,43 +144,107 @@ final class TaskCrud
     }
 
     /**
+     * A task's step graph in display order (SPEC §13) — read-only. The MCP
+     * tools render it back out in the authoring/wire format via
+     * StepGraphCodec::render().
+     *
+     * @return list<Step>
+     */
+    public function stepsFor(Task $task): array
+    {
+        return $this->steps->findForTask($task);
+    }
+
+    /**
      * The SPEC §4.4 replacement path: draft creation, the edits, and the
-     * step-graph copy land in ONE transaction (the engine's commitTurn
-     * pattern). A replacement that fails mid-way — half-copied steps, a
+     * step graph (replaced from the wire format, or cloned from the
+     * original) land in ONE transaction (the engine's commitTurn
+     * pattern). A replacement that fails mid-way — half-written steps, a
      * draft without its graph — must never persist; either the whole
      * replacement exists or nothing does.
      *
-     * @param array{title?: string, brief?: string, kind?: TaskKind, toolbox_mode?: ToolboxMode, toolbox?: list<string>, schedule?: ?string} $changes
+     * @param array{title?: string, brief?: string, kind?: TaskKind|string, toolbox_mode?: ToolboxMode|string, toolbox?: list<string>, schedule?: ?string, steps?: mixed} $changes
+     * @param list<StepSpec>|null                                                                                                                                         $specs   null = clone the original's graph
      */
-    private function createReplacementDraft(Task $original, array $changes): Task
+    private function createReplacementDraft(Task $original, array $changes, ?array $specs): Task
     {
         $draft = $original->createReplacementDraft(TaskAuthor::Agent);
         $this->applyChanges($draft, $changes);
 
-        $connection = $this->em->getConnection();
-        $ownsTransaction = !$connection->isTransactionActive();
-        if ($ownsTransaction) {
-            $connection->beginTransaction();
-        }
-
-        try {
+        return $this->inTransaction(function () use ($original, $draft, $specs): Task {
             $this->em->persist($draft);
             $this->em->flush();
-            $this->copySteps($original, $draft);
 
-            if ($ownsTransaction) {
-                $connection->commit();
-            }
-        } catch (\Throwable $e) {
-            if ($ownsTransaction && $connection->isTransactionActive()) {
-                $connection->rollBack();
-                $this->em->clear(); // torn entities must not leak into the next call
+            if (null !== $specs) {
+                $this->replaceSteps($draft, $specs);
+            } else {
+                $this->copySteps($original, $draft);
             }
 
-            throw $e;
+            return $draft;
+        });
+    }
+
+    /**
+     * Replace a task's entire step graph with the parsed specs (SPEC
+     * §13.2): existing rows go, new rows arrive — positions assigned in
+     * wire order, depends_on edges translated from the level structure
+     * (each step depends on every step of the previous level).
+     *
+     * Two phases: persist all rows first (the flush assigns ids), then
+     * write edges, then flush. Runs inside the caller's transaction — a
+     * failure rolls the whole task write back.
+     *
+     * @param list<StepSpec> $specs
+     */
+    private function replaceSteps(Task $task, array $specs): void
+    {
+        foreach ($this->steps->findForTask($task) as $existing) {
+            $this->em->remove($existing);
+        }
+        $this->em->flush();
+
+        /** @var list<array{0: Step, 1: StepSpec}> $created */
+        $created = [];
+        $position = 0;
+
+        foreach ($specs as $spec) {
+            $step = new Step(
+                $task,
+                ++$position,
+                $spec->title,
+                $spec->brief,
+                $spec->toolboxMode,
+                $spec->toolbox,
+            );
+            $this->em->persist($step);
+            $created[] = [$step, $spec];
+        }
+        $this->em->flush();
+
+        /** @var array<int, list<int>> $idsByLevel */
+        $idsByLevel = [];
+        foreach ($created as [$step, $spec]) {
+            $id = $step->getId();
+            if (null !== $id) {
+                $idsByLevel[$spec->level][] = $id;
+            }
         }
 
-        return $draft;
+        foreach ($created as [$step, $spec]) {
+            $step->setDependsOn($spec->level > 0 ? ($idsByLevel[$spec->level - 1] ?? []) : []);
+        }
+        $this->em->flush();
+
+        // SPEC §13.2: validation runs at create/update too. The wire
+        // format cannot express an invalid graph (edges point strictly
+        // backward by level), so a failure here is a translation bug, not
+        // authoring input — fail loudly, and let the transaction roll the
+        // write back.
+        $problems = $this->graphValidator->problems($this->steps->findForTask($task));
+        if ([] !== $problems) {
+            throw new \LogicException('Step graph translation produced an invalid graph: '.implode(' ', $problems));
+        }
     }
 
     /**
@@ -210,7 +315,44 @@ final class TaskCrud
     }
 
     /**
-     * @param array{title?: string, brief?: string, kind?: TaskKind, toolbox_mode?: ToolboxMode, toolbox?: list<string>, schedule?: ?string} $changes
+     * The engine's commitTurn transaction pattern: own the transaction
+     * when nobody above us does; roll back (and detach torn entities) on
+     * any failure so nothing half-written leaks into the next call.
+     *
+     * @template T
+     *
+     * @param callable(): T $work
+     *
+     * @return T
+     */
+    private function inTransaction(callable $work): mixed
+    {
+        $connection = $this->em->getConnection();
+        $ownsTransaction = !$connection->isTransactionActive();
+        if ($ownsTransaction) {
+            $connection->beginTransaction();
+        }
+
+        try {
+            $result = $work();
+
+            if ($ownsTransaction) {
+                $connection->commit();
+            }
+
+            return $result;
+        } catch (\Throwable $e) {
+            if ($ownsTransaction && $connection->isTransactionActive()) {
+                $connection->rollBack();
+                $this->em->clear(); // torn entities must not leak into the next call
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
+     * @param array{title?: string, brief?: string, kind?: TaskKind|string, toolbox_mode?: ToolboxMode|string, toolbox?: list<string>, schedule?: ?string, steps?: mixed} $changes
      */
     private function applyChanges(Task $task, array $changes): void
     {
@@ -221,10 +363,10 @@ final class TaskCrud
             $task->setBrief($changes['brief']);
         }
         if (\array_key_exists('kind', $changes)) {
-            $task->setKind($changes['kind']);
+            $task->setKind($this->coerceKind($changes['kind']));
         }
         if (\array_key_exists('toolbox_mode', $changes)) {
-            $task->setToolboxMode($changes['toolbox_mode']);
+            $task->setToolboxMode($this->coerceToolboxMode($changes['toolbox_mode']));
         }
         if (\array_key_exists('toolbox', $changes)) {
             $task->setToolbox($changes['toolbox']);
@@ -232,6 +374,33 @@ final class TaskCrud
         if (\array_key_exists('schedule', $changes)) {
             $task->setSchedule($changes['schedule']);
         }
+        // 'steps' is not applied here: it is not a field but a graph
+        // replacement, handled by replaceSteps() in the same transaction.
+    }
+
+    /**
+     * The MCP wire format carries enums as strings (the tool schemas
+     * declare string enums, and the SDK passes nested values through
+     * untyped). Coerce here, at the persistence boundary, so every caller
+     * — the MCP tools today, anything later — is insulated from the wire
+     * representation.
+     */
+    private function coerceKind(TaskKind|string $kind): TaskKind
+    {
+        if ($kind instanceof TaskKind) {
+            return $kind;
+        }
+
+        return TaskKind::tryFrom($kind) ?? throw new \InvalidArgumentException(\sprintf('Invalid kind "%s" — expected "run" or "session".', $kind));
+    }
+
+    private function coerceToolboxMode(ToolboxMode|string $mode): ToolboxMode
+    {
+        if ($mode instanceof ToolboxMode) {
+            return $mode;
+        }
+
+        return ToolboxMode::tryFrom($mode) ?? throw new \InvalidArgumentException(\sprintf('Invalid toolbox_mode "%s" — expected "tags" or "explicit".', $mode));
     }
 
     private function findOrThrow(int $taskId): Task
