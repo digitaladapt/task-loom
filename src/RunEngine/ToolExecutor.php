@@ -7,17 +7,12 @@ namespace App\RunEngine;
 use App\Entity\ErrorClass;
 use App\Entity\ServerProtocol;
 use App\Entity\Tool;
-use App\Toolbox\Transport\StreamableTransportFactory;
+use Mcp\Client;
+use Mcp\Client\Transport\HttpTransport;
+use Mcp\Schema\Content\TextContent;
+use Mcp\Schema\Result\CallToolResult;
+use Opis\JsonSchema\Errors\ValidationError;
 use Opis\JsonSchema\Validator;
-use PhpMcp\Client\Client;
-use PhpMcp\Client\ClientBuilder;
-use PhpMcp\Client\ClientConfig;
-use PhpMcp\Client\Enum\TransportType;
-use PhpMcp\Client\Exception\RequestException;
-use PhpMcp\Client\JsonRpc\Results\CallToolResult;
-use PhpMcp\Client\Model\Capabilities as ClientCapabilities;
-use PhpMcp\Client\Model\Content\TextContent;
-use PhpMcp\Client\ServerConfig;
 
 /**
  * Executes one tool call: schema validation, then dispatch over MCP
@@ -25,13 +20,15 @@ use PhpMcp\Client\ServerConfig;
  * tools are not executable in v1 — a classified server_error, never a
  * silent path.
  *
- * Per-call clients: a fresh SDK client per call avoids loop ownership
- * issues with the SDK's ReactPHP internals; Streamable HTTP has no
- * persistent connection anyway (each send() is its own POST).
+ * Per-call clients: a fresh SDK client per call keeps no state between calls,
+ * and Streamable HTTP has no persistent connection to reuse anyway (each send()
+ * is its own POST). The official client is PSR-18 underneath, so unlike the
+ * fork there is no event loop to own or leak.
  */
 final class ToolExecutor implements ToolExecutorInterface
 {
-    private const string CLIENT_VERSION = '1.0.0';
+    private const CLIENT_NAME = 'task-loom';
+    private const CLIENT_VERSION = '1.0.0';
 
     public function __construct(
         private readonly ?int $timeoutSeconds = null,
@@ -73,22 +70,6 @@ final class ToolExecutor implements ToolExecutorInterface
     }
 
     /**
-     * @return list<string>
-     */
-    private function flattenValidationError(\Opis\JsonSchema\Errors\ValidationError $error): array
-    {
-        $errors = [$error->message()];
-
-        foreach ($error->subErrors() as $sub) {
-            foreach ($this->flattenValidationError($sub) as $msg) {
-                $errors[] = $msg;
-            }
-        }
-
-        return $errors;
-    }
-
-    /**
      * Execute a tool call against its server (MCP protocol only in v1).
      *
      * @param array<string, mixed> $arguments
@@ -110,12 +91,15 @@ final class ToolExecutor implements ToolExecutorInterface
         $client = null;
 
         try {
-            $client = $this->buildClient($server->getUrl(), $server->getName());
+            $client = $this->buildClient($server->getUrl());
             $result = $client->callTool($tool->getName(), $arguments);
-        } catch (RequestException $e) {
-            throw new ToolExecutionException('Tool call rejected: '.$e->getMessage(), ErrorClass::ServerError);
         } catch (\Throwable $e) {
-            throw new ToolExecutionException('Tool call failed: '.$e->getMessage(), ErrorClass::ServerError);
+            // Every failure is classified a server error: whether the endpoint
+            // is unreachable, rejects the call, or returns a malformed result,
+            // the run engine's remedy is the same (record it, do not retry
+            // blindly, surface it). The distinction that matters to the caller
+            // is `isError` on the *result*, which is returned, not thrown.
+            throw new ToolExecutionException('Tool call failed: '.$this->describe($e), ErrorClass::ServerError);
         } finally {
             if (null !== $client) {
                 try {
@@ -127,6 +111,22 @@ final class ToolExecutor implements ToolExecutorInterface
         }
 
         return $this->resultToArray($result, $tool, $start);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function flattenValidationError(ValidationError $error): array
+    {
+        $errors = [$error->message()];
+
+        foreach ($error->subErrors() as $sub) {
+            foreach ($this->flattenValidationError($sub) as $msg) {
+                $errors[] = $msg;
+            }
+        }
+
+        return $errors;
     }
 
     /**
@@ -149,26 +149,38 @@ final class ToolExecutor implements ToolExecutorInterface
         ];
     }
 
-    private function buildClient(string $url, string $serverName): Client
+    private function buildClient(string $url): Client
     {
-        $config = new ServerConfig(
-            name: $serverName,
-            transport: TransportType::Http,
-            url: $url,
-            timeout: $this->timeoutSeconds ?? 60.0,
-        );
+        $timeout = $this->timeoutSeconds ?? 60;
 
-        $client = ClientBuilder::make()
-            ->withClientInfo('task-loom', self::CLIENT_VERSION)
-            ->withServerConfig($config)
-            ->withTransportFactory(new StreamableTransportFactory(
-                new ClientConfig('task-loom', self::CLIENT_VERSION, ClientCapabilities::forClient()),
-            ))
+        $client = Client::builder()
+            ->setClientInfo(self::CLIENT_NAME, self::CLIENT_VERSION)
+            ->setInitTimeout($timeout)
+            ->setRequestTimeout($timeout)
+            // A tool call is not necessarily idempotent, so retrying the
+            // handshake is fine but retrying the call is not — and the SDK only
+            // ever retries the handshake. Keep the default low anyway: a run
+            // that is going to fail should fail promptly.
+            ->setMaxRetries(1)
             ->build();
 
-        $client->initialize();
+        // Streamable HTTP only (SPEC §11). A tool call needs no session of its
+        // own: connect() performs the handshake, callTool() carries it, and
+        // disconnect() closes it — all within this method.
+        $client->connect(new HttpTransport(endpoint: $url));
 
         return $client;
+    }
+
+    /**
+     * A message suitable for logging and the UI, without a stack trace.
+     *
+     * The instructions to ServerReader apply here too: reader/executor
+     * exceptions carry no credential values.
+     */
+    private function describe(\Throwable $e): string
+    {
+        return $e::class.': '.$e->getMessage();
     }
 
     /**

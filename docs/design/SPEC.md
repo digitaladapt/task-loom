@@ -333,18 +333,41 @@ the system can *propose* anything, but only a human makes it live.
 | Async/queue | Symfony Messenger — run-now dispatches a message from day one; the scheduler tick (v1.1) is the same mechanism |
 | LLM | OpenAI-compatible endpoint (Ollama / vLLM / llama.cpp), `symfony/http-client` |
 | Logging | Monolog, structured JSON + request IDs (guiding-light phase 1) |
-| MCP | `php-mcp/client` + `php-mcp/server` (see below) |
+| MCP | `mcp/sdk` (the official PHP MCP SDK), pinned exactly — see below |
 
 **Non-Symfony dependencies — approved (user sign-off):**
 
-1. **`php-mcp/client` and `php-mcp/server`** (the PHP MCP SDK) — used for both the
-   client role (tool execution over Streamable HTTP) and the server role (task tools).
-   Adopted by decision, no spike required. If the SDK fails us in practice, the
-   hand-rolled streamable-HTTP fallback (initialize / tools/list / tools/call — small)
-   is the documented contingency, not the plan.
+1. **`mcp/sdk`** — the official PHP MCP SDK (a collaboration between Symfony and
+the PHP Foundation), used for both the client role (tool execution over
+Streamable HTTP) and the server role (task tools). Superseded the originally
+approved `php-mcp/client` + `php-mcp/server` in the SDK migration
+(`docs/design/MCP_SDK_MIGRATION.md`): upstream `php-mcp/*` is unmaintained, and
+its client could not speak Streamable HTTP at all — it opened a legacy HTTP+SSE
+stream that modern servers answer with 405, which an in-repo transport worked
+around for ~380 lines until the official SDK removed the need. Pinned to an
+exact version (`0.8.1`) because it is pre-1.0; relax to `^1.0` once 1.0 ships.
 2. **`dragonmantank/cron-expression`** — proven in task-weaver; needed for v1.1 scheduling.
 
 Transports supported: **MCP Streamable HTTP** and **OpenAPI (HTTP/JSON)**. No stdio, no SSE.
+
+### The two MCP roles
+
+- **Client** (`ToolExecutor`, `McpServerReader`) — calls tools on external
+  servers. HTTP only; stdio is not reachable (SPEC §11), enforced by
+  constructing a `HttpTransport` directly rather than by configuration.
+- **Server** (`App\Mcp\Server\TaskTools` via `TaskServerFactory`) — exposes the
+  task tools at **`POST /mcp`**, served from inside the app like any other
+  route. There is no standalone process and no separate port: the SDK's HTTP
+transport is a PSR-7 request handler, not a web server.
+
+  Because it is an app route, it inherits `config/packages/security.yaml`'s
+  final rule (`^/ → ROLE_ADMIN`): **the endpoint is admin-guarded**, and
+  external agents authenticate with the admin credentials. The gate itself
+  (§4.3) is behavioural and lives in `TaskCrud`, below the transport.
+
+  MCP sessions are required (the SDK answers non-`initialize` requests without
+  one with `400`/`-32600`) and are stored in the `mcp_sessions` cache pool so a
+  handshake survives between requests.
 
 **Conformance:** full STRUCTURE-FOR-NEW-PROJECTS.md compliance from day one — vendored
 `phpstan.neon.dist` / `.php-cs-fixer.dist.php` / `.editorconfig` / `phpunit.dist.xml`,

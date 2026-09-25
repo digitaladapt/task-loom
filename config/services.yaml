@@ -29,6 +29,18 @@ services:
         public: true
         arguments:
             $container: '@service_container'
+            # Pool name as Symfony registers it, NOT 'cache.mcp_sessions'.
+            $sessionPool: '@mcp_sessions'
+
+    # The MCP endpoint (SPEC §11) resolves PSR-7/PSR-17 parts for its
+    # Symfony→PSR-7 bridge. Stateless, so shared is fine.
+    app.psr17_http_factory:
+        class: GuzzleHttp\Psr7\HttpFactory
+        public: true
+
+    App\Controller\McpController:
+        arguments:
+            $httpFactory: '@app.psr17_http_factory'
 
     # Referenced by name from the MCP tool handler resolution (and the
     # gating tests, which must exercise the real persisted gate).

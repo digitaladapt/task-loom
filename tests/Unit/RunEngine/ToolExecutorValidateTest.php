@@ -12,8 +12,8 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * ToolExecutor::validate — the validate-before-dispatch gate (SPEC §5.1),
- * exercised against real JSON Schemas via opis (the same validator the
- * php-mcp server uses).
+ * exercised against real JSON Schemas via opis (the same validator the MCP
+ * SDK uses server-side, so the harness validates exactly what a server would).
  */
 final class ToolExecutorValidateTest extends TestCase
 {

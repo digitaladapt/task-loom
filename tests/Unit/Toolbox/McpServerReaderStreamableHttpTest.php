@@ -11,17 +11,22 @@ use PHPUnit\Framework\TestCase;
 use Symfony\Component\Process\Process;
 
 /**
- * Regression test for the MCP 405 crash against Streamable HTTP servers.
+ * Regression test for the MCP 405 crash against Streamable HTTP servers — kept,
+ * but reframed.
  *
- * The SDK's built-in Http transport GETs the endpoint and waits for an SSE
- * stream (legacy HTTP+SSE protocol). Streamable HTTP servers — including
- * context-shuttle — answer that GET with 405, which the SDK treated as a
- * fatal ConnectionException. The reader now installs a StreamableHttpTransport
- * via a custom TransportFactory.
+ * The bug: php-mcp/client's built-in HTTP transport opened a legacy HTTP+SSE
+ * stream (a GET) and treated Streamable HTTP servers' 405 as a fatal
+ * ConnectionException. The fix at the time was a hand-rolled transport in
+ * src/Toolbox/Transport/, installed via a custom TransportFactory.
  *
- * Spins up a local PHP built-in server (loopback, ephemeral port) that
- * implements Streamable HTTP behavior: 405 on GET, JSON-RPC on POST, in
- * both application/json and text/event-stream response flavors.
+ * The official SDK's transport POSTs, handles both JSON and SSE response
+ * framing, and manages the session header itself — so the workaround is gone.
+ * This test is now the *proof that the workaround is unnecessary* rather than
+ * the proof that one exists: it drives the real reader against a real server
+ * that answers GET with 405, and asserts the tools come back.
+ *
+ * If a future SDK release reintroduces a GET-first handshake, these tests fail
+ * loudly instead of the catalog quietly emptying.
  */
 final class McpServerReaderStreamableHttpTest extends TestCase
 {
@@ -76,9 +81,9 @@ final class McpServerReaderStreamableHttpTest extends TestCase
         return $port;
     }
 
-    public function testReadDiscoversToolsFromStreamableHttpServer(): void
+    private function assertDiscoversEchoTool(string $path): void
     {
-        $this->startServer('/mcp');
+        $this->startServer($path);
 
         $reader = new McpServerReader(5);
         $server = new McpServer('shuttle', $this->baseUrl, ServerProtocol::Mcp);
@@ -88,18 +93,19 @@ final class McpServerReaderStreamableHttpTest extends TestCase
         self::assertCount(1, $tools);
         self::assertSame('echo', $tools[0]->name);
         self::assertSame('Echo the message back.', $tools[0]->description);
+        self::assertSame(
+            ['type' => 'object', 'properties' => ['message' => ['type' => 'string']], 'required' => ['message']],
+            $tools[0]->schema,
+        );
+    }
+
+    public function testReadDiscoversToolsFromStreamableHttpServer(): void
+    {
+        $this->assertDiscoversEchoTool('/mcp');
     }
 
     public function testReadDiscoversToolsFromSseFramedResponses(): void
     {
-        $this->startServer('/sse-mcp');
-
-        $reader = new McpServerReader(5);
-        $server = new McpServer('shuttle', $this->baseUrl, ServerProtocol::Mcp);
-
-        $tools = $reader->read($server);
-
-        self::assertCount(1, $tools);
-        self::assertSame('echo', $tools[0]->name);
+        $this->assertDiscoversEchoTool('/sse-mcp');
     }
 }

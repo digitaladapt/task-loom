@@ -7,20 +7,28 @@ namespace App\Mcp\Server;
 use App\Entity\Task;
 use App\Entity\TaskKind;
 use App\Entity\ToolboxMode;
+use App\StepModel\StepFormatException;
 use App\StepModel\StepGraphCodec;
+use Mcp\Exception\ToolCallException;
 
 /**
  * The task tools exposed over the MCP server role (SPEC §10: the seeded
  * reviewer task's toolbox — task_list, task_get, task_create, task_update).
  *
  * Handlers are plain methods on this service; the server factory
- * registers them via ServerBuilder::withTool() with explicit input
+ * registers them via Builder::addTool() with explicit input
  * schemas. Handlers always return plain arrays — never entities — so the
  * SDK's CallToolResult formatting stays a boring, predictable JSON blob.
  *
  * Steps travel in the authoring/wire format (SPEC §13.2): nested arrays
  * in (create/update), nested arrays rendered back out (get). The
  * depends_on edges are the storage form — this layer never shows them.
+ *
+ * Step-format problems are translated to the SDK's ToolCallException: it
+ * is the one exception the SDK renders verbatim to the caller (as an
+ * isError result), which is what makes the codec's indexed diagnosis
+ * useful to an authoring agent — a generic throwable would degrade to a
+ * bare "internal error" with the detail only in the log.
  *
  * The write gate is not here. It lives in TaskCrud (SPEC §4.3) — the
  * persistence layer, below any prompt or tool contract.
@@ -54,7 +62,11 @@ final class TaskTools
         ?string $schedule = null,
         mixed $steps = null,
     ): array {
-        $task = $this->crud->create($title, $brief, $kind, $toolboxMode, $toolbox, $schedule, $steps);
+        try {
+            $task = $this->crud->create($title, $brief, $kind, $toolboxMode, $toolbox, $schedule, $steps);
+        } catch (StepFormatException $e) {
+            throw new ToolCallException($e->getMessage(), 0, $e);
+        }
 
         return [
             'id' => $task->getId(),
@@ -80,7 +92,11 @@ final class TaskTools
      */
     public function update(int $taskId, array $changes): array
     {
-        $task = $this->crud->update($taskId, $changes);
+        try {
+            $task = $this->crud->update($taskId, $changes);
+        } catch (StepFormatException $e) {
+            throw new ToolCallException($e->getMessage(), 0, $e);
+        }
 
         $isReplacement = null !== $task->getReplacementFor();
 

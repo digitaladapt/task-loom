@@ -8,123 +8,107 @@ use App\Entity\Step;
 use App\Entity\TaskAuthor;
 use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
-use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
+use Symfony\Bundle\FrameworkBundle\KernelBrowser;
+use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
 
 /**
- * End-to-end: the task MCP server role over real Streamable HTTP —
- * JSON-RPC initialize + tools/list + tools/call against the actual
- * ReactPHP socket, exactly as an external agent would see it (SPEC §11).
+ * End-to-end: the task MCP server role over real Streamable HTTP (SPEC §11) —
+ * JSON-RPC initialize + tools/list + tools/call, exactly as an external agent
+ * would see it.
  *
- * The gate assertion here is the whole point: a tools/call for task_create
- * must land in the DB as a disabled task (SPEC §4.3), and the write tools'
- * input schemas must contain no 'enabled' parameter.
+ * The gate assertion is the whole point: a tools/call for task_create must
+ * persist a disabled task (SPEC §4.3), and the write tools' input schemas must
+ * contain no 'enabled' parameter.
  *
- * Server management notes: the port is picked dynamically (a fixed port
- * invites collisions with leaked processes from earlier runs), and the
- * readiness probe verifies the server's *identity* via initialize — a
- * mere "port accepts connections" check once passed against a stale
- * leftover process from an unrelated test.
+ * This suite used to spawn `app:mcp:serve` as a background process, pick a free
+ * port, poll for readiness and kill a PID — its own docblock warned that a
+ * fixed port "invites collisions with leaked processes from earlier runs" and
+ * that a plain "port accepts connections" probe once passed against a stale
+ * leftover process. With the MCP endpoint served from the app (see
+ * docs/design/MCP_SDK_MIGRATION.md) the same wire traffic goes through the
+ * kernel, so the process choreography, the port hunt and the readiness polling
+ * are all gone.
+ *
+ * Sessions: the SDK requires an established session for every request other
+ * than `initialize`, answering anything else with 400. That is the spec
+ * behaving correctly, so this suite performs a handshake first — exactly as a
+ * real client must.
  */
-final class TaskMcpServerEndToEndTest extends KernelTestCase
+final class TaskMcpServerEndToEndTest extends WebTestCase
 {
-    private static ?int $serverPid = null;
-    private static int $port = 0;
+    private KernelBrowser $client; // @phpstan-ignore property.uninitialized (assigned in setUp)
 
     #[\Override]
-    public static function setUpBeforeClass(): void
+    protected function setUp(): void
     {
-        $kernel = self::createKernel();
-        $kernel->boot();
+        static::ensureKernelShutdown();
+        $this->client = static::createClient();
 
-        self::$port = self::findFreePort();
+        // The MCP endpoint is admin-guarded like every other app route
+        // (config/packages/security.yaml ends with `^/ → ROLE_ADMIN`).
+        $this->client->setServerParameter('PHP_AUTH_USER', 'admin');
+        $this->client->setServerParameter('PHP_AUTH_PW', 'test-admin-password');
 
-        $cmd = sprintf(
-            'APP_ENV=test php %s app:mcp:serve --host 127.0.0.1 --port %d --stateless > /tmp/mcp-serve-e2e.log 2>&1 & echo $!',
-            escapeshellarg($kernel->getProjectDir().'/bin/console'),
-            self::$port,
-        );
-
-        exec($cmd, $output, $exitCode);
-        \assert(0 === $exitCode, 'server spawn failed: '.implode("\n", $output));
-        self::$serverPid = (int) $output[0];
-
-        // Readiness: initialize must answer with OUR server identity, not
-        // just any listener that happens to hold the port.
-        $deadline = microtime(true) + 20;
-        while (microtime(true) < $deadline) {
-            $probe = self::rpcStatic(self::$port, 'initialize', [
-                'protocolVersion' => '2025-06-18',
-                'capabilities' => new \stdClass(),
-                'clientInfo' => ['name' => 'e2e-probe', 'version' => '1.0.0'],
-            ]);
-
-            if (200 === $probe['code'] && 'task-loom' === ($probe['body']['result']['serverInfo']['name'] ?? null)) {
-                return;
-            }
-
-            usleep(100_000);
-        }
-
-        self::fail('MCP server did not come up (or a foreign process holds the port): '.(file_get_contents('/tmp/mcp-serve-e2e.log') ?: ''));
-    }
-
-    #[\Override]
-    public static function tearDownAfterClass(): void
-    {
-        if (null !== self::$serverPid) {
-            exec(sprintf('kill %d 2>/dev/null', self::$serverPid));
-            self::$serverPid = null;
-        }
+        $em = static::getContainer()->get('doctrine')->getManager();
+        $em->createQuery('DELETE FROM App\Entity\ToolCall')->execute();
+        $em->createQuery('DELETE FROM App\Entity\RunEvent')->execute();
+        $em->createQuery('DELETE FROM App\Entity\Run')->execute();
+        $em->createQuery('DELETE FROM App\Entity\Task')->execute();
+        $em->flush();
+        $em->clear();
     }
 
     /**
-     * Raw JSON-RPC POST, as any streamable-HTTP MCP client would do.
-     *
-     * @param array<string, mixed> $params
-     *
-     * @return array{code: int, body: array<string, mixed>}
+     * Perform the MCP handshake and return the session id later requests need.
      */
-    private function rpc(string $method, array $params): array
+    private function initializeSession(): string
     {
-        return self::rpcStatic(self::$port, $method, $params);
-    }
-
-    /**
-     * @param array<string, mixed> $params
-     *
-     * @return array{code: int, body: array<string, mixed>}
-     */
-    private static function rpcStatic(int $port, string $method, array $params): array
-    {
-        $payload = json_encode(['jsonrpc' => '2.0', 'id' => random_int(1, 2 ** 30), 'method' => $method, 'params' => $params], JSON_THROW_ON_ERROR);
-
-        $ch = curl_init("http://127.0.0.1:{$port}/mcp");
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            'Content-Type: application/json',
-            'Accept: application/json, text/event-stream',
+        $init = $this->rpc('initialize', [
+            'protocolVersion' => '2025-06-18',
+            'capabilities' => new \stdClass(),
+            'clientInfo' => ['name' => 'e2e-test', 'version' => '1.0.0'],
         ]);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
 
-        $body = curl_exec($ch);
-        $code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        self::assertSame(200, $init['code'], 'initialize failed: '.json_encode($init['body']));
+
+        $sessionId = $this->client->getResponse()->headers->get('Mcp-Session-Id');
+        self::assertNotNull($sessionId, 'initialize must return an Mcp-Session-Id header.');
+
+        return $sessionId;
+    }
+
+    /**
+     * Raw JSON-RPC POST inside an established session, as any Streamable HTTP
+     * MCP client would do.
+     *
+     * @param array<string, mixed> $params
+     *
+     * @return array{code: int, body: array<string, mixed>}
+     */
+    private function rpc(string $method, array $params, ?string $sessionId = null): array
+    {
+        $server = [
+            'CONTENT_TYPE' => 'application/json',
+            'HTTP_ACCEPT' => 'application/json, text/event-stream',
+        ];
+
+        if (null !== $sessionId) {
+            $server['HTTP_MCP_SESSION_ID'] = $sessionId;
+        }
+
+        $this->client->request('POST', '/mcp', server: $server, content: json_encode([
+            'jsonrpc' => '2.0',
+            'id' => random_int(1, 2 ** 30),
+            'method' => $method,
+            'params' => $params,
+        ], JSON_THROW_ON_ERROR));
+
+        $response = $this->client->getResponse();
 
         return [
-            'code' => $code,
-            'body' => json_decode((string) $body, true) ?? [],
+            'code' => $response->getStatusCode(),
+            'body' => json_decode((string) $response->getContent(), true) ?? [],
         ];
-    }
-
-    private static function findFreePort(): int
-    {
-        $sock = \socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-        \socket_bind($sock, '127.0.0.1', 0);
-        \socket_getsockname($sock, $ip, $port);
-        \socket_close($sock);
-
-        return $port;
     }
 
     public function testInitializeExposesServerIdentity(): void
@@ -134,13 +118,16 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
             'capabilities' => new \stdClass(),
             'clientInfo' => ['name' => 'e2e-test', 'version' => '1.0.0'],
         ]);
+
         self::assertSame(200, $init['code'], 'initialize failed: '.json_encode($init['body']));
         self::assertSame('task-loom', $init['body']['result']['serverInfo']['name']);
     }
 
     public function testToolsListExposesFourTaskTools(): void
     {
-        $list = $this->rpc('tools/list', []);
+        $sessionId = $this->initializeSession();
+        $list = $this->rpc('tools/list', [], $sessionId);
+
         self::assertSame(200, $list['code']);
         $names = array_map(static fn (array $t): string => $t['name'], $list['body']['result']['tools']);
         sort($names);
@@ -149,8 +136,11 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
 
     public function testToolsListWriteSchemasHaveNoEnabledParameter(): void
     {
-        $list = $this->rpc('tools/list', []);
+        $sessionId = $this->initializeSession();
+        $list = $this->rpc('tools/list', [], $sessionId);
+
         $tools = $list['body']['result']['tools'];
+        self::assertCount(4, $tools);
 
         foreach ($tools as $tool) {
             $props = $tool['inputSchema']['properties'] ?? [];
@@ -164,6 +154,7 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
 
     public function testToolsCallTaskCreatePersistsDisabled(): void
     {
+        $sessionId = $this->initializeSession();
         $response = $this->rpc('tools/call', [
             'name' => 'task_create',
             'arguments' => [
@@ -173,7 +164,7 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
                 'toolboxMode' => 'tags',
                 'toolbox' => ['weather'],
             ],
-        ]);
+        ], $sessionId);
 
         self::assertSame(200, $response['code'], 'tools/call failed: '.json_encode($response['body']));
         self::assertArrayNotHasKey('error', $response['body'], json_encode($response['body']));
@@ -183,9 +174,9 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
         $taskId = $result['id'];
 
         // The gate proof: the persisted row is disabled and agent-authored.
+        static::ensureKernelShutdown();
         self::bootKernel();
-        $tasks = static::getContainer()->get(TaskRepository::class);
-        $task = $tasks->find($taskId);
+        $task = static::getContainer()->get(TaskRepository::class)->find($taskId);
 
         self::assertNotNull($task, 'task_create did not persist a row');
         self::assertFalse($task->isEnabled(), 'SPEC §4.3 gate breached: agent write persisted enabled');
@@ -195,6 +186,7 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
 
     public function testToolsCallInvalidArgumentsReturnsStructuredError(): void
     {
+        $sessionId = $this->initializeSession();
         $response = $this->rpc('tools/call', [
             'name' => 'task_create',
             'arguments' => [
@@ -204,12 +196,40 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
                 'toolboxMode' => 'tags',
                 'toolbox' => [],
             ],
-        ]);
+        ], $sessionId);
 
         // Validation failure must be a JSON-RPC error, not a 500.
         self::assertSame(200, $response['code']);
         self::assertArrayHasKey('error', $response['body']);
         self::assertSame(-32602, $response['body']['error']['code']);
+    }
+
+    public function testToolsCallWithoutSessionIsRejected(): void
+    {
+        // Deliberate behaviour change from `app:mcp:serve --stateless`: the SDK
+        // requires a real handshake, so a caller that skips it is told so
+        // rather than silently served.
+        $response = $this->rpc('tools/list', []);
+
+        self::assertSame(400, $response['code']);
+        self::assertSame(-32600, $response['body']['error']['code']);
+    }
+
+    public function testUnauthenticatedRequestIsRejected(): void
+    {
+        // The endpoint inherits the app's admin guard (no access_control
+        // exemption), so reaching it requires credentials.
+        static::ensureKernelShutdown();
+        $client = static::createClient();
+        $client->setServerParameter('PHP_AUTH_USER', '');
+        $client->setServerParameter('PHP_AUTH_PW', '');
+
+        $client->request('POST', '/mcp', server: [
+            'CONTENT_TYPE' => 'application/json',
+            'HTTP_ACCEPT' => 'application/json, text/event-stream',
+        ], content: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}');
+
+        self::assertSame(401, $client->getResponse()->getStatusCode());
     }
 
     public function testToolsCallTaskCreateWithStepsPersistsGraphAndRendersItBack(): void
@@ -332,6 +352,8 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
         // Whitespace-only strings pass the coarse JSON schema (length ≥ 1)
         // but fail the codec's trim-and-require check server-side — the
         // precise layer's indexed diagnosis must reach the caller.
+        $sessionId = $this->initializeSession();
+
         $response = $this->rpc('tools/call', [
             'name' => 'task_create',
             'arguments' => [
@@ -342,7 +364,7 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
                 'toolbox' => [],
                 'steps' => [[['title' => '   ', 'brief' => 'x', 'toolbox' => ['  ']]]],
             ],
-        ]);
+        ], $sessionId);
 
         self::assertSame(200, $response['code']);
         $result = $response['body']['result'] ?? null;
@@ -358,6 +380,8 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
     {
         // The coarse gate: structurally invalid steps (empty title,
         // unknown field) never reach the persistence layer.
+        $sessionId = $this->initializeSession();
+
         $response = $this->rpc('tools/call', [
             'name' => 'task_create',
             'arguments' => [
@@ -368,7 +392,7 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
                 'toolbox' => [],
                 'steps' => [[['title' => '', 'brief' => 'x', 'bogus_field' => true]]],
             ],
-        ]);
+        ], $sessionId);
 
         self::assertSame(200, $response['code']);
         self::assertArrayHasKey('error', $response['body']);
@@ -418,7 +442,8 @@ final class TaskMcpServerEndToEndTest extends KernelTestCase
      */
     private function callTool(string $name, array $arguments): array
     {
-        $response = $this->rpc('tools/call', ['name' => $name, 'arguments' => $arguments]);
+        $sessionId = $this->initializeSession();
+        $response = $this->rpc('tools/call', ['name' => $name, 'arguments' => $arguments], $sessionId);
         self::assertSame(200, $response['code'], json_encode($response['body']));
 
         $contents = $response['body']['result']['content'] ?? [];
