@@ -77,6 +77,56 @@
     {% endif %}
 </section>
 
+<section aria-labelledby="steps-heading" class="steps">
+    <h2 id="steps-heading">Steps</h2>
+
+    {% if step_overview.isEmpty %}
+        <p class="muted">No steps — this task runs as a single unit (SPEC §13.1).</p>
+    {% else %}
+        {% if step_overview.isOk %}
+            <p class="muted">{{ step_overview.views|length }} step(s) in {{ step_overview.levelCount }} level(s) — levels run in sequence, steps within a level run in parallel.</p>
+        {% else %}
+            <ul class="problems">
+            {% for problem in step_overview.problems %}
+                <li>{{ problem }}</li>
+            {% endfor %}
+            </ul>
+            <p class="flash flash-error">Invalid step graph — enable/approve will refuse until it is fixed (SPEC §13.2).</p>
+        {% endif %}
+
+        {% set current_level = -1 %}
+        <ol class="levels">
+        {% for view in step_overview.views %}
+            {% if view.level != current_level %}
+                {% set current_level = view.level %}
+                {% if view.level > 0 %}</ol></li>{% endif %}
+                <li class="level">
+                    <p class="level-title">Level {{ view.level + 1 }}</p>
+                    <ol class="steps-in-level">
+            {% endif %}
+                <li class="card step">
+                    <span class="card-title">#{{ view.step.id }} — {{ view.step.title }}</span>
+                    <p>{{ view.step.brief }}</p>
+                    <p class="muted">toolbox: {{ view.step.toolboxMode.value }}{% if view.step.toolbox is not empty %} · <code>{{ view.step.toolbox|join(', ') }}</code>{% endif %}</p>
+                    {% if view.preview.resolved is not empty %}
+                        <p class="muted">{{ view.preview.resolved|length }} tool(s) would be available at this step's run start.</p>
+                    {% else %}
+                        <p class="flash flash-error">Resolves to an empty toolbox — this step's run would fail at dispatch.</p>
+                    {% endif %}
+                    {% if view.preview.problems is not empty %}
+                        <ul class="problems">
+                        {% for problem in view.preview.problems %}
+                            <li>{{ problem }}</li>
+                        {% endfor %}
+                        </ul>
+                    {% endif %}
+                </li>
+        {% endfor %}
+        {% if not step_overview.isEmpty %}</ol></li>{% endif %}
+        </ol>
+    {% endif %}
+</section>
+
 <section aria-labelledby="actions-heading">
     <h2 id="actions-heading">Actions</h2>
 

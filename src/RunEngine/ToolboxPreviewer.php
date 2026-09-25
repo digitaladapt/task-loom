@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\RunEngine;
 
+use App\Entity\Step;
 use App\Entity\Task;
 use App\Entity\Tool;
 use App\Entity\ToolboxMode;
@@ -11,7 +12,7 @@ use App\Repository\ToolRepository;
 
 /**
  * A non-throwing resolution pass for the admin UI (SPEC §8): what would
- * this task's toolbox resolve to right now, and if nothing, why?
+ * this toolbox declaration resolve to right now, and if nothing, why?
  *
  * This exists because of a live incident: an LLM-authored task declared
  * tags ('core') that no tool in the catalog carries; the run then failed
@@ -19,8 +20,14 @@ use App\Repository\ToolRepository;
  * before a human enables the task — enable is the control point, so
  * enable needs the diagnostic.
  *
+ * Under the step model (SPEC §13) the same incident class applies per
+ * step: each child run resolves its own toolbox at child-run start, so
+ * the task detail page previews every step's declaration too
+ * (previewStep()).
+ *
  * resolve() stays the authority at run time (fails loudly, SPEC §4.1);
- * preview() answers "what would resolve() say, without throwing".
+ * preview() / previewStep() answer "what would resolve() say, without
+ * throwing".
  */
 final readonly class ToolboxPreviewer
 {
@@ -35,11 +42,28 @@ final readonly class ToolboxPreviewer
      */
     public function preview(Task $task): ToolboxPreview
     {
+        return $this->previewDeclaration($task->getToolboxMode(), $task->getToolbox(), 'task');
+    }
+
+    /**
+     * The same pass for one step's toolbox declaration (SPEC §13.1: a
+     * step carries its own toolbox, resolved at its child-run start).
+     */
+    public function previewStep(Step $step): ToolboxPreview
+    {
+        return $this->previewDeclaration($step->getToolboxMode(), $step->getToolbox(), 'step');
+    }
+
+    /**
+     * @param list<string> $declared
+     */
+    private function previewDeclaration(ToolboxMode $mode, array $declared, string $subject): ToolboxPreview
+    {
         $resolved = [];
         $problems = [];
 
-        if (ToolboxMode::Explicit === $task->getToolboxMode()) {
-            foreach ($task->getToolbox() as $name) {
+        if (ToolboxMode::Explicit === $mode) {
+            foreach ($declared as $name) {
                 $tool = $this->tools->findOneBy(['name' => $name]);
 
                 if (null === $tool) {
@@ -68,11 +92,9 @@ final readonly class ToolboxPreviewer
         }
 
         // Tags mode: every enabled tool on every enabled server,
-        // intersected with the task's declared tags.
-        $declared = $task->getToolbox();
-
+        // intersected with the declared tags.
         if ([] === $declared) {
-            $problems[] = 'The task declares no tags — the toolbox would be empty.';
+            $problems[] = \sprintf('The %s declares no tags — the toolbox would be empty.', $subject);
 
             return new ToolboxPreview($resolved, $problems);
         }
@@ -98,8 +120,9 @@ final readonly class ToolboxPreviewer
         foreach ($declared as $tag) {
             if (!isset($matchedByTag[$tag])) {
                 $problems[] = \sprintf(
-                    'No tool carries the tag "%s" — edit tool tags in the catalog, or fix the task.',
+                    'No tool carries the tag "%s" — edit tool tags in the catalog, or fix the %s.',
                     $tag,
+                    $subject,
                 );
             }
         }

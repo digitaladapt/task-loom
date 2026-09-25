@@ -38,6 +38,40 @@ final class TaskServerFactory
     private ?Psr16SessionStore $sessionStore = null;
 
     /**
+     * The steps property shared by task_create / task_update (SPEC §13.2):
+     * an array of levels (each level an array of steps that run in
+     * parallel; levels run in sequence), each step an object of title +
+     * brief + optional toolbox. Validation is re-run server-side with
+     * indexed error messages; this schema is the coarse gate.
+     *
+     * @return array<string, mixed>
+     */
+    private static function stepsSchema(string $description): array
+    {
+        return [
+            'type' => ['array', 'null'],
+            'description' => $description,
+            'items' => [
+                'type' => 'array',
+                'description' => 'One level: the steps in it run in parallel. Levels run in sequence.',
+                'minItems' => 1,
+                'items' => [
+                    'type' => 'object',
+                    'description' => 'One step: a brief plus an optional toolbox. Its inputs are the previous level\'s outputs; the task\'s own brief is the final consumer of all step outputs.',
+                    'properties' => [
+                        'title' => ['type' => 'string', 'minLength' => 1, 'maxLength' => 200, 'description' => 'Short step name, unique within the task in practice.'],
+                        'brief' => ['type' => 'string', 'minLength' => 1, 'description' => 'What this step must accomplish.'],
+                        'toolbox_mode' => ['type' => 'string', 'enum' => ['tags', 'explicit'], 'description' => 'How this step\'s toolbox is resolved. Default: explicit.', 'default' => 'explicit'],
+                        'toolbox' => ['type' => 'array', 'items' => ['type' => 'string'], 'description' => 'Tags or explicit tool names for this step. Default: empty.', 'default' => []],
+                    ],
+                    'required' => ['title', 'brief'],
+                    'additionalProperties' => false,
+                ],
+            ],
+        ];
+    }
+
+    /**
      * @param CacheItemPoolInterface $sessionPool the `mcp_sessions` cache pool
      *                                            (PSR-6, adapted for the SDK below)
      */
@@ -55,6 +89,7 @@ final class TaskServerFactory
             ->setInstructions(implode("\n", [
                 'Task management for task-loom (SPEC §10).',
                 'Writes are gated: every task_create and task_update persists disabled and lands in the human approval queue (SPEC §4.3). You cannot create or enable tasks directly.',
+                'Tasks may declare a step graph (SPEC §13): an array of levels; steps within a level run in parallel, levels run in sequence. Steps are optional — a task with no steps runs as a single unit.',
                 'Read tools: task_list, task_get. Write tools: task_create, task_update.',
             ]))
             ->setLogger($this->logger)
@@ -113,11 +148,12 @@ final class TaskServerFactory
                     'type' => 'object',
                     'properties' => [
                         'title' => ['type' => 'string', 'description' => 'Short task name.', 'minLength' => 1, 'maxLength' => 255],
-                        'brief' => ['type' => 'string', 'description' => 'What the task should accomplish.'],
+                        'brief' => ['type' => 'string', 'description' => 'What the task should accomplish. For a stepped task this brief is the final consumer: it runs after all steps, with every step\'s output available as inputs.'],
                         'kind' => ['type' => 'string', 'enum' => ['run', 'session'], 'description' => 'Task kind; v1 ships run only.'],
                         'toolboxMode' => ['type' => 'string', 'enum' => ['tags', 'explicit'], 'description' => 'How the toolbox list is resolved at run time.'],
                         'toolbox' => ['type' => 'array', 'items' => ['type' => 'string'], 'description' => 'Tags or explicit tool names, depending on toolboxMode.'],
                         'schedule' => ['type' => ['string', 'null'], 'description' => 'Optional cron-style schedule; v1 runs are manual, so leave null.'],
+                        'steps' => self::stepsSchema('Optional step graph: an array of levels, each level an array of steps. Steps in a level run in parallel; levels run in sequence. Omit for a single-unit task.'),
                     ],
                     'required' => ['title', 'brief', 'kind', 'toolboxMode', 'toolbox'],
                 ],
@@ -147,6 +183,7 @@ final class TaskServerFactory
                                 'toolbox_mode' => ['type' => 'string', 'enum' => ['tags', 'explicit']],
                                 'toolbox' => ['type' => 'array', 'items' => ['type' => 'string']],
                                 'schedule' => ['type' => ['string', 'null'], 'description' => 'Cron-style schedule, or null to clear.'],
+                                'steps' => self::stepsSchema('Replace the task\'s entire step graph with this array of levels ([] clears all steps). Omit the key to leave the graph untouched.'),
                             ],
                             'additionalProperties' => false,
                         ],

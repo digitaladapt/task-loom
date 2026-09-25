@@ -7,6 +7,9 @@ namespace App\Mcp\Server;
 use App\Entity\Task;
 use App\Entity\TaskKind;
 use App\Entity\ToolboxMode;
+use App\StepModel\StepFormatException;
+use App\StepModel\StepGraphCodec;
+use Mcp\Exception\ToolCallException;
 
 /**
  * The task tools exposed over the MCP server role (SPEC §10: the seeded
@@ -17,6 +20,16 @@ use App\Entity\ToolboxMode;
  * schemas. Handlers always return plain arrays — never entities — so the
  * SDK's CallToolResult formatting stays a boring, predictable JSON blob.
  *
+ * Steps travel in the authoring/wire format (SPEC §13.2): nested arrays
+ * in (create/update), nested arrays rendered back out (get). The
+ * depends_on edges are the storage form — this layer never shows them.
+ *
+ * Step-format problems are translated to the SDK's ToolCallException: it
+ * is the one exception the SDK renders verbatim to the caller (as an
+ * isError result), which is what makes the codec's indexed diagnosis
+ * useful to an authoring agent — a generic throwable would degrade to a
+ * bare "internal error" with the detail only in the log.
+ *
  * The write gate is not here. It lives in TaskCrud (SPEC §4.3) — the
  * persistence layer, below any prompt or tool contract.
  */
@@ -24,6 +37,7 @@ final class TaskTools
 {
     public function __construct(
         private readonly TaskCrud $crud,
+        private readonly StepGraphCodec $codec,
     ) {
     }
 
@@ -35,9 +49,7 @@ final class TaskTools
      * enabled task through this tool.
      *
      * @param list<string> $toolbox
-     */
-    /**
-     * @param list<string> $toolbox
+     * @param mixed        $steps   wire-format step graph (SPEC §13.2), null = no steps
      *
      * @return array<string, mixed>
      */
@@ -48,12 +60,18 @@ final class TaskTools
         ToolboxMode $toolboxMode,
         array $toolbox,
         ?string $schedule = null,
+        mixed $steps = null,
     ): array {
-        $task = $this->crud->create($title, $brief, $kind, $toolboxMode, $toolbox, $schedule);
+        try {
+            $task = $this->crud->create($title, $brief, $kind, $toolboxMode, $toolbox, $schedule, $steps);
+        } catch (StepFormatException $e) {
+            throw new ToolCallException($e->getMessage(), 0, $e);
+        }
 
         return [
             'id' => $task->getId(),
             'status' => 'draft',
+            'steps' => \count($this->crud->stepsFor($task)),
             'note' => 'Persisted disabled — awaiting human approval (SPEC §4.3).',
         ];
     }
@@ -63,23 +81,32 @@ final class TaskTools
      * returns a disabled replacement draft; the original keeps running.
      * Draft tasks are edited in place.
      *
-     * @param array{title?: string, brief?: string, kind?: TaskKind, toolbox_mode?: ToolboxMode, toolbox?: list<string>, schedule?: ?string} $changes
-     */
-    /**
-     * @param array{title?: string, brief?: string, kind?: TaskKind, toolbox_mode?: ToolboxMode, toolbox?: list<string>, schedule?: ?string} $changes
+     * The `steps` change (SPEC §13.2) replaces the task's entire step
+     * graph with the supplied wire-format graph ([] clears it); omitting
+     * the key leaves the graph untouched — a replacement draft clones the
+     * original's graph in that case.
+     *
+     * @param array{title?: string, brief?: string, kind?: TaskKind|string, toolbox_mode?: ToolboxMode|string, toolbox?: list<string>, schedule?: ?string, steps?: mixed} $changes
      *
      * @return array<string, mixed>
      */
     public function update(int $taskId, array $changes): array
     {
-        $task = $this->crud->update($taskId, $changes);
+        try {
+            $task = $this->crud->update($taskId, $changes);
+        } catch (StepFormatException $e) {
+            throw new ToolCallException($e->getMessage(), 0, $e);
+        }
 
         $isReplacement = null !== $task->getReplacementFor();
 
         return [
             'id' => $task->getId(),
-            'status' => $task->isDraft() ? 'draft' : 'replacement_draft',
+            // isDraft() is true for replacement drafts too (not enabled,
+            // not archived) — the chain is what distinguishes them.
+            'status' => $isReplacement ? 'replacement_draft' : 'draft',
             'replacement_for' => $task->getReplacementFor()?->getId(),
+            'steps' => \count($this->crud->stepsFor($task)),
             'note' => $isReplacement
                 ? 'Enabled task is immutable — created a disabled replacement draft; approve it in the UI to swap (SPEC §4.4).'
                 : 'Draft updated in place.',
@@ -100,9 +127,9 @@ final class TaskTools
     }
 
     /**
-     * Get one task's full record, including its replacement chain.
-     */
-    /**
+     * Get one task's full record, including its replacement chain. The
+     * step graph comes back in the authoring/wire format (SPEC §13.2).
+     *
      * @return array<string, mixed>
      */
     public function get(int $taskId): array
@@ -124,6 +151,7 @@ final class TaskTools
             'kind' => $task->getKind()->value,
             'toolbox_mode' => $task->getToolboxMode()->value,
             'toolbox' => $task->getToolbox(),
+            'steps' => $this->codec->render($this->crud->stepsFor($task)),
             'schedule' => $task->getSchedule(),
             'enabled' => $task->isEnabled(),
             'archived' => $task->isArchived(),

@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional\Mcp\Server;
 
+use App\Entity\Step;
 use App\Entity\TaskAuthor;
+use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
@@ -228,5 +230,230 @@ final class TaskMcpServerEndToEndTest extends WebTestCase
         ], content: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}');
 
         self::assertSame(401, $client->getResponse()->getStatusCode());
+    }
+
+    public function testToolsCallTaskCreateWithStepsPersistsGraphAndRendersItBack(): void
+    {
+        $steps = [
+            [
+                ['title' => 'Weather', 'brief' => 'Fetch the weather.', 'toolbox_mode' => 'explicit', 'toolbox' => ['echo']],
+                ['title' => 'Calendar', 'brief' => 'Fetch the calendar.'],
+            ],
+            [
+                ['title' => 'Summary', 'brief' => 'Summarize all inputs.'],
+            ],
+        ];
+
+        $created = $this->callTool('task_create', [
+            'title' => 'E2E Stepped Task',
+            'brief' => 'Compose the briefing.',
+            'kind' => 'run',
+            'toolboxMode' => 'tags',
+            'toolbox' => ['weather'],
+            'steps' => $steps,
+        ]);
+
+        self::assertFalse($created['error'], $created['raw']);
+        $taskId = $created['result']['id'];
+
+        // The stored edges: summary depends on both level-1 steps.
+        $this->bootKernel();
+        $tasks = static::getContainer()->get(TaskRepository::class);
+        $task = $tasks->find($taskId);
+        self::assertNotNull($task);
+        self::assertFalse($task->isEnabled(), 'SPEC §4.3 gate holds for stepped creates');
+
+        $stepsRepo = static::getContainer()->get(StepRepository::class);
+        $stored = $stepsRepo->findForTask($task);
+        self::assertCount(3, $stored);
+        self::assertSame([], $stored[0]->getDependsOn());
+        self::assertSame([], $stored[1]->getDependsOn());
+        self::assertSame([$stored[0]->getId(), $stored[1]->getId()], $stored[2]->getDependsOn());
+        self::assertSame('Weather', $stored[0]->getTitle());
+        self::assertSame(['echo'], $stored[0]->getToolbox());
+
+        // task_get renders the graph back in the authoring format
+        // (defaults filled in: toolbox_mode "explicit", toolbox []).
+        $got = $this->callTool('task_get', ['taskId' => $taskId]);
+        self::assertFalse($got['error'], $got['raw']);
+        $normalized = array_map(fn (array $level) => array_map(fn (array $s) => [
+            'title' => $s['title'],
+            'brief' => $s['brief'],
+            'toolbox_mode' => $s['toolbox_mode'] ?? 'explicit',
+            'toolbox' => $s['toolbox'] ?? [],
+        ], $level), $steps);
+        self::assertSame($normalized, $got['result']['steps']);
+    }
+
+    public function testToolsCallTaskUpdateReplacesStepGraph(): void
+    {
+        $created = $this->callTool('task_create', [
+            'title' => 'E2E Update Steps',
+            'brief' => 'B.',
+            'kind' => 'run',
+            'toolboxMode' => 'tags',
+            'toolbox' => [],
+            'steps' => [[['title' => 'Old', 'brief' => 'old.']]],
+        ]);
+        self::assertFalse($created['error'], $created['raw']);
+        $taskId = $created['result']['id'];
+
+        $updated = $this->callTool('task_update', [
+            'taskId' => $taskId,
+            'changes' => ['steps' => [
+                [['title' => 'New A', 'brief' => 'a.']],
+                [['title' => 'New B', 'brief' => 'b.']],
+            ]],
+        ]);
+        self::assertFalse($updated['error'], $updated['raw']);
+        self::assertSame('draft', $updated['result']['status']);
+        self::assertSame(2, $updated['result']['steps']);
+
+        $this->bootKernel();
+        $tasks = static::getContainer()->get(TaskRepository::class);
+        $task = $tasks->find($taskId);
+        self::assertNotNull($task);
+
+        $stored = static::getContainer()->get(StepRepository::class)->findForTask($task);
+        self::assertSame(['New A', 'New B'], array_map(static fn (Step $s) => $s->getTitle(), $stored));
+        self::assertSame([$stored[0]->getId()], $stored[1]->getDependsOn());
+    }
+
+    public function testToolsCallTaskUpdateWithStringEnumsAndNoStepsKey(): void
+    {
+        // Regression: `changes` values arrive as JSON strings; the
+        // persistence layer must coerce them (TypeError before).
+        $created = $this->callTool('task_create', [
+            'title' => 'E2E Enum Coercion',
+            'brief' => 'B.',
+            'kind' => 'run',
+            'toolboxMode' => 'tags',
+            'toolbox' => ['weather'],
+        ]);
+        self::assertFalse($created['error'], $created['raw']);
+        $taskId = $created['result']['id'];
+
+        $updated = $this->callTool('task_update', [
+            'taskId' => $taskId,
+            'changes' => ['toolbox_mode' => 'explicit', 'toolbox' => ['echo']],
+        ]);
+
+        self::assertFalse($updated['error'], $updated['raw']);
+
+        $this->bootKernel();
+        $task = static::getContainer()->get(TaskRepository::class)->find($taskId);
+        self::assertNotNull($task);
+        self::assertSame('explicit', $task->getToolboxMode()->value);
+        self::assertSame(['echo'], $task->getToolbox());
+    }
+
+    public function testToolsCallTaskCreateWithMalformedStepsSurfacesDiagnosis(): void
+    {
+        // Whitespace-only strings pass the coarse JSON schema (length ≥ 1)
+        // but fail the codec's trim-and-require check server-side — the
+        // precise layer's indexed diagnosis must reach the caller.
+        $sessionId = $this->initializeSession();
+
+        $response = $this->rpc('tools/call', [
+            'name' => 'task_create',
+            'arguments' => [
+                'title' => 'Malformed steps',
+                'brief' => 'B.',
+                'kind' => 'run',
+                'toolboxMode' => 'tags',
+                'toolbox' => [],
+                'steps' => [[['title' => '   ', 'brief' => 'x', 'toolbox' => ['  ']]]],
+            ],
+        ], $sessionId);
+
+        self::assertSame(200, $response['code']);
+        $result = $response['body']['result'] ?? null;
+        self::assertIsArray($result, json_encode($response['body']));
+        self::assertTrue($result['isError'], 'malformed steps must surface as a tool error, not silence');
+
+        $text = $result['content'][0]['text'] ?? '';
+        self::assertStringContainsString('steps[0][0].title', $text);
+        self::assertStringContainsString('steps[0][0].toolbox[0]', $text);
+    }
+
+    public function testToolsCallTaskCreateWithSchemaViolatingStepsIsRejectedByTheSchemaGate(): void
+    {
+        // The coarse gate: structurally invalid steps (empty title,
+        // unknown field) never reach the persistence layer.
+        $sessionId = $this->initializeSession();
+
+        $response = $this->rpc('tools/call', [
+            'name' => 'task_create',
+            'arguments' => [
+                'title' => 'Schema-violating steps',
+                'brief' => 'B.',
+                'kind' => 'run',
+                'toolboxMode' => 'tags',
+                'toolbox' => [],
+                'steps' => [[['title' => '', 'brief' => 'x', 'bogus_field' => true]]],
+            ],
+        ], $sessionId);
+
+        self::assertSame(200, $response['code']);
+        self::assertArrayHasKey('error', $response['body']);
+        self::assertSame(-32602, $response['body']['error']['code']);
+    }
+
+    public function testToolsCallTaskUpdateOnEnabledTaskReportsReplacementDraft(): void
+    {
+        $created = $this->callTool('task_create', [
+            'title' => 'E2E Replacement Status',
+            'brief' => 'B.',
+            'kind' => 'run',
+            'toolboxMode' => 'tags',
+            'toolbox' => ['weather'],
+            'steps' => [[['title' => 'Keep', 'brief' => 'k.']]],
+        ]);
+        self::assertFalse($created['error'], $created['raw']);
+        $taskId = $created['result']['id'];
+
+        // Enable the task out of band (the human gate is the admin UI).
+        $this->bootKernel();
+        $em = static::getContainer()->get('doctrine')->getManager();
+        $task = static::getContainer()->get(TaskRepository::class)->find($taskId);
+        self::assertNotNull($task);
+        $task->enable();
+        $em->flush();
+
+        $updated = $this->callTool('task_update', [
+            'taskId' => $taskId,
+            'changes' => ['brief' => 'Tighter.'],
+        ]);
+
+        self::assertFalse($updated['error'], $updated['raw']);
+        // isDraft() is true for replacement drafts too; the status must
+        // say what actually happened.
+        self::assertSame('replacement_draft', $updated['result']['status']);
+        self::assertSame($taskId, $updated['result']['replacement_for']);
+        self::assertSame(1, $updated['result']['steps'], 'the replacement cloned the graph');
+    }
+
+    /**
+     * One tools/call returning the decoded tool payload plus the raw text.
+     *
+     * @param array<string, mixed> $arguments
+     *
+     * @return array{error: bool, result: array<string, mixed>, raw: string}
+     */
+    private function callTool(string $name, array $arguments): array
+    {
+        $sessionId = $this->initializeSession();
+        $response = $this->rpc('tools/call', ['name' => $name, 'arguments' => $arguments], $sessionId);
+        self::assertSame(200, $response['code'], json_encode($response['body']));
+
+        $contents = $response['body']['result']['content'] ?? [];
+        $text = $contents[0]['text'] ?? '';
+        $decoded = json_decode($text, true);
+
+        return [
+            'error' => (bool) ($response['body']['result']['isError'] ?? true),
+            'result' => \is_array($decoded) ? $decoded : [],
+            'raw' => $text,
+        ];
     }
 }
