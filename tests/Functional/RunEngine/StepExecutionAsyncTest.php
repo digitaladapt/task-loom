@@ -142,6 +142,49 @@ final class StepExecutionAsyncTest extends KernelTestCase
         self::assertSame('Final: sunny.', $completion['result']);
     }
 
+    public function testFinalConsumerHeadCarriesStepOutputsThroughTheLanes(): void
+    {
+        // The Inputs block (SPEC §13.4), async: each step's output is
+        // committed terminal, THEN the final consumer is created inside that
+        // same terminal commit with those outputs frozen into its head — so
+        // what the final consumer's prompt contains is exactly what the
+        // committed ledger says, driven by worker deliveries only.
+        $this->catalogTool('get_weather');
+        $task = $this->task('Async inputs', ['get_weather']);
+        $first = $this->step($task, 1, 'Weather', 'Fetch the weather.', ['get_weather']);
+        $this->step($task, 2, 'Calendar', 'Find calendar events.', ['get_weather'], [$first->getId()]);
+        $this->enable($task);
+
+        $this->llm->method('chat')->willReturnCallback(
+            fn (array $messages): LlmResponse => $this->response(content: $this->answerFor($messages)),
+        );
+
+        $this->engine->start($task);
+        $this->pump();
+
+        $this->em->clear();
+        $parent = $this->runs()[0];
+        self::assertSame(RunStatus::Succeeded, $parent->getStatus());
+
+        $final = null;
+        foreach ($this->children($parent) as $child) {
+            if (RunRole::FinalConsumer === $child->getRole()) {
+                $final = $child;
+                break;
+            }
+        }
+        self::assertInstanceOf(Run::class, $final);
+
+        $head = $final->getCheckpoint()['promptHead'] ?? null;
+        self::assertIsArray($head);
+        $system = (string) $head['system'];
+
+        self::assertStringContainsString('## Inputs', $system);
+        self::assertStringContainsString('### Weather', $system);
+        self::assertStringContainsString('Step: sunny.', $system);
+        self::assertStringContainsString('### Calendar', $system);
+    }
+
     public function testSiblingFailureLeavesQueuedOrphansAndSettlesParent(): void
     {
         // Both root steps are dispatched at once. The first fails; the
