@@ -19,6 +19,7 @@ use App\Llm\LlmClient;
 use App\Repository\RunRepository;
 use App\RunEngine\PromptCompiler;
 use App\RunEngine\RunEngine;
+use App\RunEngine\RunGraph;
 use App\RunEngine\ToolboxResolver;
 use App\RunEngine\ToolExecutor;
 use Doctrine\ORM\EntityManagerInterface;
@@ -123,6 +124,7 @@ final class RunEngineLiveE2eTest extends KernelTestCase
             $container->get(RunRepository::class),
             $this->em,
             new NullLogger(),
+            $container->get(RunGraph::class),
             ['step_budget' => 8, 'tool_retries' => 1, 'circuit_breaker' => 3],
         );
 

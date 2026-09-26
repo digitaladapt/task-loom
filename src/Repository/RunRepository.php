@@ -69,7 +69,10 @@ final class RunRepository extends ServiceEntityRepository
     }
 
     /**
-     * Run history for a task, newest first.
+     * Run history for a task, newest first. Top-level runs only — standalone
+     * runs and the parent aggregators of stepped tasks, the unit the task
+     * detail page lists as "a run of the task" (SPEC §13.6). Child runs of
+     * a graph are reached through their parent (findChildren()).
      *
      * @return list<Run>
      */
@@ -77,8 +80,25 @@ final class RunRepository extends ServiceEntityRepository
     {
         return $this->createQueryBuilder('r')
             ->where('r.task = :task')
+            ->andWhere('r.parent IS NULL')
             ->setParameter('task', $task)
             ->orderBy('r.id', 'DESC')
+            ->getQuery()->getResult();
+    }
+
+    /**
+     * The children of a parent run, oldest first (creation order — which for
+     * the graph is also dispatch order). The parent's status is derived from
+     * these (SPEC §13.3).
+     *
+     * @return list<Run>
+     */
+    public function findChildren(Run $parent): array
+    {
+        return $this->createQueryBuilder('r')
+            ->where('r.parent = :parent')
+            ->setParameter('parent', $parent)
+            ->orderBy('r.id', 'ASC')
             ->getQuery()->getResult();
     }
 

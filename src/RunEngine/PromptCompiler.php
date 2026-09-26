@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\RunEngine;
 
 use App\Context\Grounding;
+use App\Entity\Step;
 use App\Entity\Task;
 use App\Entity\Tool;
 
@@ -30,8 +31,31 @@ final readonly class PromptCompiler
      */
     public function compile(Task $task, array $tools): array
     {
-        $system = $this->compileSystem($task, $tools);
-        $user = $this->compileUser($task);
+        $system = $this->compileSystem($task->getTitle(), $task->getBrief(), $tools);
+        $user = $this->compileUser($task->getBrief());
+
+        return ['system' => $system, 'user' => $user];
+    }
+
+    /**
+     * The prompt head of a step's child run (SPEC §13.1, §13.3): same shape
+     * as a task's, compiled from the step's brief and toolbox — a step is a
+     * brief + a toolbox + edges, and its run's constitution IS the step.
+     * The completion declaration is framed as the step's output, which the
+     * task's final consumer receives (SPEC §13.4).
+     *
+     * @param list<Tool> $tools the step's frozen toolbox
+     *
+     * @return array{system: string, user: string}
+     */
+    public function compileForStep(Task $task, Step $step, array $tools): array
+    {
+        $note = \sprintf(
+            'This run executes one step of the task "%s". Its completion declaration is this step\'s output — the task\'s final consumer receives it once every step has completed.',
+            $task->getTitle(),
+        );
+        $system = $this->compileSystem($step->getTitle(), $step->getBrief(), $tools, $note);
+        $user = $this->compileUser($step->getBrief());
 
         return ['system' => $system, 'user' => $user];
     }
@@ -65,7 +89,7 @@ final readonly class PromptCompiler
     /**
      * @param list<Tool> $tools
      */
-    private function compileSystem(Task $task, array $tools): string
+    private function compileSystem(string $title, string $brief, array $tools, ?string $note = null): string
     {
         $sections = [];
 
@@ -78,7 +102,11 @@ final readonly class PromptCompiler
 
         $sections[] = "## Grounding\n\n".$this->grounding->render();
 
-        $sections[] = "## Task\n\nTitle: ".$task->getTitle()."\n\n".$task->getBrief();
+        $task = "## Task\n\nTitle: ".$title."\n\n".$brief;
+        if (null !== $note) {
+            $task .= "\n\n".$note;
+        }
+        $sections[] = $task;
 
         $toolList = [];
         foreach ($tools as $tool) {
@@ -102,8 +130,8 @@ final readonly class PromptCompiler
         return implode("\n\n", $sections);
     }
 
-    private function compileUser(Task $task): string
+    private function compileUser(string $brief): string
     {
-        return "Complete the following task.\n\n".$task->getBrief();
+        return "Complete the following task.\n\n".$brief;
     }
 }

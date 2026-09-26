@@ -83,3 +83,13 @@ services:
                 step_budget: '%env(int:TASKLOOM_STEP_BUDGET)%'
                 tool_retries: '%env(int:TASKLOOM_TOOL_RETRIES)%'
                 circuit_breaker: '%env(int:TASKLOOM_CIRCUIT_BREAKER)%'
+
+    # The step model's run graph (SPEC §13.3): same budgets as the engine —
+    # a child run's constitution is frozen with the same knobs a standalone
+    # run uses.
+    App\RunEngine\RunGraph:
+        arguments:
+            $budgets:
+                step_budget: '%env(int:TASKLOOM_STEP_BUDGET)%'
+                tool_retries: '%env(int:TASKLOOM_TOOL_RETRIES)%'
+                circuit_breaker: '%env(int:TASKLOOM_CIRCUIT_BREAKER)%'

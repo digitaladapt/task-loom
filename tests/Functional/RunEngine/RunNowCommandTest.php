@@ -9,8 +9,10 @@ use App\Context\ContextWindow;
 use App\Entity\McpServer;
 use App\Entity\Run;
 use App\Entity\RunEventType;
+use App\Entity\RunRole;
 use App\Entity\RunStatus;
 use App\Entity\ServerProtocol;
+use App\Entity\Step;
 use App\Entity\Task;
 use App\Entity\TaskAuthor;
 use App\Entity\TaskKind;
@@ -22,6 +24,7 @@ use App\Repository\RunRepository;
 use App\Repository\TaskRepository;
 use App\RunEngine\PromptCompiler;
 use App\RunEngine\RunEngine;
+use App\RunEngine\RunGraph;
 use App\RunEngine\ToolboxResolver;
 use App\RunEngine\ToolExecutorInterface;
 use Doctrine\ORM\EntityManagerInterface;
@@ -54,6 +57,7 @@ final class RunNowCommandTest extends KernelTestCase
         $this->em->createQuery('DELETE FROM App\Entity\ToolCall')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\RunEvent')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\Run')->execute();
+        $this->em->createQuery('DELETE FROM App\Entity\Step')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\Tool')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\McpServer')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\Task')->execute();
@@ -136,6 +140,47 @@ final class RunNowCommandTest extends KernelTestCase
         self::assertStringContainsString('failed', $tester->getDisplay());
     }
 
+    public function testSteppedRunReportsGraphShapeAndSucceedsSynchronously(): void
+    {
+        // SPEC §13.3 via the command path: a stepped task runs as a graph,
+        // and the command reports the child runs — the parent's status is
+        // the graph's status, exit code included.
+        $this->catalogTool('get_weather');
+        $task = $this->steppedTask();
+
+        $this->llm->method('chat')->willReturn($this->response(content: 'Delivered.'));
+
+        $tester = $this->tester();
+        $exit = $tester->execute(['task-id' => (string) $task->getId()]);
+
+        self::assertSame(0, $exit, $tester->getDisplay());
+        self::assertStringContainsString('1 step run(s)', $tester->getDisplay());
+
+        // The parent + its two children are all that persist.
+        $runs = $this->em->createQuery('SELECT r FROM App\Entity\Run r ORDER BY r.id ASC')->getResult();
+        self::assertCount(3, $runs);
+        self::assertSame(RunRole::Parent, $runs[0]->getRole());
+        self::assertSame(RunStatus::Succeeded, $runs[0]->getStatus());
+        self::assertSame(RunRole::Step, $runs[1]->getRole());
+        self::assertSame(RunRole::FinalConsumer, $runs[2]->getRole());
+    }
+
+    public function testSteppedRunFailsWithNonZeroExitWhenAStepFails(): void
+    {
+        $this->catalogTool('get_weather');
+        $task = $this->steppedTask();
+
+        $this->llm->method('chat')->willThrowException(
+            \App\Llm\LlmRequestException::transport(new \RuntimeException('boom')),
+        );
+
+        $tester = $this->tester();
+        $exit = $tester->execute(['task-id' => (string) $task->getId()]);
+
+        self::assertSame(1, $exit, $tester->getDisplay());
+        self::assertStringContainsString('failed', $tester->getDisplay());
+    }
+
     // --------------------------------------------------------------- helpers
 
     private function tester(): CommandTester
@@ -150,11 +195,13 @@ final class RunNowCommandTest extends KernelTestCase
             $container->get(RunRepository::class),
             $this->em,
             new NullLogger(),
+            $container->get(RunGraph::class),
             ['step_budget' => 10, 'tool_retries' => 1, 'circuit_breaker' => 3],
         );
 
         return new CommandTester(new RunNowCommand(
             $container->get(TaskRepository::class),
+            $container->get(RunRepository::class),
             $engine,
             $container->get(MessageBusInterface::class),
         ));
@@ -217,6 +264,32 @@ final class RunNowCommandTest extends KernelTestCase
             createdBy: TaskAuthor::User,
         );
         $this->em->persist($task);
+        $this->em->flush();
+
+        return $task;
+    }
+
+    /**
+     * A task with one step, then enabled — the graph shape the command
+     * must run and report (SPEC §13.3). Steps are authored before the
+     * enable (a step cannot be added to an enabled task, §13.1).
+     */
+    private function steppedTask(): Task
+    {
+        $task = new Task(
+            title: 'Stepped task',
+            brief: 'Compose the full briefing.',
+            kind: TaskKind::Run,
+            toolboxMode: ToolboxMode::Tags,
+            toolbox: ['test-server'],
+            createdBy: TaskAuthor::User,
+        );
+        $this->em->persist($task);
+
+        $step = new Step($task, 1, 'Fetch', 'Fetch the weather.', ToolboxMode::Tags, ['test-server']);
+        $this->em->persist($step);
+
+        $task->enable();
         $this->em->flush();
 
         return $task;

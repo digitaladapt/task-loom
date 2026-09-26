@@ -4,9 +4,13 @@ declare(strict_types=1);
 
 namespace App\Command;
 
+use App\Entity\Run;
+use App\Entity\RunRole;
+use App\Entity\RunStatus;
 use App\Entity\Task;
 use App\Message\LlmTurnMessage;
 use App\Message\ToolTurnMessage;
+use App\Repository\RunRepository;
 use App\Repository\TaskRepository;
 use App\RunEngine\RunEngine;
 use Symfony\Component\Console\Attribute\AsCommand;
@@ -36,6 +40,7 @@ final class RunNowCommand extends Command
 {
     public function __construct(
         private readonly TaskRepository $tasks,
+        private readonly RunRepository $runs,
         private readonly RunEngine $engine,
         private readonly MessageBusInterface $bus,
     ) {
@@ -90,19 +95,44 @@ final class RunNowCommand extends Command
 
         $run = $this->engine->run($task);
 
-        $output->writeln(\sprintf('Run %d: %s (steps: %d)', $run->getId(), $run->getStatus()->value, $run->getStepCount()));
+        if (RunRole::Parent === $run->getRole()) {
+            $children = $this->runs->findChildren($run);
+            $stepRuns = \count(array_filter($children, static fn (Run $child): bool => RunRole::Step === $child->getRole()));
+            $output->writeln(\sprintf(
+                'Run %d: %s (%d step run(s), %d child run(s) total)',
+                $run->getId(),
+                $run->getStatus()->value,
+                $stepRuns,
+                \count($children),
+            ));
+        } else {
+            $output->writeln(\sprintf('Run %d: %s (steps: %d)', $run->getId(), $run->getStatus()->value, $run->getStepCount()));
+        }
 
         return RunEngineTerminal::toExitCode($run);
     }
 
     /**
-     * Async path: create the run (queued + frozen constitution), dispatch
-     * its first turn. The run row is the queue — if this process dies after
-     * the run is saved but before the dispatch, app:run:requeue recovers it.
+     * Async path: create the run (queued + frozen constitution); for a
+     * zero-step task, dispatch its first turn. The run row is the queue — if
+     * this process dies after the run is saved but before the dispatch,
+     * app:run:requeue recovers it.
+     *
+     * A stepped task is a run GRAPH (SPEC §13.3): start() already created
+     * the parent and dispatched every root step's first turn inside its
+     * creation transaction, so there is no single "first message" here.
      */
     private function dispatch(Task $task, OutputInterface $output): int
     {
         $run = $this->engine->start($task);
+
+        if (RunRole::Parent === $run->getRole()) {
+            $queued = \count(array_filter($this->runs->findChildren($run), static fn (Run $child): bool => RunStatus::Queued === $child->getStatus()));
+            $output->writeln(\sprintf('Run %d: queued — %d step run(s) on the "llm" lane.', $run->getId(), $queued));
+            $output->writeln('Consume with: php bin/console messenger:consume llm tools');
+
+            return self::SUCCESS;
+        }
 
         $message = $this->engine->nextTurnMessage($run);
         if (!$message instanceof LlmTurnMessage && !$message instanceof ToolTurnMessage) {

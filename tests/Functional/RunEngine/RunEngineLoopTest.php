@@ -21,6 +21,7 @@ use App\Llm\LlmResponse;
 use App\Repository\RunRepository;
 use App\RunEngine\PromptCompiler;
 use App\RunEngine\RunEngine;
+use App\RunEngine\RunGraph;
 use App\RunEngine\ToolboxResolver;
 use App\RunEngine\ToolExecutionException;
 use App\RunEngine\ToolExecutorInterface;
@@ -211,6 +212,7 @@ final class RunEngineLoopTest extends KernelTestCase
             $container->get(RunRepository::class),
             $this->em,
             new NullLogger(),
+            $container->get(RunGraph::class),
             ['step_budget' => 2, 'tool_retries' => 0, 'circuit_breaker' => 99],
         );
 
@@ -250,6 +252,7 @@ final class RunEngineLoopTest extends KernelTestCase
             $container->get(RunRepository::class),
             $this->em,
             new NullLogger(),
+            $container->get(RunGraph::class),
             ['step_budget' => 50, 'tool_retries' => 2, 'circuit_breaker' => 3],
         );
     }
