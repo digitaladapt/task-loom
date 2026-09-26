@@ -13,7 +13,6 @@ use App\Entity\RunStatus;
 use App\Entity\Step;
 use App\Entity\Task;
 use App\Message\LlmTurnMessage;
-use App\Repository\RunEventRepository;
 use App\Repository\RunRepository;
 use App\Repository\StepRepository;
 use Doctrine\ORM\EntityManagerInterface;
@@ -61,7 +60,7 @@ final class RunGraph
     public function __construct(
         private readonly RunRepository $runs,
         private readonly StepRepository $steps,
-        private readonly RunEventRepository $events,
+        private readonly StepOutputProvider $outputs,
         private readonly EntityManagerInterface $em,
         private readonly ToolboxResolver $resolver,
         private readonly PromptCompiler $prompts,
@@ -369,9 +368,11 @@ final class RunGraph
 
         try {
             $tools = null === $step ? $this->resolver->resolve($task) : $this->resolver->resolveStep($step);
-            $promptHead = null === $step
-                ? $this->prompts->compile($task, $tools)
-                : $this->prompts->compileForStep($task, $step, $tools);
+            $promptHead = match (true) {
+                null !== $step => $this->prompts->compileForStep($task, $step, $tools, $this->outputs->forStep($parent, $step)),
+                RunRole::FinalConsumer === $role => $this->prompts->compileForFinalConsumer($task, $tools, $this->outputs->forFinalConsumer($parent)),
+                default => $this->prompts->compile($task, $tools),
+            };
 
             $child->setToolboxSnapshot(ToolboxSnapshot::fromTools($tools));
             $child->setCheckpoint((new LoopState(
@@ -380,7 +381,7 @@ final class RunGraph
                 circuitBreakerThreshold: $this->budgets['circuit_breaker'] ?? 3,
                 promptHead: $promptHead,
             ))->toCheckpoint());
-        } catch (ToolboxResolutionException $e) {
+        } catch (ToolboxResolutionException|StepOutputException $e) {
             $child->markFailed($e->errorClass);
             $this->appendEvent($child, RunEventType::Failure, ['reason' => $e->getMessage()], $e->errorClass);
 
@@ -474,7 +475,7 @@ final class RunGraph
     /**
      * The final consumer's justified completion artifact (SPEC §13.4) —
      * copied onto the parent so the run itself is self-contained in the
-     * ledger.
+     * ledger. Read through the output provider: one artifact-reading path.
      */
     private function finalArtifact(Run $parent): ?string
     {
@@ -490,18 +491,15 @@ final class RunGraph
             return null;
         }
 
-        $event = $this->events->findOneBy(
-            ['run' => $final, 'type' => RunEventType::Completion],
-            ['seq' => 'DESC'],
-        );
-
-        if (!$event instanceof RunEvent) {
+        try {
+            return $this->outputs->artifactOf($final);
+        } catch (StepOutputException) {
+            // The parent is settling as succeeded only because the final
+            // consumer succeeded; a missing artifact here is corrupt state,
+            // surfaced as a parent completion with no result rather than a
+            // throw out of the settle path.
             return null;
         }
-
-        $result = $event->getPayload()['result'] ?? null;
-
-        return \is_string($result) ? $result : null;
     }
 
     /**
