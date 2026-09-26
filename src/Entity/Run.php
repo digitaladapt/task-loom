@@ -20,6 +20,7 @@ use Doctrine\ORM\Mapping as ORM;
 #[ORM\Entity(repositoryClass: RunRepository::class)]
 #[ORM\Index(name: 'idx_run_task', columns: ['task_id'])]
 #[ORM\Index(name: 'idx_run_status', columns: ['status'])]
+#[ORM\Index(name: 'idx_run_parent', columns: ['parent_id'])]
 class Run
 {
     #[ORM\Id]
@@ -30,6 +31,34 @@ class Run
     #[ORM\ManyToOne(targetEntity: Task::class)]
     #[ORM\JoinColumn(name: 'task_id', referencedColumnName: 'id', onDelete: 'CASCADE')]
     private Task $task;
+
+    /**
+     * What this run is within the step model (SPEC §13.3): an ordinary v1
+     * run, the parent aggregator of a stepped task's graph, a step child,
+     * or the final consumer. Only runs where executesTurns() is true ever
+     * run engine turns; a parent aggregates and never executes.
+     */
+    #[ORM\Column(length: 16, enumType: RunRole::class, options: ['default' => 'standalone'])]
+    private RunRole $role = RunRole::Standalone;
+
+    /**
+     * The parent run of a stepped task's graph — set on child runs (step
+     * and final consumer), null on standalone runs and parents. Children
+     * cascade with their parent; deleting a graph deletes its parts.
+     */
+    #[ORM\ManyToOne(targetEntity: self::class)]
+    #[ORM\JoinColumn(name: 'parent_id', referencedColumnName: 'id', nullable: true, onDelete: 'CASCADE')]
+    private ?Run $parent = null;
+
+    /**
+     * The step this child run executes (SPEC §13.2, §13.3) — set on step
+     * runs only. Null for parents, final consumers, standalone runs. The
+     * reference is descriptive (which step of the graph this run is); the
+     * authoritative edges live on Step.depends_on.
+     */
+    #[ORM\ManyToOne(targetEntity: Step::class)]
+    #[ORM\JoinColumn(name: 'step_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
+    private ?Step $step = null;
 
     /** @see RunStatus */
     #[ORM\Column(length: 32, enumType: RunStatus::class)]
@@ -105,6 +134,60 @@ class Run
     public function getTask(): Task
     {
         return $this->task;
+    }
+
+    public function getRole(): RunRole
+    {
+        return $this->role;
+    }
+
+    public function setRole(RunRole $role): void
+    {
+        $this->role = $role;
+    }
+
+    public function getParent(): ?self
+    {
+        return $this->parent;
+    }
+
+    public function setParent(?self $parent): void
+    {
+        $this->parent = $parent;
+    }
+
+    public function getStep(): ?Step
+    {
+        return $this->step;
+    }
+
+    public function setStep(?Step $step): void
+    {
+        $this->step = $step;
+    }
+
+    /**
+     * Whether this run executes engine turns. A parent run is a pure
+     * aggregator (SPEC §13.3): it must never be claimed, and a turn
+     * delivered for it is stale by construction.
+     */
+    public function executesTurns(): bool
+    {
+        return RunRole::Parent !== $this->role;
+    }
+
+    /**
+     * Whether this run has settled for good — succeeded, incomplete,
+     * failed, or needs_attention (SPEC §7's terminal states).
+     */
+    public function isTerminal(): bool
+    {
+        return \in_array($this->status, [
+            RunStatus::Succeeded,
+            RunStatus::Incomplete,
+            RunStatus::Failed,
+            RunStatus::NeedsAttention,
+        ], true);
     }
 
     public function getStatus(): RunStatus
@@ -240,6 +323,24 @@ class Run
     public function markNeedsAttention(ErrorClass $errorClass): void
     {
         $this->status = RunStatus::NeedsAttention;
+        $this->errorClass = $errorClass;
+        $this->finishedAt = new \DateTimeImmutable();
+    }
+
+    /**
+     * Settle a parent run from its graph's outcome (SPEC §13.5): the parent
+     * carries the failing child's terminal state and error class, so the
+     * attention queue and the run surface show the precise diagnosis without
+     * unwrapping the graph. Only terminal non-success states settle this
+     * way — success goes through markSucceeded().
+     */
+    public function settleAs(RunStatus $status, ?ErrorClass $errorClass = null): void
+    {
+        if (!\in_array($status, [RunStatus::Incomplete, RunStatus::Failed, RunStatus::NeedsAttention], true)) {
+            throw new \LogicException('A parent settles as a terminal non-success state only (SPEC §13.5).');
+        }
+
+        $this->status = $status;
         $this->errorClass = $errorClass;
         $this->finishedAt = new \DateTimeImmutable();
     }

@@ -89,6 +89,7 @@ final class RunEngine
         private readonly RunRepository $runs,
         private readonly EntityManagerInterface $em,
         private readonly LoggerInterface $logger,
+        private readonly RunGraph $graph,
         private readonly array $budgets = [],
         private readonly ?MessageBusInterface $bus = null,
     ) {
@@ -97,8 +98,28 @@ final class RunEngine
     /**
      * Run a task to completion, synchronously, driving the turn cores
      * inline. The command path behind app:run:now (without --queue).
+     *
+     * A stepped task is the same command over a graph (SPEC §13.3): the
+     * parent run is created and its children (steps, then the final
+     * consumer) are driven one after another through the same turn cores —
+     * sequentially here, because this path is one process by definition.
+     * Zero-step tasks never touch the graph path.
      */
     public function run(Task $task): Run
+    {
+        $graph = $this->graphFor($task);
+        if (null !== $graph) {
+            return $this->runGraph($task, $graph);
+        }
+
+        return $this->runOneTask($task);
+    }
+
+    /**
+     * The zero-step path, byte-identical to v1 (SPEC §13.1): one run, the
+     * task's own brief/toolbox, the turn loop driven inline.
+     */
+    private function runOneTask(Task $task): Run
     {
         $run = $this->begin($task);
         $state = $this->stateFor($run);
@@ -128,14 +149,99 @@ final class RunEngine
     }
 
     /**
+     * The synchronous graph driver (SPEC §13.3): create the parent and its
+     * first children, then repeatedly take the next executable child and
+     * drive it through the same turn cores the standalone path uses. Each
+     * child's terminal commit derives and applies the graph's next step.
+     */
+    private function runGraph(Task $task, RunGraph $graph): Run
+    {
+        $parent = $graph->beginGraph($task, async: false);
+
+        while (null !== ($child = $graph->nextExecutable($parent))) {
+            $this->driveChild($child, $graph);
+        }
+
+        $this->em->refresh($parent);
+
+        return $parent;
+    }
+
+    /**
+     * Drive one child run to a terminal state, inline: the turn loop, then
+     * the graph's advancement hook — the same commit boundary as the async
+     * path, so a mid-DAG failure settles the parent before the driver asks
+     * for the next child.
+     */
+    private function driveChild(Run $child, RunGraph $graph): void
+    {
+        $state = $this->stateFor($child);
+
+        try {
+            while (true) {
+                $result = $this->performLlmTurn($child, $state, $state->step + 1, async: false);
+                if (RunTurnResult::AwaitToolTurn !== $result) {
+                    break;
+                }
+
+                $result = $this->performToolTurn($child, $state, async: false);
+                if (RunTurnResult::AwaitLlmTurn !== $result) {
+                    break;
+                }
+            }
+        } catch (\Throwable $e) {
+            // The child is terminal in-memory when the failure happened in
+            // the terminal commit itself (rolled back, so the DB is
+            // consistent): fail loudly — a retry/re-run is the honest
+            // remedy for an infrastructure error. Otherwise the escape is
+            // unclassified inside a turn core: fail the child loudly and
+            // let commitTerminal settle the graph with it (SPEC §13.5).
+            if ($child->isTerminal()) {
+                throw $e;
+            }
+
+            $this->commitTerminal($child, false, function () use ($child, $e): void {
+                $child->markFailed(ErrorClass::Unknown);
+                $this->appendEvent($child, RunEventType::Failure, ['reason' => $e->getMessage()], errorClass: ErrorClass::Unknown);
+                $this->em->flush();
+            });
+        }
+
+        if (!$child->isTerminal()) {
+            // Every turn core commits a terminal state on its Done path;
+            // reaching here would mean a turn core returned Done without one.
+            throw new \LogicException(\sprintf('Child run %d left the turn loop without a terminal state.', $child->getId()));
+        }
+    }
+
+    /**
+     * The graph, when this task has steps (SPEC §13.1: zero-step tasks
+     * never come here).
+     */
+    private function graphFor(Task $task): ?RunGraph
+    {
+        return $this->graph->hasSteps($task) ? $this->graph : null;
+    }
+
+    /**
      * Create a run for the async engine: frozen toolbox snapshot, initial
      * checkpoint (budgets + compiled prompt head), status `queued`. The
      * caller dispatches the first LlmTurnMessage (see nextTurnMessage()); a
      * queued run is a task waiting for the `llm` lane — the persisted,
      * FIFO-ordered wait that survives restarts (SPEC §6).
+     *
+     * A stepped task starts as a run GRAPH (SPEC §13.3): beginGraph() creates
+     * the parent and dispatches the root steps' messages inside its creation
+     * transaction — this call IS the dispatch, so the command does not look
+     * for a first turn message on a parent (parents execute no turns).
      */
     public function start(Task $task): Run
     {
+        $graph = $this->graphFor($task);
+        if (null !== $graph) {
+            return $graph->beginGraph($task, async: true);
+        }
+
         return $this->begin($task);
     }
 
@@ -148,6 +254,17 @@ final class RunEngine
     public function nextTurnMessage(Run $run): LlmTurnMessage|ToolTurnMessage|null
     {
         if (!\in_array($run->getStatus(), [RunStatus::Queued, RunStatus::Running], true)) {
+            return null;
+        }
+
+        // A parent run executes no turns of its own (SPEC §13.3).
+        if (!$run->executesTurns()) {
+            return null;
+        }
+
+        // A queued child whose graph already settled was orphaned by a
+        // sibling's failure: it owes nothing (SPEC §13.5).
+        if ($this->graph->isSkipped($run)) {
             return null;
         }
 
@@ -196,6 +313,22 @@ final class RunEngine
 
             if (!\in_array($run->getStatus(), [RunStatus::Queued, RunStatus::Running], true)) {
                 $this->logger->debug('Run {run}: dropping LlmTurnMessage (status {status} under claim).', ['run' => $runId, 'status' => $run->getStatus()->value]);
+
+                return RunTurnResult::Stale;
+            }
+
+            // A parent aggregator executes no turns (SPEC §13.3): a message
+            // for one is stale by construction.
+            if (!$run->executesTurns()) {
+                $this->logger->debug('Run {run}: dropping LlmTurnMessage (parent runs execute no turns).', ['run' => $runId]);
+
+                return RunTurnResult::Stale;
+            }
+
+            // A queued child of a settled graph was orphaned by a sibling's
+            // failure: it never started and must never start (SPEC §13.5).
+            if ($this->graph->isSkipped($run)) {
+                $this->logger->debug('Run {run}: dropping LlmTurnMessage (its graph settled before this child started).', ['run' => $runId]);
 
                 return RunTurnResult::Stale;
             }
@@ -308,14 +441,16 @@ final class RunEngine
     private function performLlmTurn(Run $run, LoopState $state, int $step, bool $async, ?int $claimToken = null): RunTurnResult
     {
         if ($step > $state->stepBudget) {
-            $run->markIncomplete();
-            $this->appendEvent(
-                $run,
-                RunEventType::Failure,
-                ['reason' => \sprintf('step budget exhausted: %d exchanges, no completion declaration', $state->stepBudget)],
-                errorClass: ErrorClass::BudgetExceeded,
-            );
-            $this->em->flush();
+            $this->commitTerminal($run, $async, function () use ($run, $state): void {
+                $run->markIncomplete();
+                $this->appendEvent(
+                    $run,
+                    RunEventType::Failure,
+                    ['reason' => \sprintf('step budget exhausted: %d exchanges, no completion declaration', $state->stepBudget)],
+                    errorClass: ErrorClass::BudgetExceeded,
+                );
+                $this->em->flush();
+            });
             $this->logger->warning('Run {run}: step budget exhausted.', ['run' => $run->getId()]);
 
             return RunTurnResult::Done;
@@ -346,9 +481,9 @@ final class RunEngine
             $messages = $this->context->buildMessages($state->promptHead, $state->exchanges);
             $response = $this->llm->chat($messages, $this->prompts->toolsToOpenAi($tools));
         } catch (ContextExhaustedException $e) {
-            return $this->failRun($run, $e->errorClass, $e->getMessage());
+            return $this->failRun($run, $e->errorClass, $e->getMessage(), $async);
         } catch (LlmRequestException $e) {
-            return $this->failRun($run, $e->errorClass, $e->getMessage());
+            return $this->failRun($run, $e->errorClass, $e->getMessage(), $async);
         }
 
         $responsePayload = [
@@ -361,22 +496,25 @@ final class RunEngine
 
         if (!$response->wantsToolCall()) {
             // Terminal message: completion must BE the result (SPEC §5.4).
-            // Response event and terminal status commit together.
-            $this->appendEvent($run, RunEventType::LlmResponse, $responsePayload, durationMs: $response->durationMs);
+            // Response event and terminal status commit together — and, for
+            // a step child, the graph's advancement commits with them.
+            $this->commitTerminal($run, $async, function () use ($run, $response, $responsePayload): void {
+                $this->appendEvent($run, RunEventType::LlmResponse, $responsePayload, durationMs: $response->durationMs);
 
-            if (null !== $response->content && '' !== trim($response->content)) {
-                $run->markSucceeded();
-                $this->appendEvent($run, RunEventType::Completion, ['result' => $response->content]);
-            } else {
-                $run->markIncomplete();
-                $this->appendEvent(
-                    $run,
-                    RunEventType::Failure,
-                    ['reason' => 'terminal message with no content — no completion declaration'],
-                    errorClass: ErrorClass::LlmMalformedResponse,
-                );
-            }
-            $this->em->flush();
+                if (null !== $response->content && '' !== trim($response->content)) {
+                    $run->markSucceeded();
+                    $this->appendEvent($run, RunEventType::Completion, ['result' => $response->content]);
+                } else {
+                    $run->markIncomplete();
+                    $this->appendEvent(
+                        $run,
+                        RunEventType::Failure,
+                        ['reason' => 'terminal message with no content — no completion declaration'],
+                        errorClass: ErrorClass::LlmMalformedResponse,
+                    );
+                }
+                $this->em->flush();
+            });
 
             return RunTurnResult::Done;
         }
@@ -422,7 +560,7 @@ final class RunEngine
         try {
             while ($pending->nextIndex < \count($pending->calls)) {
                 $call = $pending->calls[$pending->nextIndex];
-                $pending->results[] = $this->executeToolCall($run, $toolMap, $state, $call);
+                $pending->results[] = $this->executeToolCall($run, $toolMap, $state, $call, $async);
                 ++$pending->nextIndex;
 
                 // Durable point: the resume position moves with every
@@ -468,7 +606,7 @@ final class RunEngine
      *
      * @return array{toolCallId: string, content: string}
      */
-    private function executeToolCall(Run $run, array $toolMap, LoopState $state, array $call): array
+    private function executeToolCall(Run $run, array $toolMap, LoopState $state, array $call, bool $async): array
     {
         $callId = $call['id'];
         $toolName = $call['name'];
@@ -536,7 +674,7 @@ final class RunEngine
                 // (§5.2) → needs_attention. The run STOPS — feeding the
                 // breaker back to the model would just loop it.
                 if ($this->bumpFailureCount($state, $toolName, $e->errorClass) >= $state->circuitBreakerThreshold) {
-                    $this->tripCircuitBreaker($run, $toolName, $e->errorClass);
+                    $this->tripCircuitBreaker($run, $toolName, $e->errorClass, $async);
                     $this->em->flush();
 
                     throw new RunTerminatedException(\sprintf('circuit breaker tripped on tool "%s" (%s)', $toolName, $e->errorClass->value), $e->errorClass);
@@ -646,6 +784,46 @@ final class RunEngine
     }
 
     /**
+     * The terminal-commit choke point: a run's terminal state and its
+     * graph's advancement commit in ONE transaction (SPEC §13.3). When a
+     * step child settles, the settled child, the newly dispatched siblings
+     * (rows + their lane messages), and the parent's settlement live or die
+     * together — "the same transaction that commits that state" is the
+     * advancement contract, not a best effort.
+     *
+     * For a standalone run (no parent) nothing else happens; the graph call
+     * is a no-op and the commit is a plain flush. Unlike commitTurn() the
+     * claim does not need to clear inside this transaction — a terminal run
+     * has no successor, so there is no successor-delivery window to protect;
+     * the turn entry points' finally-release remains the claimant's exit.
+     */
+    private function commitTerminal(Run $run, bool $async, callable $finalize): void
+    {
+        $connection = $this->em->getConnection();
+        $ownsTransaction = !$connection->isTransactionActive();
+        if ($ownsTransaction) {
+            $connection->beginTransaction();
+        }
+
+        try {
+            $finalize();
+
+            $this->graph->onTerminal($run, $async);
+
+            if ($ownsTransaction) {
+                $connection->commit();
+            }
+        } catch (\Throwable $e) {
+            if ($ownsTransaction && $connection->isTransactionActive()) {
+                $connection->rollBack();
+                $this->em->clear(); // torn entities must not leak into the next turn
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
      * Rebuild the loop state for a run: the checkpoint first (the run's own
      * history wins — including its budgets), configured values only as
      * fallback for runs that predate checkpointed budgets.
@@ -744,26 +922,32 @@ final class RunEngine
 
     /**
      * Terminal classified failure (LLM/context), shared by the turn cores.
+     * The terminal state commits through commitTerminal(), so a step child's
+     * graph advances with the failure (SPEC §13.5).
      */
-    private function failRun(Run $run, ErrorClass $errorClass, string $reason): RunTurnResult
+    private function failRun(Run $run, ErrorClass $errorClass, string $reason, bool $async = false): RunTurnResult
     {
-        $run->markFailed($errorClass);
-        $this->appendEvent($run, RunEventType::Failure, ['reason' => $reason], errorClass: $errorClass);
-        $this->em->flush();
+        $this->commitTerminal($run, $async, function () use ($run, $errorClass, $reason): void {
+            $run->markFailed($errorClass);
+            $this->appendEvent($run, RunEventType::Failure, ['reason' => $reason], errorClass: $errorClass);
+            $this->em->flush();
+        });
 
         return RunTurnResult::Done;
     }
 
-    private function tripCircuitBreaker(Run $run, string $toolName, ErrorClass $errorClass): void
+    private function tripCircuitBreaker(Run $run, string $toolName, ErrorClass $errorClass, bool $async = false): void
     {
-        $run->markNeedsAttention($errorClass);
-        $this->appendEvent(
-            $run,
-            RunEventType::CircuitBreaker,
-            ['tool' => $toolName, 'errorClass' => $errorClass->value],
-            errorClass: $errorClass,
-        );
-        $this->em->flush();
+        $this->commitTerminal($run, $async, function () use ($run, $toolName, $errorClass): void {
+            $run->markNeedsAttention($errorClass);
+            $this->appendEvent(
+                $run,
+                RunEventType::CircuitBreaker,
+                ['tool' => $toolName, 'errorClass' => $errorClass->value],
+                errorClass: $errorClass,
+            );
+            $this->em->flush();
+        });
         $this->logger->error('Run {run}: circuit breaker tripped on {tool}.', [
             'run' => $run->getId(),
             'tool' => $toolName,

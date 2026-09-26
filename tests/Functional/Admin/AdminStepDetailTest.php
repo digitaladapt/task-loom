@@ -38,6 +38,8 @@ final class AdminStepDetailTest extends WebTestCase
         $em->createQuery('DELETE FROM App\Entity\RunEvent')->execute();
         $em->createQuery('DELETE FROM App\Entity\Run')->execute();
         $em->createQuery('DELETE FROM App\Entity\Task')->execute();
+        $em->createQuery('DELETE FROM App\Entity\Tool')->execute();
+        $em->createQuery('DELETE FROM App\Entity\McpServer')->execute();
         $em->flush();
         $em->clear();
     }
