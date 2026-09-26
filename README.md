@@ -84,8 +84,10 @@ Reliability properties, by construction: a turn's checkpoint and its successor m
 commit in one database transaction (no "committed but not dispatched" window); a
 duplicate or late delivery is dropped against committed state; a dead worker's turn is
 re-covered by transport redelivery or, for messages lost outside the transport's sight
-(purged queue, restored backup), by `php bin/console app:run:requeue`. Run state lives
-in the `run` row + checkpoint, so any worker can pick up any turn.
+(purged queue, restored backup), by `php bin/console app:run:requeue` — which re-derives
+both the owed turns and any lost step-graph advancement (a step child that was never
+created, a final consumer that never ran, a settlement that never committed). Run state
+lives in the `run` row + checkpoint, so any worker can pick up any turn.
 
 ## Configuration
 

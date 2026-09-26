@@ -169,17 +169,33 @@
 
 <section aria-labelledby="runs-heading">
     <h2 id="runs-heading">Runs</h2>
-    {% if runs is empty %}
+    {% if run_groups is empty %}
         <p class="muted">No runs yet.</p>
     {% else %}
         <ul class="cards">
-        {% for run in runs %}
+        {% for group in run_groups %}
             <li class="card">
-                <span class="card-title">Run #{{ run.id }}</span>
+                <span class="card-title">Run #{{ group.run.id }}{% if group.children is not empty %} <span class="muted">— {{ group.children|length }} child run(s)</span>{% endif %}</span>
                 <p class="muted">
-                    {{ run.status.value }}{% if run.finishedAt %} · finished {{ run.finishedAt|date('Y-m-d H:i') }}{% endif %}
-                    {% if run.errorClass %} · {{ run.errorClass.value }}{% endif %}
+                    {{ group.run.status.value }}{% if group.run.finishedAt %} · finished {{ group.run.finishedAt|date('Y-m-d H:i') }}{% endif %}
+                    {% if group.run.errorClass %} · {{ group.run.errorClass.value }}{% endif %}
                 </p>
+                {% if group.children is not empty %}
+                    <ul class="cards run-children">
+                    {% for child in group.children %}
+                        <li class="card">
+                            <span class="card-title">
+                                {% if child.step %}{{ child.step.title }}{% else %}final consumer{% endif %}
+                                <span class="muted">· run #{{ child.id }}</span>
+                            </span>
+                            <p class="muted">
+                                {{ child.status.value }}{% if child.finishedAt %} · finished {{ child.finishedAt|date('Y-m-d H:i') }}{% endif %}
+                                {% if child.errorClass %} · {{ child.errorClass.value }}{% endif %}
+                            </p>
+                        </li>
+                    {% endfor %}
+                    </ul>
+                {% endif %}
             </li>
         {% endfor %}
         </ul>

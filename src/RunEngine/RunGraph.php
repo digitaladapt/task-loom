@@ -163,6 +163,119 @@ final class RunGraph
     }
 
     /**
+     * Operator-facing graph reconciliation (SPEC §13.3): re-derive what an
+     * active parent's committed state owes and, unless $dryRun, apply it —
+     * the graph half of the requeue sweep. A dispatch lost to a purged
+     * queue is repaired by re-dispatching the child's owed turn (the
+     * command's turn sweep); this repairs what no turn dispatch can see:
+     * a child run that was never created, a final consumer that never
+     * ran, a parent whose settlement never committed — the shapes a
+     * non-transactional restore or manual surgery leaves behind.
+     *
+     * Idempotent by construction: plan() only proposes steps without child
+     * runs and dispatches messages the claim + state checks can no-op, so
+     * a healthy graph reconciles to nothing. Returns null when the parent
+     * owes nothing (or is not a parent at all).
+     */
+    public function reconcileParent(Run $parent, bool $dryRun = false): ?GraphReconcile
+    {
+        if (RunRole::Parent !== $parent->getRole()) {
+            return null;
+        }
+
+        $plan = $this->plan($parent);
+        if ($plan->isIdle()) {
+            return null;
+        }
+
+        if ($dryRun) {
+            return new GraphReconcile(
+                parentId: (int) $parent->getId(),
+                applied: false,
+                stepTitles: array_map(static fn (Step $step): string => $step->getTitle(), $plan->readySteps),
+                finalConsumer: $plan->finalReady,
+                settled: $plan->settleStatus,
+            );
+        }
+
+        $childrenBefore = [];
+        foreach ($this->runs->findChildren($parent) as $child) {
+            $childrenBefore[(int) $child->getId()] = true;
+        }
+
+        $this->transactional(function () use ($parent): void {
+            $this->advance($parent, async: true);
+        });
+
+        $titles = [];
+        $dispatchedIds = [];
+        $finalCreated = false;
+        foreach ($this->runs->findChildren($parent) as $child) {
+            if (isset($childrenBefore[(int) $child->getId()])) {
+                continue;
+            }
+
+            $dispatchedIds[] = (int) $child->getId();
+
+            if (RunRole::FinalConsumer === $child->getRole()) {
+                $finalCreated = true;
+
+                continue;
+            }
+
+            $step = $child->getStep();
+            if (null !== $step) {
+                $titles[] = $step->getTitle();
+            }
+        }
+
+        $this->em->refresh($parent);
+
+        return new GraphReconcile(
+            parentId: (int) $parent->getId(),
+            applied: true,
+            stepTitles: $titles,
+            finalConsumer: $finalCreated,
+            settled: $parent->isTerminal() ? $parent->getStatus() : null,
+            dispatchedRunIds: $dispatchedIds,
+        );
+    }
+
+    /**
+     * The graph half of the requeue sweep, over every active parent:
+     * reconcile each in turn, reporting what was owed (preview) or
+     * repaired (applied).
+     *
+     * @return list<GraphReconcile>
+     */
+    public function reconcileParents(bool $dryRun = false): array
+    {
+        $ids = [];
+        foreach ($this->runs->findActive() as $run) {
+            if (RunRole::Parent === $run->getRole()) {
+                $ids[] = (int) $run->getId();
+            }
+        }
+
+        $reconciles = [];
+        foreach ($ids as $id) {
+            // Re-fetch per parent: a failed apply clears the identity map,
+            // and the id lookup survives it.
+            $parent = $this->runs->find($id);
+            if (!$parent instanceof Run) {
+                continue;
+            }
+
+            $reconcile = $this->reconcileParent($parent, $dryRun);
+            if (null !== $reconcile) {
+                $reconciles[] = $reconcile;
+            }
+        }
+
+        return $reconciles;
+    }
+
+    /**
      * Derive and apply until nothing is owed: dispatch ready steps, then
      * the final consumer, settle the parent. Iterating matters — a child
      * whose constitution cannot resolve (a tool missing from the catalog,
