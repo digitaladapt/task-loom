@@ -191,3 +191,18 @@ button.danger {
 form {
     margin: 0.5rem 0;
 }
+
+/* Child runs nested under their parent (SPEC §13.6) */
+.run-children {
+    padding: 0;
+    margin: 0.5rem 0 0;
+    max-width: none;
+}
+
+.run-children .card {
+    margin-bottom: 0.5rem;
+}
+
+.run-children .card:last-child {
+    margin-bottom: 0;
+}

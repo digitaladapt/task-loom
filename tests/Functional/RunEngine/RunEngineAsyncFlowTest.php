@@ -237,6 +237,7 @@ final class RunEngineAsyncFlowTest extends KernelTestCase
             static::getContainer()->get(RunRepository::class),
             $this->engine,
             $this->bus(),
+            static::getContainer()->get(RunGraph::class),
         ));
 
         // Dry run first: reports, dispatches nothing.

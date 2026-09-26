@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional\Admin;
 
+use App\Entity\Run;
+use App\Entity\RunRole;
 use App\Entity\Step;
 use App\Entity\Task;
 use App\Entity\TaskAuthor;
@@ -90,6 +92,71 @@ final class AdminStepDetailTest extends WebTestCase
         $content = (string) $this->client->getResponse()->getContent();
         self::assertStringContainsString('Dependency cycle', $content);
         self::assertStringContainsString('enable/approve will refuse until it is fixed', $content);
+    }
+
+    public function testRunHistoryGroupsChildRunsUnderTheirParent(): void
+    {
+        // SPEC §13.6: the run surface groups by parent run — child runs of
+        // one task run render under the parent, where steps become visible;
+        // a zero-step task's standalone run renders alone.
+        $stepped = $this->draftTask('Stepped with runs');
+        $weather = $this->step($stepped, 1, 'Weather', ToolboxMode::Tags, ['weather']);
+        $this->step($stepped, 2, 'Summary', ToolboxMode::Tags, ['weather'], [$weather->getId()]);
+
+        $parent = new Run($stepped);
+        $parent->setRole(RunRole::Parent);
+        $parent->markStarted();
+        $parent->markSucceeded();
+        $this->em()->persist($parent);
+        $this->em()->flush();
+
+        $stepChild = new Run($stepped);
+        $stepChild->setRole(RunRole::Step);
+        $stepChild->setParent($parent);
+        $stepChild->setStep($weather);
+        $stepChild->markStarted();
+        $stepChild->markSucceeded();
+        $this->em()->persist($stepChild);
+        $this->em()->flush();
+
+        $finalChild = new Run($stepped);
+        $finalChild->setRole(RunRole::FinalConsumer);
+        $finalChild->setParent($parent);
+        $finalChild->markStarted();
+        $finalChild->markSucceeded();
+        $this->em()->persist($finalChild);
+        $this->em()->flush();
+
+        $this->client->request('GET', '/tasks/'.$stepped->getId());
+
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+
+        // The parent heads the group, labeled with its child count; the
+        // children render nested with step titles and the final consumer.
+        self::assertStringContainsString('Run #'.$parent->getId(), $content);
+        self::assertStringContainsString('2 child run(s)', $content);
+        self::assertStringContainsString('Weather', $content);
+        self::assertStringContainsString('final consumer', $content);
+        self::assertStringContainsString('run #'.$finalChild->getId(), $content);
+    }
+
+    public function testZeroStepRunRendersWithoutChildGrouping(): void
+    {
+        $task = $this->draftTask('Standalone run');
+
+        $run = new Run($task);
+        $run->markStarted();
+        $run->markSucceeded();
+        $this->em()->persist($run);
+        $this->em()->flush();
+
+        $this->client->request('GET', '/tasks/'.$task->getId());
+
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+        self::assertStringContainsString('Run #'.$run->getId(), $content);
+        self::assertStringNotContainsString('child run(s)', $content);
     }
 
     // --------------------------------------------------------------- helpers

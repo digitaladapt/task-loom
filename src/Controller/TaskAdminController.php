@@ -7,6 +7,8 @@ namespace App\Controller;
 use App\Admin\StepOverviewPresenter;
 use App\Admin\TaskAdminService;
 use App\Admin\TaskLifecycleException;
+use App\Entity\Run;
+use App\Entity\RunRole;
 use App\Entity\Task;
 use App\Repository\RunRepository;
 use App\Repository\TaskRepository;
@@ -59,9 +61,31 @@ final class TaskAdminController extends AbstractController
             'task' => $task,
             'preview' => $this->previewer->preview($task),
             'step_overview' => $this->stepOverview->present($task),
-            'runs' => $this->runs->findForTask($task),
+            'run_groups' => $this->runGroups($task),
             'replacement_drafts' => $this->tasks->findReplacementDraftsFor($task),
         ]);
+    }
+
+    /**
+     * The run history grouped by parent run (SPEC §13.6): a stepped task's
+     * run is its parent aggregator with the step and final-consumer child
+     * runs nested under it; a zero-step task's run is the standalone run
+     * itself, in a group of one. This is where steps become visible in the
+     * run surface.
+     *
+     * @return list<array{run: Run, children: list<Run>}>
+     */
+    private function runGroups(Task $task): array
+    {
+        $groups = [];
+        foreach ($this->runs->findForTask($task) as $run) {
+            $groups[] = [
+                'run' => $run,
+                'children' => RunRole::Standalone === $run->getRole() ? [] : $this->runs->findChildren($run),
+            ];
+        }
+
+        return $groups;
     }
 
     #[Route('/tasks/{id}/enable', name: 'app_task_enable', methods: ['POST'], requirements: ['id' => '\d+'])]
