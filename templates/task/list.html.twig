@@ -5,7 +5,11 @@
 {% block body %}
 <header class="page-header">
     <h1>Tasks</h1>
-    <nav><a href="{{ path('app_tool_list') }}">Tool catalog</a></nav>
+    <nav>
+        <a href="{{ path('app_run_list') }}">Runs</a>
+        <a href="{{ path('app_attention') }}">Attention</a>
+        <a href="{{ path('app_tool_list') }}">Tool catalog</a>
+    </nav>
 </header>
 
 {% for label, messages in app.flashes %}
@@ -45,10 +49,21 @@
     {% else %}
         <ul class="cards">
         {% for task in enabled %}
+            {% set last_run = latest_runs[task.id] ?? null %}
             <li class="card">
                 <a class="card-title" href="{{ path('app_task_detail', {id: task.id}) }}">
                     #{{ task.id }} — {{ task.title }}
                 </a>
+                <p class="muted">
+                    {% if last_run %}
+                        last run
+                        <a href="{{ path('app_run_detail', {id: last_run.id}) }}">#{{ last_run.id }}</a>
+                        — <span class="status status-{{ last_run.status.value }}">{{ last_run.status.value }}</span>
+                        {% if last_run.finishedAt %} · {{ last_run.finishedAt|date('Y-m-d H:i') }}{% endif %}
+                    {% else %}
+                        no runs yet
+                    {% endif %}
+                </p>
             </li>
         {% endfor %}
         </ul>

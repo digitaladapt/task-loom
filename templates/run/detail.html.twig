@@ -1,0 +1,186 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Run #{{ view.run.id }} — TaskLoom{% endblock %}
+
+{% block body %}
+<header class="page-header">
+    <h1>Run #{{ view.run.id }}</h1>
+    <nav>
+        <a href="{{ path('app_run_list') }}">← Runs</a>
+        <a href="{{ path('app_task_detail', {id: view.run.task.id}) }}">Task #{{ view.run.task.id }}</a>
+    </nav>
+</header>
+
+{% for label, messages in app.flashes %}
+    {% for message in messages %}
+        <p class="flash flash-{{ label }}" role="status">{{ message }}</p>
+    {% endfor %}
+{% endfor %}
+
+<dl class="record">
+    <dt>Status</dt>
+    <dd>
+        <span class="status status-{{ view.run.status.value }}">{{ view.run.status.value }}</span>
+        {% if view.run.errorClass %} · {{ view.run.errorClass.value }}{% endif %}
+    </dd>
+
+    <dt>Task</dt>
+    <dd>#{{ view.run.task.id }} — {{ view.run.task.title }}</dd>
+
+    <dt>Role</dt>
+    <dd>{{ view.roleLabel }}</dd>
+
+    {% if view.run.parent %}
+        <dt>Parent run</dt>
+        <dd><a href="{{ path('app_run_detail', {id: view.run.parent.id}) }}">Run #{{ view.run.parent.id }}</a></dd>
+    {% endif %}
+
+    {% if view.run.step %}
+        <dt>Step</dt>
+        <dd>#{{ view.run.step.id }} — {{ view.run.step.title }}</dd>
+    {% endif %}
+
+    <dt>Started</dt>
+    <dd>{{ view.run.startedAt ? view.run.startedAt|date('Y-m-d H:i:s') : '—' }}{% if view.run.finishedAt %} · finished {{ view.run.finishedAt|date('Y-m-d H:i:s') }}{% endif %}</dd>
+
+    {% if view.claimAgeSeconds is not null %}
+        <dt>Claim</dt>
+        <dd>
+            held for {{ view.claimAgeSeconds }}s
+            {% if view.claimStale %}<span class="flash flash-error inline">stale — takeover due</span>{% endif %}
+        </dd>
+    {% endif %}
+
+    <dt>Steps executed</dt>
+    <dd>{{ view.run.stepCount }} turn(s) on the wire</dd>
+
+    {% if view.frozenTools is not empty %}
+        <dt>Frozen toolbox</dt>
+        <dd><code>{{ view.frozenTools|join(', ') }}</code></dd>
+    {% endif %}
+
+    {% if view.childCount > 0 %}
+        <dt>Child runs</dt>
+        <dd>{{ view.childCount }}</dd>
+    {% endif %}
+</dl>
+
+{% if view.artifact is not null %}
+<section aria-labelledby="artifact-heading">
+    <h2 id="artifact-heading">Completion artifact</h2>
+    <pre class="artifact">{{ view.artifact }}</pre>
+</section>
+{% endif %}
+
+{% if view.failureReason is not null %}
+<section aria-labelledby="failure-heading">
+    <h2 id="failure-heading">Failure</h2>
+    <p class="flash flash-error">{{ view.failureReason }}</p>
+</section>
+{% endif %}
+
+{% if view.run.role.value == 'parent' %}
+<section aria-labelledby="graph-heading">
+    <h2 id="graph-heading">Step graph</h2>
+    {% if view.stepGroups is empty and view.finalConsumer is null and view.orphanChildren is empty %}
+        <p class="muted">No child runs yet.</p>
+    {% else %}
+        {% for group in view.stepGroups %}
+            <p class="level-title">Level {{ group.level + 1 }}</p>
+            <ul class="cards run-children">
+            {% for child in group.children %}
+                {% include 'run/_child_card.html.twig' with {child: child} only %}
+            {% endfor %}
+            </ul>
+        {% endfor %}
+
+        {% if view.orphanChildren is not empty %}
+            <p class="level-title">Unresolved steps</p>
+            <ul class="cards run-children">
+            {% for child in view.orphanChildren %}
+                {% include 'run/_child_card.html.twig' with {child: child} only %}
+            {% endfor %}
+            </ul>
+        {% endif %}
+
+        {% if view.finalConsumer is not null %}
+            <p class="level-title">Final consumer</p>
+            <ul class="cards run-children">
+            {% include 'run/_child_card.html.twig' with {child: view.finalConsumer} only %}
+            </ul>
+        {% endif %}
+    {% endif %}
+</section>
+{% endif %}
+
+<section aria-labelledby="timeline-heading">
+    <h2 id="timeline-heading">Attempt ledger</h2>
+
+    {% if view.errorClasses is not empty %}
+        <p class="muted">
+            Filter:
+            {% if view.activeErrorClass is null %}
+                <strong>all</strong>
+            {% else %}
+                <a href="{{ path('app_run_detail', {id: view.run.id}) }}">all</a>
+            {% endif %}
+            {% for class in view.errorClasses %}
+                {% if view.activeErrorClass == class %}
+                    · <strong>{{ class.value }}</strong>
+                {% else %}
+                    · <a href="{{ path('app_run_detail', {id: view.run.id, error_class: class.value}) }}">{{ class.value }}</a>
+                {% endif %}
+            {% endfor %}
+        </p>
+    {% endif %}
+
+    {% if view.timeline is empty %}
+        <p class="muted">
+            {% if view.activeErrorClass is not null %}
+                No events with error class {{ view.activeErrorClass.value }}.
+            {% else %}
+                No events yet.
+            {% endif %}
+        </p>
+    {% else %}
+        <ol class="timeline">
+        {% for entry in view.timeline %}
+            <li class="timeline-entry{% if entry.isError %} timeline-entry-error{% endif %}">
+                <p class="timeline-head">
+                    <span class="timeline-seq">#{{ entry.event.seq }}</span>
+                    <span class="timeline-type">{{ entry.label }}</span>
+                    {% if entry.event.errorClass %}<span class="timeline-class">{{ entry.event.errorClass.value }}</span>{% endif %}
+                    {% if entry.event.attemptNo and entry.event.attemptNo > 1 %}<span class="muted">attempt {{ entry.event.attemptNo }}</span>{% endif %}
+                    {% if entry.duration %}<span class="muted">{{ entry.duration }}</span>{% endif %}
+                    {% if entry.event.createdAt %}<span class="muted">{{ entry.event.createdAt|date('H:i:s') }}</span>{% endif %}
+                </p>
+                <p class="timeline-summary">{{ entry.summary }}</p>
+                {% if entry.event.payload is not empty %}
+                    <details>
+                        <summary>payload</summary>
+                        <pre>{{ entry.event.payload|json_encode(constant('JSON_PRETTY_PRINT') b-or constant('JSON_UNESCAPED_SLASHES')) }}</pre>
+                    </details>
+                {% endif %}
+            </li>
+        {% endfor %}
+        </ol>
+    {% endif %}
+</section>
+
+<section aria-labelledby="transcript-heading">
+    <h2 id="transcript-heading">Transcript</h2>
+    <p class="muted">What the run committed, in order — the frozen prompt head, then every exchange. The model's window is trimmed (SPEC §5.5); this is the full record.</p>
+    {% if view.transcript is empty %}
+        <p class="muted">Nothing yet.</p>
+    {% else %}
+        <ol class="transcript">
+        {% for entry in view.transcript %}
+            <li class="transcript-entry transcript-{{ entry.role }}{% if entry.isError %} transcript-error{% endif %}">
+                <p class="transcript-role">{{ entry.roleLabel }}</p>
+                <pre class="transcript-content">{{ entry.content }}</pre>
+            </li>
+        {% endfor %}
+        </ol>
+    {% endif %}
+</section>
+{% endblock %}

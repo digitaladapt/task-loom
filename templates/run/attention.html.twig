@@ -1,0 +1,47 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Attention — TaskLoom{% endblock %}
+
+{% block body %}
+<header class="page-header">
+    <h1>Attention</h1>
+    <nav>
+        <a href="{{ path('app_task_list') }}">Tasks</a>
+        <a href="{{ path('app_run_list') }}">Runs</a>
+    </nav>
+</header>
+
+{% for label, messages in app.flashes %}
+    {% for message in messages %}
+        <p class="flash flash-{{ label }}" role="status">{{ message }}</p>
+    {% endfor %}
+{% endfor %}
+
+<p class="muted">Runs that ended without a justified completion — needs_attention and incomplete — grouped by error class (SPEC §8). A stepped task's run appears as its parent, carrying the failing step's diagnosis.</p>
+
+{% if groups is empty %}
+    <section>
+        <p class="muted">Nothing needs attention.</p>
+    </section>
+{% else %}
+    {% for group in groups %}
+    <section aria-labelledby="group-{{ loop.index }}">
+        <h2 id="group-{{ loop.index }}">{{ group.label }} <span class="muted">· {{ group.runs|length }}</span></h2>
+        <ul class="cards">
+        {% for run in group.runs %}
+            <li class="card">
+                <a class="card-title" href="{{ path('app_run_detail', {id: run.id}) }}">
+                    Run #{{ run.id }} <span class="muted">· {{ run.task.title }}</span>
+                </a>
+                <p class="muted">
+                    <span class="status status-{{ run.status.value }}">{{ run.status.value }}</span>
+                    {% if run.role.value == 'parent' %} · step graph (open the run for the failing step){% endif %}
+                    {% if run.finishedAt %} · finished {{ run.finishedAt|date('Y-m-d H:i') }}{% endif %}
+                </p>
+            </li>
+        {% endfor %}
+        </ul>
+    </section>
+    {% endfor %}
+{% endif %}
+{% endblock %}

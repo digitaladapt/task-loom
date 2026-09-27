@@ -26,6 +26,7 @@ use App\Repository\TaskRepository;
 use App\RunEngine\PromptCompiler;
 use App\RunEngine\RunEngine;
 use App\RunEngine\RunGraph;
+use App\RunEngine\RunLauncher;
 use App\RunEngine\ToolboxResolver;
 use App\RunEngine\ToolExecutorInterface;
 use Doctrine\ORM\EntityManagerInterface;
@@ -121,7 +122,7 @@ final class RunEngineAsyncFlowTest extends KernelTestCase
             static::getContainer()->get(TaskRepository::class),
             static::getContainer()->get(RunRepository::class),
             $this->engine,
-            $this->bus(),
+            new RunLauncher($this->engine, $this->bus()),
         ));
         $exit = $tester->execute(['task-id' => (string) $task->getId(), '--queue' => true]);
 
