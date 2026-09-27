@@ -12,7 +12,10 @@ use App\Entity\RunRole;
 use App\Entity\Task;
 use App\Repository\RunRepository;
 use App\Repository\TaskRepository;
+use App\RunEngine\RunLauncher;
+use App\RunEngine\RunLaunchException;
 use App\RunEngine\ToolboxPreviewer;
+use App\RunEngine\ToolboxResolutionException;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -22,7 +25,8 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
 
 /**
  * The admin UI's task surface (SPEC §8): task list, task detail with the
- * toolbox preview, and the approval-queue lifecycle actions.
+ * toolbox preview, the approval-queue lifecycle actions, and Run now —
+ * the only run trigger in v1.
  *
  * Every write action is POST + CSRF-protected (checked explicitly in
  * each action, so a bad token yields 403 — not a Basic-auth challenge)
@@ -39,16 +43,30 @@ final class TaskAdminController extends AbstractController
         private readonly TaskAdminService $admin,
         private readonly ToolboxPreviewer $previewer,
         private readonly StepOverviewPresenter $stepOverview,
+        private readonly RunLauncher $launcher,
     ) {
     }
 
     #[Route('/', name: 'app_task_list', methods: ['GET'])]
     public function list(): Response
     {
+        $approvalQueue = $this->tasks->findApprovalQueue();
+        $enabled = $this->tasks->findRunnable();
+        $archived = $this->tasks->findArchived();
+
+        $taskIds = [];
+        foreach ([...$approvalQueue, ...$enabled, ...$archived] as $task) {
+            $id = $task->getId();
+            if (null !== $id) {
+                $taskIds[] = $id;
+            }
+        }
+
         return $this->render('task/list.html.twig', [
-            'approval_queue' => $this->tasks->findApprovalQueue(),
-            'enabled' => $this->tasks->findRunnable(),
-            'archived' => $this->tasks->findArchived(),
+            'approval_queue' => $approvalQueue,
+            'enabled' => $enabled,
+            'archived' => $archived,
+            'latest_runs' => $this->runs->findLatestForTasks($taskIds),
         ]);
     }
 
@@ -118,6 +136,45 @@ final class TaskAdminController extends AbstractController
         $this->assertCsrf('task-archive', $request);
 
         return $this->lifecycle('archive', $id);
+    }
+
+    #[Route('/tasks/{id}/run', name: 'app_task_run', methods: ['POST'], requirements: ['id' => '\d+'])]
+    public function run(Request $request, int $id): Response
+    {
+        $this->assertCsrf('task-run', $request);
+
+        $task = $this->findTaskOr404($id);
+
+        if (!$task->isEnabled()) {
+            $this->addFlash('error', \sprintf('Task %d is not enabled — only enabled tasks run (SPEC §4.2).', $id));
+
+            return $this->redirectToRoute('app_task_detail', ['id' => $id]);
+        }
+
+        try {
+            // The queue path, never the synchronous one: a request must not
+            // hold an LLM turn on the wire. The run's progress is followed
+            // in the run surface; workers drive it from here.
+            $launch = $this->launcher->launch($task);
+        } catch (ToolboxResolutionException $e) {
+            $this->addFlash('error', \sprintf('Run refused at dispatch — %s', $e->getMessage()));
+
+            return $this->redirectToRoute('app_task_detail', ['id' => $id]);
+        } catch (RunLaunchException $e) {
+            $this->addFlash('error', $e->getMessage());
+
+            return $this->redirectToRoute('app_task_detail', ['id' => $id]);
+        }
+
+        $run = $launch->run;
+        if (RunRole::Parent === $run->getRole()) {
+            $children = $this->runs->findChildren($run);
+            $this->addFlash('ok', \sprintf('Run #%d queued — %d step run(s) on the "llm" lane.', $run->getId(), \count($children)));
+        } else {
+            $this->addFlash('ok', \sprintf('Run #%d queued — dispatched to the "%s" lane.', $run->getId(), $launch->lane()));
+        }
+
+        return $this->redirectToRoute('app_run_detail', ['id' => $run->getId()]);
     }
 
     /**

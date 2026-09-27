@@ -8,18 +8,18 @@ use App\Entity\Run;
 use App\Entity\RunRole;
 use App\Entity\RunStatus;
 use App\Entity\Task;
-use App\Message\LlmTurnMessage;
-use App\Message\ToolTurnMessage;
 use App\Repository\RunRepository;
 use App\Repository\TaskRepository;
 use App\RunEngine\RunEngine;
+use App\RunEngine\RunLauncher;
+use App\RunEngine\RunLaunchException;
+use App\RunEngine\ToolboxResolutionException;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
-use Symfony\Component\Messenger\MessageBusInterface;
 
 /**
  * Run-now (SPEC §8): the only task trigger in v1.
@@ -42,7 +42,7 @@ final class RunNowCommand extends Command
         private readonly TaskRepository $tasks,
         private readonly RunRepository $runs,
         private readonly RunEngine $engine,
-        private readonly MessageBusInterface $bus,
+        private readonly RunLauncher $launcher,
     ) {
         parent::__construct();
     }
@@ -113,10 +113,10 @@ final class RunNowCommand extends Command
     }
 
     /**
-     * Async path: create the run (queued + frozen constitution); for a
-     * zero-step task, dispatch its first turn. The run row is the queue — if
-     * this process dies after the run is saved but before the dispatch,
-     * app:run:requeue recovers it.
+     * Async path: the shared queue-path launch (SPEC §6) — the same entry
+     * point the admin UI's Run now action uses, so the two triggers cannot
+     * drift. The run row is the queue — if this process dies after the run
+     * is saved but before the dispatch, app:run:requeue recovers it.
      *
      * A stepped task is a run GRAPH (SPEC §13.3): start() already created
      * the parent and dispatched every root step's first turn inside its
@@ -124,8 +124,15 @@ final class RunNowCommand extends Command
      */
     private function dispatch(Task $task, OutputInterface $output): int
     {
-        $run = $this->engine->start($task);
+        try {
+            $launch = $this->launcher->launch($task);
+        } catch (ToolboxResolutionException|RunLaunchException $e) {
+            $output->writeln(\sprintf('<error>%s</error>', $e->getMessage()));
 
+            return self::FAILURE;
+        }
+
+        $run = $launch->run;
         if (RunRole::Parent === $run->getRole()) {
             $queued = \count(array_filter($this->runs->findChildren($run), static fn (Run $child): bool => RunStatus::Queued === $child->getStatus()));
             $output->writeln(\sprintf('Run %d: queued — %d step run(s) on the "llm" lane.', $run->getId(), $queued));
@@ -134,17 +141,7 @@ final class RunNowCommand extends Command
             return self::SUCCESS;
         }
 
-        $message = $this->engine->nextTurnMessage($run);
-        if (!$message instanceof LlmTurnMessage && !$message instanceof ToolTurnMessage) {
-            $output->writeln(\sprintf('<error>Run %d was created but has no turn to dispatch.</error>', $run->getId()));
-
-            return self::FAILURE;
-        }
-
-        $this->bus->dispatch($message);
-
-        $lane = $message instanceof LlmTurnMessage ? 'llm' : 'tools';
-        $output->writeln(\sprintf('Run %d: queued — %s dispatched to the "%s" lane.', $run->getId(), $message::class, $lane));
+        $output->writeln(\sprintf('Run %d: queued — %s dispatched to the "%s" lane.', $run->getId(), $launch->messageClass(), $launch->lane()));
         $output->writeln('Consume with: php bin/console messenger:consume llm tools');
 
         return self::SUCCESS;

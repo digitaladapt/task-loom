@@ -54,6 +54,29 @@ The compose example starts the app plus `worker-llm` / `worker-tools`
 Messenger workers; scale the llm lane to your concurrency setting:
 `docker compose ... up -d --scale worker-llm=2`.
 
+## Run surface
+
+The admin UI covers the whole run lifecycle (SPEC §8). **Run now** on an
+enabled task's page queues a run on the worker lanes (never inline in the
+request) and takes you to its page:
+
+- **`/runs`** — the scheduler: who holds an execution claim right now (the
+  claim is the wire slot, shown with its lane and age; a stale claim is
+  flagged for takeover), who is waiting, which step graphs are in flight —
+  over the run history.
+- **`/runs/{id}`** — the attempt ledger: every `RunEvent` with its typed
+  payload (filterable by `?error_class=…`), the full transcript
+  reconstructed from the ledger and the frozen prompt head, the completion
+  artifact or the failure reason. For a stepped task, the run page shows
+  the step graph grouped into levels, with the final consumer labelled.
+- **`/attention`** — `needs_attention` / `incomplete` runs grouped by error
+  class; a failed step graph appears as its parent, carrying the failing
+  step's diagnosis (SPEC §13.5).
+
+One trigger, two faces: the web **Run now** and `app:run:now --queue` share
+the same launch path (`RunLauncher`), so a UI run and a CLI run are the same
+run.
+
 ## Concurrency
 
 The run engine runs as **turns on two Messenger lanes** (`config/packages/messenger.yaml`),

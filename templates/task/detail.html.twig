@@ -5,7 +5,10 @@
 {% block body %}
 <header class="page-header">
     <h1>#{{ task.id }} — {{ task.title }}</h1>
-    <nav><a href="{{ path('app_task_list') }}">← All tasks</a></nav>
+    <nav>
+        <a href="{{ path('app_task_list') }}">← All tasks</a>
+        <a href="{{ path('app_run_list') }}">Runs</a>
+    </nav>
 </header>
 
 {% for label, messages in app.flashes %}
@@ -149,6 +152,15 @@
             <button type="submit" class="danger">Reject</button>
         </form>
     {% elseif task.enabled %}
+        <form method="post" action="{{ path('app_task_run', {id: task.id}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('task-run') }}">
+            <button type="submit">Run now</button>
+        </form>
+        <p class="muted">
+            Run now queues the run on the worker lanes (SPEC §8 — the only trigger in v1).
+            {% if step_overview.isEmpty %}It runs as a single unit.{% else %}Its {{ step_overview.views|length }} steps run as a graph.{% endif %}
+            Follow it in the <a href="{{ path('app_run_list') }}">run surface</a>.
+        </p>
         <p class="muted">Enabled tasks are immutable — any edit lands as a replacement draft (SPEC §4.4).</p>
     {% endif %}
 </section>

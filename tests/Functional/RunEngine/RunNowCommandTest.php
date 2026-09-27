@@ -25,6 +25,7 @@ use App\Repository\TaskRepository;
 use App\RunEngine\PromptCompiler;
 use App\RunEngine\RunEngine;
 use App\RunEngine\RunGraph;
+use App\RunEngine\RunLauncher;
 use App\RunEngine\ToolboxResolver;
 use App\RunEngine\ToolExecutorInterface;
 use Doctrine\ORM\EntityManagerInterface;
@@ -203,7 +204,7 @@ final class RunNowCommandTest extends KernelTestCase
             $container->get(TaskRepository::class),
             $container->get(RunRepository::class),
             $engine,
-            $container->get(MessageBusInterface::class),
+            new RunLauncher($engine, $container->get(MessageBusInterface::class)),
         ));
     }
 

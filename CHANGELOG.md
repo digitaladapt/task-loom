@@ -42,6 +42,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Run surface (SPEC §8):** the admin UI now covers the whole run lifecycle.
+  `GET /runs` is the scheduler view (who holds an execution claim — the claim
+  *is* the wire slot, with its lane and staleness) over the run history;
+  `GET /runs/{id}` is the per-run attempt ledger — a filterable timeline
+  (`?error_class=…`), the full transcript reconstructed from the ledger plus
+  the frozen prompt head, the completion artifact or failure reason, the
+  frozen toolbox, and (for a stepped task) the step graph grouped into levels
+  with the final consumer labelled; `GET /attention` is the attention queue
+  grouped by error class, parents carrying their failing step's diagnosis
+  (SPEC §13.5). **Run now** — the only trigger in v1 — is a POST on the task
+  page: it launches through the same queue path as `app:run:now --queue`
+  (one shared `RunLauncher`, so the triggers cannot drift) and redirects to
+  the run. The task list shows each task's latest run; the task detail links
+  the run surface.
+- `App\RunEngine\RunLauncher` — the shared queue-path launch (create the
+  run, dispatch its first turn), used by both the CLI and the web trigger.
+- `RunRepository::findRecent()` / `findLatestForTasks()`; the attention queue
+  now returns top-level runs only (graph children render inside their
+  parent's page).
+- `RunEventRepository::findTimeline()` takes an optional error-class filter;
+  `distinctErrorClasses()` powers the filter control.
 - `App\Controller\McpController` — the MCP endpoint (SPEC §§10–11).
 - `docs/design/MCP_SDK_MIGRATION.md` — what changed and why.
 - `mcp_sessions` cache pool, for MCP session storage.

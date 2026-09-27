@@ -206,3 +206,145 @@ form {
 .run-children .card:last-child {
     margin-bottom: 0;
 }
+
+/* ===== Run surface (SPEC §8) ===== */
+
+.status {
+    font-weight: 600;
+}
+
+.status-succeeded {
+    color: var(--ok);
+}
+
+.status-failed,
+.status-needs_attention {
+    color: var(--danger);
+}
+
+.status-incomplete {
+    color: #e0b64f;
+}
+
+.status-running,
+.status-queued,
+.status-paused {
+    color: var(--muted);
+}
+
+.flash.inline {
+    display: inline;
+    padding: 0.1rem 0.4rem;
+    margin: 0;
+    font-size: 0.8rem;
+}
+
+/* The attempt-ledger timeline. */
+.timeline,
+.transcript {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.timeline-entry {
+    background: var(--surface);
+    border: 1px solid var(--muted);
+    border-left-width: 4px;
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.timeline-entry-error {
+    border-left-color: var(--danger);
+}
+
+.timeline-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: baseline;
+    margin: 0;
+    font-size: 0.85rem;
+}
+
+.timeline-seq {
+    color: var(--muted);
+}
+
+.timeline-type {
+    font-weight: 600;
+}
+
+.timeline-class {
+    color: var(--danger);
+    font-weight: 600;
+}
+
+.timeline-summary {
+    margin: 0.25rem 0 0;
+    overflow-wrap: anywhere;
+    font-size: 0.95rem;
+}
+
+.timeline-entry details pre,
+.transcript-content,
+.artifact {
+    background: var(--bg);
+    border: 1px solid var(--muted);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 0.85rem;
+}
+
+/* The transcript. */
+.transcript-entry {
+    border-left: 4px solid var(--muted);
+    padding: 0.25rem 0 0.25rem 0.75rem;
+    margin-bottom: 0.75rem;
+}
+
+.transcript-system {
+    border-left-color: var(--accent);
+}
+
+.transcript-user {
+    border-left-color: var(--ok);
+}
+
+.transcript-error {
+    border-left-color: var(--danger);
+}
+
+.transcript-role {
+    margin: 0 0 0.25rem;
+    font-size: 0.8rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.transcript-content {
+    margin: 0;
+}
+
+.level-title {
+    font-weight: 600;
+    margin: 0.75rem 0 0.25rem;
+}
+
+.levels {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.steps-in-level {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}

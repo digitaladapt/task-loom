@@ -57,12 +57,22 @@ final class RunRepository extends ServiceEntityRepository
      * The attention queue (SPEC §8): needs_attention and incomplete runs,
      * newest first.
      *
+     * Top-level runs only — standalone runs and the parent aggregators of
+     * stepped tasks. Under run-per-step, a failing child settles its parent
+     * with the same status and error class (SPEC §13.5), so the parent is
+     * the unit the operator acts on; children appear inside their parent's
+     * run page, not as separate queue rows. (A child of a graph is never
+     * left behind in attention: the graph settles its parent the moment any
+     * child fails terminally, and the queue's whole purpose is "give this
+     * run a human eye".)
+     *
      * @return list<Run>
      */
     public function findAttention(): array
     {
         return $this->createQueryBuilder('r')
             ->where('r.status IN (:statuses)')
+            ->andWhere('r.parent IS NULL')
             ->setParameter('statuses', [RunStatus::NeedsAttention, RunStatus::Incomplete])
             ->orderBy('r.finishedAt', 'DESC')
             ->getQuery()->getResult();
@@ -84,6 +94,59 @@ final class RunRepository extends ServiceEntityRepository
             ->setParameter('task', $task)
             ->orderBy('r.id', 'DESC')
             ->getQuery()->getResult();
+    }
+
+    /**
+     * Recent runs across all tasks, newest first — the run history list
+     * (SPEC §8). Top-level runs only, for the same reason findAttention()
+     * is: a stepped task's run is its parent aggregator, and the children
+     * are visible on the run's own page.
+     *
+     * @return list<Run>
+     */
+    public function findRecent(int $limit = 100): array
+    {
+        return $this->createQueryBuilder('r')
+            ->where('r.parent IS NULL')
+            ->orderBy('r.id', 'DESC')
+            ->setMaxResults($limit)
+            ->getQuery()->getResult();
+    }
+
+    /**
+     * For a batch of task ids, the latest top-level run of each — one
+     * query for the task list's status column instead of N.
+     *
+     * @param list<int> $taskIds
+     *
+     * @return array<int, Run> task id → its newest run
+     */
+    public function findLatestForTasks(array $taskIds): array
+    {
+        if ([] === $taskIds) {
+            return [];
+        }
+
+        // Order newest-first and keep the first run seen per task: with
+        // SQLite (and the SQL standard generally) there is no clean
+        // portable "greatest-n-per-group" DQL, and the id-tiebroken order
+        // makes the first row per task exactly the newest.
+        $rows = $this->createQueryBuilder('r')
+            ->where('r.task IN (:taskIds)')
+            ->andWhere('r.parent IS NULL')
+            ->setParameter('taskIds', $taskIds)
+            ->orderBy('r.id', 'DESC')
+            ->getQuery()->getResult();
+
+        $latest = [];
+        foreach ($rows as $run) {
+            $taskId = $run->getTask()->getId();
+            if (null !== $taskId && !isset($latest[$taskId])) {
+                $latest[$taskId] = $run;
+            }
+        }
+
+        return $latest;
     }
 
     /**

@@ -74,8 +74,11 @@ final class RunEngine
      * one tool turn ≤ its calls' timeouts × attempts) and comfortably below
      * the transport lanes' redeliver_timeout (7200s), so a redelivered
      * message can always take over a claim its dead owner abandoned.
+     *
+     * Public: the run surface's scheduler view flags a claim older than
+     * this window as stale with the same number (SPEC §8).
      */
-    private const int CLAIM_STALE_SECONDS = 3600;
+    public const int CLAIM_STALE_SECONDS = 3600;
 
     /**
      * @param array<string, int> $budgets step_budget, tool_retries, circuit_breaker

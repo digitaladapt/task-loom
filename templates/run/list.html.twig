@@ -1,0 +1,93 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Runs — TaskLoom{% endblock %}
+
+{% block body %}
+<header class="page-header">
+    <h1>Runs</h1>
+    <nav>
+        <a href="{{ path('app_task_list') }}">Tasks</a>
+        <a href="{{ path('app_attention') }}">Attention</a>
+    </nav>
+</header>
+
+{% for label, messages in app.flashes %}
+    {% for message in messages %}
+        <p class="flash flash-{{ label }}" role="status">{{ message }}</p>
+    {% endfor %}
+{% endfor %}
+
+<section aria-labelledby="scheduler-heading">
+    <h2 id="scheduler-heading">Scheduler</h2>
+    <p class="muted">The claim is the wire slot: a run holds it only while a turn executes. Claims older than an hour are stale and open to takeover (recovery).</p>
+
+    {% if view.slotHolders is empty %}
+        <p class="muted">The LLM slot is free.</p>
+    {% else %}
+        <ul class="cards">
+        {% for holder in view.slotHolders %}
+            <li class="card">
+                <a class="card-title" href="{{ path('app_run_detail', {id: holder.run.id}) }}">
+                    Run #{{ holder.run.id }} <span class="muted">· {{ holder.lane }} lane</span>
+                </a>
+                <p class="muted">
+                    {{ holder.run.task.title }} · holding for {{ holder.claimAge }}s
+                    {% if holder.stale %}<span class="flash flash-error inline">stale claim — takeover due</span>{% endif %}
+                </p>
+            </li>
+        {% endfor %}
+        </ul>
+    {% endif %}
+
+    {% if view.waiting is not empty %}
+        <details open>
+            <summary>{{ view.waiting|length }} run(s) waiting</summary>
+            <ul class="cards">
+            {% for item in view.waiting %}
+                <li class="card">
+                    <a class="card-title" href="{{ path('app_run_detail', {id: item.run.id}) }}">Run #{{ item.run.id }}</a>
+                    <p class="muted">{{ item.run.task.title }} · {{ item.label }}</p>
+                </li>
+            {% endfor %}
+            </ul>
+        </details>
+    {% endif %}
+
+    {% if view.graphs is not empty %}
+        <details open>
+            <summary>{{ view.graphs|length }} step graph(s) in flight</summary>
+            <ul class="cards">
+            {% for graph in view.graphs %}
+                <li class="card">
+                    <a class="card-title" href="{{ path('app_run_detail', {id: graph.run.id}) }}">Run #{{ graph.run.id }}</a>
+                    <p class="muted">{{ graph.run.task.title }} · {{ graph.done }}/{{ graph.total }} child run(s) settled</p>
+                </li>
+            {% endfor %}
+            </ul>
+        </details>
+    {% endif %}
+</section>
+
+<section aria-labelledby="history-heading">
+    <h2 id="history-heading">Run history</h2>
+    {% if view.recent is empty %}
+        <p class="muted">No runs yet. Enable a task and use Run now.</p>
+    {% else %}
+        <ul class="cards">
+        {% for run in view.recent %}
+            <li class="card">
+                <a class="card-title" href="{{ path('app_run_detail', {id: run.id}) }}">
+                    Run #{{ run.id }} <span class="muted">· {{ run.task.title }}</span>
+                </a>
+                <p class="muted">
+                    <span class="status status-{{ run.status.value }}">{{ run.status.value }}</span>
+                    {% if run.role.value != 'standalone' %} · {{ run.role.value }}{% endif %}
+                    {% if run.errorClass %} · {{ run.errorClass.value }}{% endif %}
+                    {% if run.finishedAt %} · finished {{ run.finishedAt|date('Y-m-d H:i') }}{% endif %}
+                </p>
+            </li>
+        {% endfor %}
+        </ul>
+    {% endif %}
+</section>
+{% endblock %}

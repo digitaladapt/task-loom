@@ -1,0 +1,12 @@
+{% set step_title = child.step ? child.step.title : (child.role.value == 'final_consumer' ? 'final consumer' : 'unresolved step') %}
+<li class="card">
+    <a class="card-title" href="{{ path('app_run_detail', {id: child.id}) }}">
+        {{ step_title }}
+        <span class="muted">· run #{{ child.id }}</span>
+    </a>
+    <p class="muted">
+        <span class="status status-{{ child.status.value }}">{{ child.status.value }}</span>
+        {% if child.errorClass %} · {{ child.errorClass.value }}{% endif %}
+        {% if child.finishedAt %} · finished {{ child.finishedAt|date('Y-m-d H:i') }}{% endif %}
+    </p>
+</li>
