@@ -140,6 +140,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Secured MCP servers now authenticate: `cred_var` is resolved to an
+  `Authorization` header.** A server's `cred_var` names an env var (SPEC §7),
+  but nothing ever read it: both client call sites built a bare transport, so a
+  server that required a credential answered every catalog sync with a 401 and
+  the sync reported a plain connection failure. `App\Toolbox\CredentialResolver`
+  now reads the named variable from the environment at sync AND call time — for
+  both MCP servers (`McpServerReader`, `ToolExecutor`) and OpenAPI servers
+  (`OpenApiServerReader`, whose spec endpoint is guarded the same way) — and
+  sends it as `Authorization` — a bare token becomes `Bearer <token>`, a value
+  that spells its own scheme (`Bearer …`, `Basic …`) is sent verbatim. The value
+  is resolved from the process environment, never stored or logged; the run's
+  frozen toolbox snapshot carries the variable NAME only. A missing/empty
+  variable fails loudly with a message naming the variable, rather than sending
+  an unauthenticated request.
 - `TaskMcpServerEndToEndTest` no longer spawns a background process and hunts
   for a free port. Its own docblock recorded the pain — a fixed port "invites
   collisions with leaked processes from earlier runs", and a plain

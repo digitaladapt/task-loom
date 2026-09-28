@@ -7,6 +7,8 @@ namespace App\RunEngine;
 use App\Entity\ErrorClass;
 use App\Entity\ServerProtocol;
 use App\Entity\Tool;
+use App\Toolbox\CredentialResolutionException;
+use App\Toolbox\CredentialResolver;
 use Mcp\Client;
 use Mcp\Client\Transport\HttpTransport;
 use Mcp\Schema\Content\TextContent;
@@ -32,6 +34,7 @@ final class ToolExecutor implements ToolExecutorInterface
 
     public function __construct(
         private readonly ?int $timeoutSeconds = null,
+        private readonly CredentialResolver $credentials = new CredentialResolver(),
     ) {
     }
 
@@ -91,8 +94,13 @@ final class ToolExecutor implements ToolExecutorInterface
         $client = null;
 
         try {
-            $client = $this->buildClient($server->getUrl());
+            $client = $this->buildClient($server->getUrl(), $server->getCredVar());
             $result = $client->callTool($tool->getName(), $arguments);
+        } catch (CredentialResolutionException $e) {
+            // A missing credential is a configuration fault, not a server
+            // fault, and it is safe to surface verbatim: the resolver's
+            // message names the env var only.
+            throw new ToolExecutionException($e->getMessage(), ErrorClass::ServerError, $e);
         } catch (\Throwable $e) {
             // Every failure is classified a server error: whether the endpoint
             // is unreachable, rejects the call, or returns a malformed result,
@@ -149,9 +157,14 @@ final class ToolExecutor implements ToolExecutorInterface
         ];
     }
 
-    private function buildClient(string $url): Client
+    private function buildClient(string $url, ?string $credVar = null): Client
     {
         $timeout = $this->timeoutSeconds ?? 60;
+
+        // Resolve the server's credential header before the client is built:
+        // a missing env var must fail loudly here, never yield an
+        // unauthenticated call the server will silently reject.
+        $headers = $this->credentials->headersFor($credVar);
 
         $client = Client::builder()
             ->setClientInfo(self::CLIENT_NAME, self::CLIENT_VERSION)
@@ -167,7 +180,7 @@ final class ToolExecutor implements ToolExecutorInterface
         // Streamable HTTP only (SPEC §11). A tool call needs no session of its
         // own: connect() performs the handshake, callTool() carries it, and
         // disconnect() closes it — all within this method.
-        $client->connect(new HttpTransport(endpoint: $url));
+        $client->connect(new HttpTransport(endpoint: $url, headers: $headers));
 
         return $client;
     }

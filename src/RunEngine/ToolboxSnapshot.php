@@ -15,10 +15,13 @@ use App\Entity\Tool;
  * and tool dispatch — WITHOUT consulting the catalog, which may have
  * changed since the run started. The run's constitution does not move.
  *
- * Deliberately stores no secret: `cred_var` (an env var NAME) exists on the
- * catalog entity but nothing on the execution path reads it in v1.
+ * Deliberately stores no secret: `credVar` is the NAME of an environment
+ * variable, never its value — the value is read from the process environment
+ * at call time by CredentialResolver and never crosses into the snapshot, a
+ * log, or the ledger.
  *
- * Shape per entry: {server, serverUrl, protocol, tool, description, schema}.
+ * Shape per entry:
+ *   {server, serverUrl, protocol, credVar, tool, description, schema}.
  */
 final readonly class ToolboxSnapshot
 {
@@ -34,6 +37,10 @@ final readonly class ToolboxSnapshot
                 'server' => $tool->getServer()->getName(),
                 'serverUrl' => $tool->getServer()->getUrl(),
                 'protocol' => $tool->getServer()->getProtocol()->value,
+                // The env var NAME only (SPEC §7) — the executor resolves it
+                // at call time; the run's frozen constitution never holds a
+                // secret.
+                'credVar' => $tool->getServer()->getCredVar(),
                 'tool' => $tool->getName(),
                 'description' => $tool->getDescription(),
                 'schema' => $tool->getSchema(),
@@ -61,6 +68,9 @@ final readonly class ToolboxSnapshot
                 (string) ($entry['server'] ?? ''),
                 (string) ($entry['serverUrl'] ?? ''),
                 ServerProtocol::tryFrom((string) ($entry['protocol'] ?? '')) ?? ServerProtocol::Mcp,
+                isset($entry['credVar']) && \is_string($entry['credVar']) && '' !== $entry['credVar']
+                    ? $entry['credVar']
+                    : null,
             );
 
             $tools[] = new Tool(
