@@ -44,15 +44,16 @@ Docker:
 ```bash
 cp .env.example .env           # set APP_SECRET + TASKLOOM_ADMIN_PASSWORD
 docker compose -f docs/examples/compose.yaml up -d
-# schema is an explicit deployment step, never a per-boot side effect (§8.6):
-docker compose -f docs/examples/compose.yaml run --rm taskloom \
-    php bin/console doctrine:migrations:migrate --no-interaction
 # admin UI: http://localhost:8080
 ```
 
-The compose example starts the app plus `worker-llm` / `worker-tools`
-Messenger workers; scale the llm lane to your concurrency setting:
-`docker compose ... up -d --scale worker-llm=2`.
+One container runs everything: the admin UI, the MCP endpoint, and the worker
+fleet (N `llm` workers + M `tools` workers), supervised by the image's
+entrypoint. `docker compose up` also deploys the schema — a one-shot `migrate`
+service runs to completion before the app is allowed to start (§8.6: schema
+changes stay an explicit step, they are simply wired for you). `TASKLOOM_LLM_MAX_CONCURRENCY`
+is the number of llm workers the container runs, so there is nothing to scale
+by hand. See [docs/design/SINGLE_CONTAINER_RUNTIME.md](docs/design/SINGLE_CONTAINER_RUNTIME.md).
 
 ## Run surface
 
@@ -94,7 +95,9 @@ by `queue_name`):
   failures never land here — they are recorded in the run's ledger (the engine owns all
   retry semantics; the transport's own retry is disabled).
 
-Run a task through the lanes:
+In the container, the entrypoint starts the fleet for you: `TASKLOOM_LLM_MAX_CONCURRENCY`
+llm workers and `TASKLOOM_TOOL_MAX_CONCURRENCY` tools workers, restarted on exit.
+Locally (or when working outside the container) run them by hand:
 
 ```bash
 php bin/console app:run:now <task-id> --queue     # enqueue
@@ -120,7 +123,8 @@ inline. Key knobs:
 | Variable | Purpose |
 |---|---|
 | `TASKLOOM_LLM_BASE_URL` / `TASKLOOM_LLM_MODEL` | OpenAI-compatible endpoint (Ollama / vLLM / llama.cpp) |
-| `TASKLOOM_LLM_MAX_CONCURRENCY` | Concurrent LLM requests — run this many `messenger:consume llm` workers (1 on a single local GPU) |
+| `TASKLOOM_LLM_MAX_CONCURRENCY` | Concurrent LLM requests — the container runs this many llm workers (1 on a single local GPU) |
+| `TASKLOOM_TOOL_MAX_CONCURRENCY` | Concurrent tool-turn workers (default 2) |
 | `TASKLOOM_STEP_BUDGET` | Max tool-call exchanges per run (fail closed) |
 | `TASKLOOM_CONTEXT_LIMIT` | Context window for the fail-closed token budget |
 | `MESSENGER_TRANSPORT_DSN` | Doctrine-backed lane table; `auto_setup=0` — create it with `doctrine:migrations:migrate` |

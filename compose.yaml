@@ -1,28 +1,80 @@
-# TaskLoom root compose — development/convenience file.
+# TaskLoom root compose — run the whole application from this working tree.
 #
-# The documented deployment is docs/examples/compose.yaml (production-shaped:
-# the app image, one data volume, env-driven config). This root file exists
-# for local development of the app itself: build from source, expose the
-# admin UI, mount the source tree read-only is NOT done here — use
-# `symfony serve` for hot-reload development instead.
+# ONE container (SPEC §6): the web server, the MCP endpoint (POST /mcp), and
+# the run engine's worker fleet all run in the `taskloom` service, started and
+# supervised by docker/entrypoint.sh (`serve`). TASKLOOM_LLM_MAX_CONCURRENCY
+# is the number of llm workers the entrypoint starts — it is the concurrency
+# semaphore, not a scale-out instruction.
+#
+# Schema changes stay an explicit deployment step (§8.6), but `docker compose
+# up` still does everything: the one-shot `migrate` service runs first, and
+# the app starts only after it succeeds (service_completed_successfully).
+#
+# Usage:
+#   cp .env.example .env        # set APP_SECRET + TASKLOOM_ADMIN_PASSWORD
+#   docker compose up -d        # migrate → app (web + workers)
+#   → admin UI: http://localhost:8080
+#
+# This file builds the image from source and runs APP_ENV=prod: the image is
+# installed with --no-dev, UI development is `symfony serve` (hot reload),
+# not this compose file.
+
+x-taskloom-env: &taskloom-env
+  APP_SECRET: ${APP_SECRET:?set APP_SECRET in .env}
+  TASKLOOM_ADMIN_PASSWORD: ${TASKLOOM_ADMIN_PASSWORD:?set TASKLOOM_ADMIN_PASSWORD in .env}
+  # LLM endpoint (OpenAI-compatible). Local-first: typically Ollama.
+  TASKLOOM_LLM_BASE_URL: ${TASKLOOM_LLM_BASE_URL:-http://host.docker.internal:11434}
+  TASKLOOM_LLM_MODEL: ${TASKLOOM_LLM_MODEL:-qwen3:14b}
+  TASKLOOM_LLM_API_KEY: ${TASKLOOM_LLM_API_KEY:-}
+  TASKLOOM_LLM_TIMEOUT: ${TASKLOOM_LLM_TIMEOUT:-300}
+  # Concurrency: llm workers to run (each holds one request on the wire).
+  TASKLOOM_LLM_MAX_CONCURRENCY: ${TASKLOOM_LLM_MAX_CONCURRENCY:-1}
+  # Tool turns mostly wait on external servers: a few personas at once is safe.
+  TASKLOOM_TOOL_MAX_CONCURRENCY: ${TASKLOOM_TOOL_MAX_CONCURRENCY:-2}
+  # Run-engine budgets (fail-closed).
+  TASKLOOM_STEP_BUDGET: ${TASKLOOM_STEP_BUDGET:-50}
+  TASKLOOM_TOOL_RETRIES: ${TASKLOOM_TOOL_RETRIES:-2}
+  TASKLOOM_CIRCUIT_BREAKER: ${TASKLOOM_CIRCUIT_BREAKER:-3}
+  TASKLOOM_CONTEXT_LIMIT: ${TASKLOOM_CONTEXT_LIMIT:-32768}
+  TASKLOOM_MAX_TOOL_OUTPUT_PCT: ${TASKLOOM_MAX_TOOL_OUTPUT_PCT:-15}
+  TASKLOOM_WINDOW_TAIL_EXCHANGES: ${TASKLOOM_WINDOW_TAIL_EXCHANGES:-10}
+  # Absolute URLs in non-HTTP contexts: must match the public-facing address.
+  DEFAULT_URI: ${DEFAULT_URI:-http://localhost:8080}
+  # SQLite (WAL) on the data volume; the lanes share this file.
+  DATABASE_URL: ${DATABASE_URL:-sqlite:///%kernel.project_dir%/data/taskloom.db}
+  MESSENGER_TRANSPORT_DSN: ${MESSENGER_TRANSPORT_DSN:-doctrine://default?auto_setup=0}
 
 services:
+  # One-shot schema deployment (§8.6): runs to completion, then exits. The app
+  # waits for it (service_completed_successfully), so `docker compose up` is
+  # still a single command for the operator.
+  migrate:
+    build: .
+    image: taskloom:dev
+    command: ['php', 'bin/console', 'doctrine:migrations:migrate', '--no-interaction', '--allow-no-migration']
+    restart: "no"
+    environment:
+      <<: *taskloom-env
+      # The migrate container must not fight the app's boot sync for the DB.
+      TASKLOOM_SYNC_ON_BOOT: '0'
+    volumes:
+      - taskloom-data:/app/data
+
   taskloom:
     build: .
     image: taskloom:dev
     restart: unless-stopped
-    environment:
-      APP_ENV: dev
-      APP_SECRET: ${APP_SECRET:?set APP_SECRET in .env}
-      TASKLOOM_ADMIN_PASSWORD: ${TASKLOOM_ADMIN_PASSWORD:?set TASKLOOM_ADMIN_PASSWORD in .env}
-      TASKLOOM_LLM_BASE_URL: ${TASKLOOM_LLM_BASE_URL:-http://host.docker.internal:11434}
-      TASKLOOM_LLM_MODEL: ${TASKLOOM_LLM_MODEL:-qwen3:14b}
-      TASKLOOM_LLM_MAX_CONCURRENCY: ${TASKLOOM_LLM_MAX_CONCURRENCY:-1}
-      DATABASE_URL: sqlite:///%kernel.project_dir%/data/taskloom.db
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment: *taskloom-env
     volumes:
       - taskloom-data:/app/data
     ports:
       - "8080:80"
+    # Must exceed TASKLOOM_SHUTDOWN_TIMEOUT, or Docker will SIGKILL the fleet
+    # before the entrypoint has finished stopping the workers gracefully.
+    stop_grace_period: 60s
 
 volumes:
   taskloom-data:
