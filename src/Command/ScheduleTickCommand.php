@@ -32,6 +32,15 @@ final class ScheduleTickCommand extends Command
         parent::__construct();
     }
 
+    /**
+     * The wall clock the operator reads: schedules are authored in the
+     * deployment timezone, so the report speaks it too.
+     */
+    private function wallClock(int $epoch): string
+    {
+        return (new \DateTimeImmutable('@'.$epoch))->setTimezone($this->scheduler->timezone())->format('Y-m-d H:i');
+    }
+
     #[\Override]
     protected function configure(): void
     {
@@ -71,7 +80,7 @@ final class ScheduleTickCommand extends Command
                 'Armed task #%d "%s" — next run %s.',
                 $entry['task']->getId(),
                 $entry['task']->getTitle(),
-                (new \DateTimeImmutable('@'.$entry['next']))->format('Y-m-d H:i'),
+                $this->wallClock($entry['next']),
             ));
         }
 

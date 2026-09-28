@@ -67,6 +67,16 @@ final readonly class TaskScheduler
     }
 
     /**
+     * The deployment timezone schedules are evaluated in — the clock the
+     * operator authors and reads. Exposed for the reporting surfaces (the
+     * tick command's output), which must speak the same wall clock.
+     */
+    public function timezone(): \DateTimeZone
+    {
+        return ScheduleExpression::resolveTimezone($this->timezone);
+    }
+
+    /**
      * One tick: arm what is new, fire what is due, report everything.
      *
      * Deterministic in $now — the caller owns the clock, so the tick is

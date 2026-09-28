@@ -8,6 +8,7 @@ use App\Context\Grounding;
 use App\Entity\Step;
 use App\Entity\Task;
 use App\Entity\Tool;
+use App\Toolbox\SchemaNormalizer;
 
 /**
  * Compiles the run prompt (SPEC §4.1, §5.6): grounding block + task brief +
@@ -106,7 +107,13 @@ final readonly class PromptCompiler
                 'function' => [
                     'name' => $tool->getName(),
                     'description' => $tool->getDescription() ?? '',
-                    'parameters' => ([] === $schema) ? (object) ['type' => 'object', 'properties' => new \stdClass()] : $schema,
+                    // The stored schema is repaired for the same reason the
+                    // executor repairs it: an empty `properties` marker must
+                    // reach the model as {} (an object), not [] — the wire
+                    // format is JSON, where the two are not interchangeable.
+                    'parameters' => ([] === $schema)
+                        ? (object) ['type' => 'object', 'properties' => new \stdClass()]
+                        : SchemaNormalizer::normalize($schema),
                 ],
             ];
         }
