@@ -150,6 +150,27 @@ final class RunRepository extends ServiceEntityRepository
     }
 
     /**
+     * Active top-level runs of one task (queued or running) — the
+     * scheduler's overlap guard (SPEC §14). A due occurrence is skipped
+     * while a previous run of the same task is still in flight; the
+     * occurrence stays owed and fires when the previous run settles.
+     * Parent runs count: a stepped task's run is its parent.
+     *
+     * @return list<Run>
+     */
+    public function findActiveTopLevelFor(Task $task): array
+    {
+        return $this->createQueryBuilder('r')
+            ->where('r.task = :task')
+            ->andWhere('r.parent IS NULL')
+            ->andWhere('r.status IN (:statuses)')
+            ->setParameter('task', $task)
+            ->setParameter('statuses', [RunStatus::Queued, RunStatus::Running])
+            ->orderBy('r.id', 'ASC')
+            ->getQuery()->getResult();
+    }
+
+    /**
      * The children of a parent run, oldest first (creation order — which for
      * the graph is also dispatch order). The parent's status is derived from
      * these (SPEC §13.3).

@@ -11,6 +11,7 @@ use App\Entity\TaskKind;
 use App\Entity\ToolboxMode;
 use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
+use App\Scheduler\ScheduleExpression;
 use App\StepModel\StepGraphCodec;
 use App\StepModel\StepGraphValidator;
 use App\StepModel\StepSpec;
@@ -46,6 +47,7 @@ final class TaskCrud
         private readonly StepRepository $steps,
         private readonly StepGraphCodec $codec,
         private readonly StepGraphValidator $graphValidator,
+        private readonly ScheduleExpression $scheduleExpression,
         private readonly EntityManagerInterface $em,
     ) {
     }
@@ -57,7 +59,8 @@ final class TaskCrud
      * @param list<string> $toolbox
      * @param mixed        $steps   wire-format step graph (nested arrays, SPEC §13.2); null = no steps
      *
-     * @throws \App\StepModel\StepFormatException when the steps input is malformed
+     * @throws \App\StepModel\StepFormatException     when the steps input is malformed
+     * @throws \App\Scheduler\ScheduleFormatException when the schedule is not a valid cron expression
      */
     public function create(
         string $title,
@@ -70,8 +73,13 @@ final class TaskCrud
     ): Task {
         $specs = $this->codec->parse($steps);
 
+        // SPEC §14: refuse an invalid schedule at authoring time — the same
+        // discipline as the step format (§13.2). Enable/approve validates
+        // again, where it is the enforcement gate.
+        $this->scheduleExpression->assertValid($schedule);
+
         $task = new Task($title, $brief, $kind, $toolboxMode, $toolbox, TaskAuthor::Agent);
-        $task->setSchedule($schedule);
+        $task->setSchedule(ScheduleExpression::normalize($schedule));
 
         return $this->inTransaction(function () use ($task, $specs): Task {
             $this->em->persist($task);
@@ -97,7 +105,8 @@ final class TaskCrud
      *
      * @param array{title?: string, brief?: string, kind?: TaskKind|string, toolbox_mode?: ToolboxMode|string, toolbox?: list<string>, schedule?: ?string, steps?: mixed} $changes
      *
-     * @throws \App\StepModel\StepFormatException when the steps input is malformed
+     * @throws \App\StepModel\StepFormatException     when the steps input is malformed
+     * @throws \App\Scheduler\ScheduleFormatException when the schedule is not a valid cron expression
      */
     public function update(int $taskId, array $changes): Task
     {
@@ -372,7 +381,10 @@ final class TaskCrud
             $task->setToolbox($changes['toolbox']);
         }
         if (\array_key_exists('schedule', $changes)) {
-            $task->setSchedule($changes['schedule']);
+            // SPEC §14: an invalid schedule is refused at authoring time
+            // (the enable/approve gate validates again).
+            $this->scheduleExpression->assertValid($changes['schedule']);
+            $task->setSchedule(ScheduleExpression::normalize($changes['schedule']));
         }
         // 'steps' is not applied here: it is not a field but a graph
         // replacement, handled by replaceSteps() in the same transaction.

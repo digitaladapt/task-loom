@@ -7,6 +7,8 @@ namespace App\Admin;
 use App\Entity\Task;
 use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
+use App\Scheduler\ScheduleExpression;
+use App\Scheduler\ScheduleFormatException;
 use App\StepModel\StepGraphException;
 use App\StepModel\StepGraphValidator;
 use Doctrine\ORM\EntityManagerInterface;
@@ -33,6 +35,7 @@ final class TaskAdminService
         private readonly TaskRepository $tasks,
         private readonly StepRepository $steps,
         private readonly StepGraphValidator $stepGraph,
+        private readonly ScheduleExpression $scheduleExpression,
         private readonly EntityManagerInterface $em,
     ) {
     }
@@ -53,6 +56,7 @@ final class TaskAdminService
         }
 
         $this->guardStepGraph($task, 'enable');
+        $this->guardSchedule($task, 'enable');
 
         try {
             $task->enable();
@@ -77,6 +81,7 @@ final class TaskAdminService
         $task = $this->findOrThrow($taskId);
 
         $this->guardStepGraph($task, 'approve');
+        $this->guardSchedule($task, 'approve');
 
         try {
             $task->approve();
@@ -145,6 +150,21 @@ final class TaskAdminService
         try {
             $this->stepGraph->assertValid($this->steps->findForTask($task));
         } catch (StepGraphException $e) {
+            throw new TaskLifecycleException(\sprintf('Cannot %s task %d — %s', $action, $task->getId(), $e->getMessage()), 0, $e);
+        }
+    }
+
+    /**
+     * Schedule enforcement gate (SPEC §14): an invalid cron expression
+     * never becomes an enabled task — the same discipline as the step
+     * graph (§13.2). Runs before the enable/approve flip; a failure
+     * leaves the rows untouched (nothing was flushed yet).
+     */
+    private function guardSchedule(Task $task, string $action): void
+    {
+        try {
+            $this->scheduleExpression->assertValid($task->getSchedule());
+        } catch (ScheduleFormatException $e) {
             throw new TaskLifecycleException(\sprintf('Cannot %s task %d — %s', $action, $task->getId(), $e->getMessage()), 0, $e);
         }
     }

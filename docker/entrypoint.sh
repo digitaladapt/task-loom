@@ -17,6 +17,11 @@
 #                           (M = TASKLOOM_TOOL_MAX_CONCURRENCY; tool turns
 #                           mostly wait on external servers, so several run at
 #                           once without competing for the model)
+#     scheduler             app:schedule:run
+#                           (the scheduler daemon, SPEC §14: ticks on an
+#                           interval, launches due scheduled tasks through the
+#                           llm lane. One process; disable with
+#                           TASKLOOM_SCHEDULER_ENABLED=0.)
 #
 # `serve` supervises that fleet: a worker that exits — its --time-limit or
 # --memory-limit recycle, or a crash — is restarted, with backoff on rapid
@@ -64,6 +69,8 @@ PROJECT_DIR="${TASKLOOM_PROJECT_DIR:-/app}"
 
 LLM_WORKERS="${TASKLOOM_LLM_MAX_CONCURRENCY:-1}"
 TOOL_WORKERS="${TASKLOOM_TOOL_MAX_CONCURRENCY:-2}"
+SCHEDULER_ENABLED="${TASKLOOM_SCHEDULER_ENABLED:-1}"
+SCHEDULE_INTERVAL="${TASKLOOM_SCHEDULE_INTERVAL:-60}"
 WORKER_TIME_LIMIT="${TASKLOOM_WORKER_TIME_LIMIT:-3600}"
 WORKER_MEMORY_LIMIT="${TASKLOOM_WORKER_MEMORY_LIMIT:-256M}"
 MIGRATE_ON_BOOT="${TASKLOOM_MIGRATE_ON_BOOT:-0}"
@@ -115,8 +122,14 @@ validate_memory() { # name value
 
 validate_uint TASKLOOM_LLM_MAX_CONCURRENCY "$LLM_WORKERS" 0
 validate_uint TASKLOOM_TOOL_MAX_CONCURRENCY "$TOOL_WORKERS" 0
+validate_uint TASKLOOM_SCHEDULE_INTERVAL "$SCHEDULE_INTERVAL" 1
 validate_uint TASKLOOM_WORKER_TIME_LIMIT "$WORKER_TIME_LIMIT" 1
 validate_uint TASKLOOM_SHUTDOWN_TIMEOUT "$SHUTDOWN_TIMEOUT" 0
+
+case "$SCHEDULER_ENABLED" in
+    0 | 1) ;;
+    *) die "TASKLOOM_SCHEDULER_ENABLED must be 0 or 1 (got: '$SCHEDULER_ENABLED')" ;;
+esac
 validate_memory TASKLOOM_WORKER_MEMORY_LIMIT "$WORKER_MEMORY_LIMIT"
 
 # ── State ───────────────────────────────────────────────────────────────────
@@ -281,6 +294,10 @@ LLM_CMD=(php bin/console messenger:consume llm
     --time-limit="$WORKER_TIME_LIMIT" --memory-limit="$WORKER_MEMORY_LIMIT" --no-interaction)
 TOOLS_CMD=(php bin/console messenger:consume tools
     --time-limit="$WORKER_TIME_LIMIT" --memory-limit="$WORKER_MEMORY_LIMIT" --no-interaction)
+# The scheduler daemon (SPEC §14). No --time-limit/--memory-limit here: it
+# holds no message and its own loop is cheap; the shutdown path below stops
+# it cleanly (its signal handler finishes the current tick and exits 0).
+SCHEDULER_CMD=(php bin/console app:schedule:run --interval="$SCHEDULE_INTERVAL" --no-interaction)
 
 spawn() { # label cmd…
     local label="$1"
@@ -313,6 +330,12 @@ spawn_fleet() {
         done
     else
         log "warning: no tools workers (TASKLOOM_TOOL_MAX_CONCURRENCY=0); tool turns will not run"
+    fi
+
+    if [ "$SCHEDULER_ENABLED" = "1" ]; then
+        spawn scheduler "${SCHEDULER_CMD[@]}"
+    else
+        log "scheduler disabled (TASKLOOM_SCHEDULER_ENABLED=0); scheduled tasks will not fire"
     fi
 }
 
@@ -362,7 +385,7 @@ supervise() {
                 log "the web server exited; shutting everything down"
                 begin_shutdown
                 ;;
-            llm-* | tools-*)
+            llm-* | tools-* | scheduler)
                 if [ "$lifetime" -lt "$RAPID_EXIT_SECONDS" ]; then
                     fails=$(( ${CHILD_RAPID[$label]:-0} + 1 ))
                     CHILD_RAPID["$label"]="$fails"
@@ -387,6 +410,7 @@ supervise() {
 
                 case "$label" in
                     llm-*) spawn "$label" "${LLM_CMD[@]}" ;;
+                    scheduler) spawn "$label" "${SCHEDULER_CMD[@]}" ;;
                     *) spawn "$label" "${TOOLS_CMD[@]}" ;;
                 esac
                 ;;

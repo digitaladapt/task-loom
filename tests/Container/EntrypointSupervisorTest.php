@@ -65,7 +65,55 @@ final class EntrypointSupervisorTest extends TestCase
 
         self::assertSame(3, $this->countLines('LLM WORKER up'), 'one llm worker per TASKLOOM_LLM_MAX_CONCURRENCY');
         self::assertSame(2, $this->countLines('TOOLS WORKER up'), 'one tools worker per TASKLOOM_TOOL_MAX_CONCURRENCY');
+        self::assertSame(1, $this->countLines('SCHEDULER up'), 'one scheduler daemon, SPEC §14');
         self::assertSame(1, $this->countLines('WEB up', 'web.log'), 'the web process runs alongside the workers');
+    }
+
+    public function testSchedulerDaemonIsDisabledByTheKnob(): void
+    {
+        $process = $this->startServe([
+            'TASKLOOM_SCHEDULER_ENABLED' => '0',
+        ]);
+
+        try {
+            usleep(300_000);
+        } finally {
+            $this->stopServe($process);
+        }
+
+        self::assertSame(0, $this->countLines('SCHEDULER up'), 'the knob keeps the daemon out of the fleet');
+        self::assertStringContainsString('scheduler disabled', $process->getErrorOutput());
+        self::assertSame(1, $this->countLines('LLM WORKER up'), 'the rest of the fleet still starts');
+    }
+
+    public function testSchedulerIsRestartedWhenItExits(): void
+    {
+        $process = $this->startServe([
+            'STUB_SCHEDULER_CRASH_AFTER' => '0.3',
+        ]);
+
+        try {
+            $this->waitFor(fn (): bool => $this->countLines('SCHEDULER up') >= 2, 15.0);
+        } finally {
+            $this->stopServe($process);
+        }
+
+        self::assertGreaterThanOrEqual(2, $this->countLines('SCHEDULER up'), 'the scheduler daemon is supervised like any worker');
+    }
+
+    public function testSchedulerCarriesTheConfiguredInterval(): void
+    {
+        $process = $this->startServe([
+            'TASKLOOM_SCHEDULE_INTERVAL' => '90',
+        ]);
+
+        try {
+            $this->waitFor(fn (): bool => $this->countLines('SCHEDULER up') >= 1);
+        } finally {
+            $this->stopServe($process);
+        }
+
+        self::assertStringContainsString('app:schedule:run --interval=90', $this->readPhpLog());
     }
 
     public function testWorkerOptionsCarryTheRecycleLimits(): void
@@ -138,6 +186,7 @@ final class EntrypointSupervisorTest extends TestCase
         self::assertSame(0, $process->getExitCode(), 'a graceful stop exits 0');
         self::assertSame(2, $this->countLines('LLM WORKER got TERM'), 'every llm worker is asked to stop');
         self::assertSame(1, $this->countLines('TOOLS WORKER got TERM'), 'the tools worker is asked to stop');
+        self::assertSame(1, $this->countLines('SCHEDULER got TERM'), 'the scheduler daemon is asked to stop too');
         self::assertSame(1, $this->countLines('WEB got TERM', 'web.log'), 'the web process is asked to stop');
     }
 
@@ -215,6 +264,8 @@ final class EntrypointSupervisorTest extends TestCase
         yield 'zero workers is allowed but -1 is not' => ['TASKLOOM_TOOL_MAX_CONCURRENCY', '-1', 'whole number'];
         yield 'zero shutdown window is allowed, negatives are not' => ['TASKLOOM_SHUTDOWN_TIMEOUT', '-5', 'whole number'];
         yield 'silly memory limit' => ['TASKLOOM_WORKER_MEMORY_LIMIT', 'lots', 'look like'];
+        yield 'scheduler toggle is 0 or 1' => ['TASKLOOM_SCHEDULER_ENABLED', 'yes', '0 or 1'];
+        yield 'zero schedule interval' => ['TASKLOOM_SCHEDULE_INTERVAL', '0', '>='];
         yield 'zero time limit' => ['TASKLOOM_WORKER_TIME_LIMIT', '0', '>='];
     }
 
@@ -347,6 +398,11 @@ final class EntrypointSupervisorTest extends TestCase
                 *"messenger:consume tools"*)
                     echo "TOOLS WORKER up" >> "$SANDBOX/worker.log"
                     trap 'echo "TOOLS WORKER got TERM" >> "$SANDBOX/worker.log"; exit 0' TERM
+                    while :; do sleep 0.2; done ;;
+                *"app:schedule:run"*)
+                    echo "SCHEDULER up" >> "$SANDBOX/worker.log"
+                    trap 'echo "SCHEDULER got TERM" >> "$SANDBOX/worker.log"; exit 0' TERM
+                    if [ -n "${STUB_SCHEDULER_CRASH_AFTER:-}" ]; then sleep "$STUB_SCHEDULER_CRASH_AFTER"; exit 9; fi
                     while :; do sleep 0.2; done ;;
                 *) echo "unexpected php call: $*" >&2; exit 3 ;;
             esac

@@ -55,6 +55,7 @@
                     #{{ task.id }} — {{ task.title }}
                 </a>
                 <p class="muted">
+                    {% if task.schedule %}<code>{{ task.schedule }}</code> ·{% endif %}
                     {% if last_run %}
                         last run
                         <a href="{{ path('app_run_detail', {id: last_run.id}) }}">#{{ last_run.id }}</a>

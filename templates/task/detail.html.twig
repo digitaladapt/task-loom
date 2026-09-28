@@ -43,7 +43,14 @@
 
     {% if task.schedule %}
         <dt>Schedule</dt>
-        <dd><code>{{ task.schedule }}</code></dd>
+        <dd>
+            <code>{{ task.schedule }}</code>
+            {% if next_occurrence %}
+                · next run {{ next_occurrence|date('Y-m-d H:i') }}
+            {% elseif task.enabled %}
+                · arms on the next scheduler tick
+            {% endif %}
+        </dd>
     {% endif %}
 
     {% if task.replacementFor %}
@@ -157,9 +164,13 @@
             <button type="submit">Run now</button>
         </form>
         <p class="muted">
-            Run now queues the run on the worker lanes (SPEC §8 — the only trigger in v1).
+            Run now queues the run on the worker lanes.
             {% if step_overview.isEmpty %}It runs as a single unit.{% else %}Its {{ step_overview.views|length }} steps run as a graph.{% endif %}
             Follow it in the <a href="{{ path('app_run_list') }}">run surface</a>.
+            {% if task.schedule %}
+                <br>This task is scheduled — the scheduler tick also launches it on its cron
+                ({{ task.schedule }}){% if next_occurrence %}, next {{ next_occurrence|date('Y-m-d H:i') }}{% endif %}.
+            {% endif %}
         </p>
         <p class="muted">Enabled tasks are immutable — any edit lands as a replacement draft (SPEC §4.4).</p>
     {% endif %}

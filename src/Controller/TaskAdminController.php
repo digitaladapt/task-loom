@@ -16,6 +16,7 @@ use App\RunEngine\RunLauncher;
 use App\RunEngine\RunLaunchException;
 use App\RunEngine\ToolboxPreviewer;
 use App\RunEngine\ToolboxResolutionException;
+use App\Scheduler\TaskScheduler;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -26,7 +27,8 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
 /**
  * The admin UI's task surface (SPEC §8): task list, task detail with the
  * toolbox preview, the approval-queue lifecycle actions, and Run now —
- * the only run trigger in v1.
+ * the only manual run trigger — scheduled tasks fire through the
+ * scheduler tick instead (SPEC §14).
  *
  * Every write action is POST + CSRF-protected (checked explicitly in
  * each action, so a bad token yields 403 — not a Basic-auth challenge)
@@ -44,6 +46,7 @@ final class TaskAdminController extends AbstractController
         private readonly ToolboxPreviewer $previewer,
         private readonly StepOverviewPresenter $stepOverview,
         private readonly RunLauncher $launcher,
+        private readonly TaskScheduler $scheduler,
     ) {
     }
 
@@ -81,6 +84,7 @@ final class TaskAdminController extends AbstractController
             'step_overview' => $this->stepOverview->present($task),
             'run_groups' => $this->runGroups($task),
             'replacement_drafts' => $this->tasks->findReplacementDraftsFor($task),
+            'next_occurrence' => $this->scheduler->nextOccurrence($task, new \DateTimeImmutable()),
         ]);
     }
 

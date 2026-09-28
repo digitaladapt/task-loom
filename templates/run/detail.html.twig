@@ -30,6 +30,12 @@
     <dt>Role</dt>
     <dd>{{ view.roleLabel }}</dd>
 
+    <dt>Trigger</dt>
+    <dd>
+        {% if view.run.triggeredBy.value == 'scheduled' %}scheduled (the scheduler tick)
+        {% else %}manual (Run now / console){% endif %}
+    </dd>
+
     {% if view.run.parent %}
         <dt>Parent run</dt>
         <dd><a href="{{ path('app_run_detail', {id: view.run.parent.id}) }}">Run #{{ view.run.parent.id }}</a></dd>

@@ -14,6 +14,7 @@
 | `frankenphp run …` | 1 | The admin UI **and** the MCP server role (`POST /mcp`) — one process, one port. The SDK's HTTP transport is a PSR-7 handler, not a web server, so there is no second listener to run. |
 | `messenger:consume llm` | `TASKLOOM_LLM_MAX_CONCURRENCY` | One worker holds at most one LLM request on the wire. **N workers are the concurrency semaphore** (SPEC §6) — the variable stopped being a suggestion to scale a service and became the count the supervisor starts. |
 | `messenger:consume tools` | `TASKLOOM_TOOL_MAX_CONCURRENCY` | Tool turns mostly wait on external servers; several run at once without competing for the model. A slow tool never blocks the `llm` lane. |
+| `app:schedule:run` | `TASKLOOM_SCHEDULER_ENABLED` (0 or 1) | The scheduler daemon (SPEC §14): ticks on `TASKLOOM_SCHEDULE_INTERVAL` and launches due scheduled tasks through the `llm` lane. One process; it holds no message and shuts down gracefully on SIGTERM (the current tick finishes). |
 
 There is no separate worker service, no orchestrator process, and no
 sidecar. The entrypoint *is* the process supervision — ~200 lines of bash with
@@ -52,7 +53,7 @@ env contract        lint:container --resolve-env-vars
 migrate (optional)  TASKLOOM_MIGRATE_ON_BOOT=1
 schema gate         doctrine:migrations:up-to-date   → refuses to start the fleet
 catalog sync        app:catalog:sync        (non-fatal — a down server never blocks boot)
-fleet               web + N llm + M tools
+fleet               web + N llm + M tools + scheduler (unless TASKLOOM_SCHEDULER_ENABLED=0)
 ```
 
 Two of those deserve their reasoning written down:

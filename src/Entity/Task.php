@@ -56,11 +56,28 @@ class Task
     private array $toolbox = [];
 
     /**
-     * Cron expression (v1.1 scheduler); nullable because v1's only trigger
-     * is manual Run-now.
+     * Cron expression (SPEC §14); nullable because manual Run-now is the
+     * other trigger. Interpreted in the deployment timezone
+     * (TASKLOOM_TIMEZONE); validated at create/update and again at
+     * enable/approve, like the step graph.
      */
     #[ORM\Column(length: 64, nullable: true)]
     private ?string $schedule = null;
+
+    /**
+     * The scheduler cursor (SPEC §14): the next owed occurrence, as epoch
+     * seconds — an unambiguous instant, deliberately not a datetime column
+     * (DBAL reinterprets SQLite datetimes in the process's current default
+     * timezone, which would make the cursor compare unstably). Null means
+     * "not armed": the tick arms an enabled scheduled task on first sight.
+     *
+     * Written only by App\Scheduler\TaskScheduler, by compare-and-swap, so
+     * a due occurrence fires at most once. Not task content — it does not
+     * participate in the immutability rule (§4.4), which is why it is not
+     * copied by createReplacementDraft(): a replacement starts unarmed.
+     */
+    #[ORM\Column(nullable: true)]
+    private ?int $nextRunAt = null; // @phpstan-ignore property.unusedType (Doctrine hydrates the compare-and-swap-written value)
 
     /**
      * A task is runnable only when enabled. Agent-authored tasks and
@@ -203,6 +220,18 @@ class Task
     {
         $this->assertMutable();
         $this->schedule = $schedule;
+    }
+
+    /**
+     * The next owed occurrence, epoch seconds (SPEC §14). Written by the
+     * scheduler only — deliberately no public setter: the cursor is
+     * scheduling state advanced by compare-and-swap, not content a caller
+     * should assign (enable/approve validate the expression; the tick owns
+     * arming and advancing).
+     */
+    public function getNextRunAt(): ?int
+    {
+        return $this->nextRunAt;
     }
 
     public function isEnabled(): bool

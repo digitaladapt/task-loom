@@ -65,6 +65,15 @@ class Run
     private RunStatus $status = RunStatus::Queued;
 
     /**
+     * What launched this run (SPEC §14.3): `manual` (Run now, console) or
+     * `scheduled` (the tick). Set on the top-level run of a launch; child
+     * runs of a step graph keep the default. Recorded so "why did this run
+     * happen?" is answered by the ledger, not inferred from timestamps.
+     */
+    #[ORM\Column(length: 16, enumType: RunTrigger::class, options: ['default' => 'manual'])]
+    private RunTrigger $triggeredBy = RunTrigger::Manual;
+
+    /**
      * The resolved tools, frozen at run start (SPEC §4.1): a list of
      * {server, serverUrl, protocol, tool, description, schema} tuples —
      * everything a fresh worker needs to rebuild the toolbox for a turn
@@ -193,6 +202,16 @@ class Run
     public function getStatus(): RunStatus
     {
         return $this->status;
+    }
+
+    public function getTriggeredBy(): RunTrigger
+    {
+        return $this->triggeredBy;
+    }
+
+    public function setTriggeredBy(RunTrigger $triggeredBy): void
+    {
+        $this->triggeredBy = $triggeredBy;
     }
 
     public function setStatus(RunStatus $status): void

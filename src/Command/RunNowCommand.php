@@ -22,7 +22,8 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 
 /**
- * Run-now (SPEC §8): the only task trigger in v1.
+ * Run-now (SPEC §8): the manual task trigger. Scheduled tasks fire through
+ * the scheduler tick instead (SPEC §14).
  *
  * Two modes, one gate:
  *   - default: synchronous — drives the turn cores inline and reports the
