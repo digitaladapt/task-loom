@@ -9,11 +9,13 @@ use App\Entity\ServerProtocol;
 use App\Entity\Tool;
 use App\Toolbox\CredentialResolutionException;
 use App\Toolbox\CredentialResolver;
+use App\Toolbox\SchemaNormalizer;
 use Mcp\Client;
 use Mcp\Client\Transport\HttpTransport;
 use Mcp\Schema\Content\TextContent;
 use Mcp\Schema\Result\CallToolResult;
 use Opis\JsonSchema\Errors\ValidationError;
+use Opis\JsonSchema\Exceptions\ParseException as SchemaParseException;
 use Opis\JsonSchema\Validator;
 
 /**
@@ -55,7 +57,22 @@ final class ToolExecutor implements ToolExecutorInterface
         }
 
         $validator = new Validator();
-        $result = $validator->validate($this->toObject($arguments), $this->toObject($schema));
+
+        try {
+            // SchemaNormalizer repairs the JSON-object members (empty
+            // `properties` and friends) that Doctrine's JSON round-trip
+            // decodes to arrays — a parameterless tool must validate, not
+            // fail.
+            $result = $validator->validate($this->toObject($arguments), $this->toObject(SchemaNormalizer::normalize($schema)));
+        } catch (SchemaParseException $e) {
+            // A schema the validator cannot parse even after normalization
+            // is corrupt catalog data, not an invalid tool call — and it
+            // must never wedge the run by escaping the engine's
+            // classify-and-record discipline. Reject the call loudly as
+            // invalid_arguments so the run records a diagnosis instead of
+            // dying on delivery.
+            return [\sprintf('the tool\'s recorded schema is not a valid JSON Schema (%s); refusing to dispatch', $e->getMessage())];
+        }
 
         if ($result->isValid()) {
             return [];

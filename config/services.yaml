@@ -71,6 +71,14 @@ services:
         arguments:
             $adminPassword: '%env(TASKLOOM_ADMIN_PASSWORD)%'
 
+    # The scheduler (SPEC §14). TASKLOOM_TIMEZONE is required, not
+    # defaulted: a schedule means "this wall-clock time where the operator
+    # lives", and silently evaluating 08:00 in UTC is the quiet-wrongness
+    # this project refuses. The container's boot lint names it when missing.
+    App\Scheduler\TaskScheduler:
+        arguments:
+            $timezone: '%env(TASKLOOM_TIMEZONE)%'
+
     App\Context\ContextWindow:
         arguments:
             $contextLimitTokens: '%env(int:TASKLOOM_CONTEXT_LIMIT)%'

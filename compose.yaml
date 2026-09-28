@@ -31,6 +31,11 @@ x-taskloom-env: &taskloom-env
   TASKLOOM_LLM_MAX_CONCURRENCY: ${TASKLOOM_LLM_MAX_CONCURRENCY:-1}
   # Tool turns mostly wait on external servers: a few personas at once is safe.
   TASKLOOM_TOOL_MAX_CONCURRENCY: ${TASKLOOM_TOOL_MAX_CONCURRENCY:-2}
+  # Wall-clock timezone schedules are evaluated in (SPEC §14). Required.
+  TASKLOOM_TIMEZONE: ${TASKLOOM_TIMEZONE:-UTC}
+  # The scheduler daemon: enabled; tick interval in seconds.
+  TASKLOOM_SCHEDULER_ENABLED: ${TASKLOOM_SCHEDULER_ENABLED:-1}
+  TASKLOOM_SCHEDULE_INTERVAL: ${TASKLOOM_SCHEDULE_INTERVAL:-60}
   # Run-engine budgets (fail-closed).
   TASKLOOM_STEP_BUDGET: ${TASKLOOM_STEP_BUDGET:-50}
   TASKLOOM_TOOL_RETRIES: ${TASKLOOM_TOOL_RETRIES:-2}

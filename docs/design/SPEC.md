@@ -295,7 +295,8 @@ Step          (v1.1 — §13) id, task_id, position, title, brief, toolbox_mode,
   `replacement_for_id`, approve/reject
 - Run history: per-run timeline of RunEvents (filterable by error class), the full
   transcript, and the completion artifact
-- Scheduler view (who holds the LLM slot, who's queued) + **Run now** (the only trigger in v1)
+- Scheduler view (who holds the LLM slot, who's queued) + **Run now** (the manual
+  trigger; scheduled tasks fire through the scheduler tick, §14)
 - Attention queue: `needs_attention` / `incomplete` runs, grouped by error class
 
 ---
@@ -536,3 +537,92 @@ class already.
 - **Not nested steps.** One level of decomposition: task → steps. No steps of steps.
   If a step needs finer structure, write a better step brief — justified completion
   already forces a real artifact out of each step.
+
+---
+
+## 14. Scheduling (v1.1) — cron → dispatch, cursor-based
+
+*Closes the last v1.1 roadmap item. The mechanism is task-weaver's proven tick
+(`DESIGN_CONSIDERATIONS.md` §3), rebuilt on this engine's dispatch path here.*
+
+### 14.1 The model
+
+`task.schedule` holds a cron expression, as authored (nullable — a task with no
+schedule is manual Run-now only, exactly v1). `task.next_run_at` holds the **cursor**:
+the next owed occurrence, as epoch seconds. The cursor is the record of truth — not
+wall-clock equality, not a cron-matcher's opinion about "now".
+
+Epoch seconds, deliberately not a datetime column: DBAL reinterprets SQLite datetimes
+in the process's *current* default timezone on hydration, so a datetime cursor compares
+unstably across environments. The same reasoning produced `run.claimed_at`.
+
+### 14.2 The tick
+
+One tick (`app:schedule:tick`, or the daemon `app:schedule:run`, which the container's
+`serve` fleet supervises):
+
+1. **Arm.** An enabled scheduled task whose cursor is null gets it set to the next
+   occurrence *after now*. A freshly enabled task starts on its schedule; it does not
+   fire retroactively.
+2. **Fire.** A task whose cursor has arrived — or already passed — launches its owed
+   occurrence **through `RunLauncher`**, the same queue path as Run now. A scheduled
+   run is born exactly like a manual one: parent graph or standalone run, first turn on
+   the `llm` lane, carried by workers, never by the tick process.
+
+Both effects of a fire — the advanced cursor and the created run with its first lane
+message — commit in **one transaction**, so an occurrence is never both consumed and
+lost.
+
+**At-most-once, by compare-and-swap.** The cursor advance is a conditional UPDATE
+(`... SET next_run_at = :next WHERE id = :id AND next_run_at <= :now`); a tick that
+loses the race affects zero rows and steps aside. Two ticks, or two containers, cannot
+double-fire an occurrence.
+
+**Downtime never skips a slot.** A due task stays due until fired, so a delayed tick
+(or a daemon that was down) catches the slot up instead of skipping to the next one.
+Missed occurrences during a long gap collapse into the single catch-up fire: the cursor
+always advances to the next occurrence *after now*.
+
+**Overlap is held, not stacked.** A due occurrence is skipped while a previous
+top-level run of the same task is still active (reported in the tick's output, still
+owed). Two overlapping runs of one task is duplicate work by default, not the intent;
+the occurrence fires as soon as the previous run settles. Events and dispatch stay
+per-run under run-per-step (§13): a stepped task's "previous run" is its parent.
+
+### 14.3 The trigger is ledger data
+
+`run.triggered_by` records what launched the run: `manual` (Run now, console) or
+`scheduled` (the tick). Set on the top-level run of a launch; child runs of a graph
+keep the default. "Why did this run at 3am?" is answered by the ledger, not inferred
+from timestamps.
+
+### 14.4 Timezone
+
+Schedules are wall-clock in the deployment timezone, `TASKLOOM_TIMEZONE` (IANA name) —
+**required, part of the env contract** (§11): an 08:00 schedule silently running at
+08:00 UTC for a Chicago operator is exactly the class of quiet wrongness this project
+refuses. The container's boot lint names the variable when missing. DST is the
+timezone database's problem, not a special case here: the next occurrence is computed
+in the zone, instants are what is stored.
+
+### 14.5 Failure policy — same as everywhere
+
+- **Validation is a gate, twice.** An invalid cron expression is refused at task
+  create/update (the authoring boundary, §13.2's discipline) and again at enable/approve
+  — an invalid schedule never becomes an enabled task. Blank normalizes to "no
+  schedule".
+- **A launch that fails at dispatch is a ledger row, not a log line.** A toolbox that
+  no longer resolves (or any classified dispatch failure) becomes a *failed run* with
+  its error class, carrying the `scheduled` trigger; the occurrence is consumed. Loud,
+  classified, no retry storm — the same treatment a child run gets (§13.5).
+- **An infrastructure failure leaves the occurrence owed.** If the launch cannot commit
+  at all, the transaction rolls back — including the cursor advance — so the next tick
+  retries it. Never silently skipped.
+
+### 14.6 What scheduling is not
+
+- **Not a second dispatch mechanism.** The tick calls `RunLauncher`; there is no
+  scheduler-side run creation, no scheduler-side lanes.
+- **Not per-task timezones.** One deployment timezone; TaskLoom v1 is single-tenant.
+- **Not catch-up replay.** A missed window fires once, at the next tick — not once per
+  missed occurrence.

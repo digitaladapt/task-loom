@@ -65,9 +65,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Scheduling (SPEC §14) — tasks can now run on a cron schedule.** `task.schedule`
+  (the dormant v1 column) is live: an enabled scheduled task is armed on the first
+  scheduler tick (cursor = next occurrence) and fires on it, through the same
+  `RunLauncher` queue path as Run now — a scheduled run is born exactly like a manual
+  one and is carried by the worker lanes. The cursor (`task.next_run_at`, epoch
+  seconds) is the record of truth, advanced by **compare-and-swap**, so a due
+  occurrence fires at most once even if two ticks race; a delayed tick catches the
+  slot up instead of skipping it; a due occurrence is held (still owed) while a
+  previous run of the task is active. `run.triggered_by` records `manual` vs
+  `scheduled`, so "why did this run at 3am?" is ledger data. An invalid cron
+  expression is refused at create/update *and* at enable/approve; a scheduled launch
+  that fails at dispatch becomes a classified failed run, not a log line. Schedules
+  are wall-clock in `TASKLOOM_TIMEZONE` (required env; named at boot when missing).
+  New commands: `app:schedule:tick` (one tick) and `app:schedule:run` (the daemon the
+  container fleet supervises; graceful SIGTERM shutdown).
+- **`dragonmantank/cron-expression`** (the dependency SPEC §11 already approved) —
+  cron parsing/validation and next-occurrence computation, evaluated in the
+  deployment timezone.
+- **`TASKLOOM_SCHEDULER_ENABLED` / `TASKLOOM_SCHEDULE_INTERVAL` /
+  `TASKLOOM_TIMEZONE`** — the scheduler fleet knobs and the schedule timezone,
+  documented in `.env.example`.
 - **Container entrypoint (`serve`):** supervised single-container runtime —
-  boot gates (env contract, schema), worker fleet, restart-with-backoff,
-  signal-driven shutdown with a SIGKILL escalation window
+  boot gates (env contract, schema), worker fleet + scheduler daemon,
+  restart-with-backoff, signal-driven shutdown with a SIGKILL escalation window
   (`TASKLOOM_SHUTDOWN_TIMEOUT`), and `exec` pass-through for one-shot commands
   (`docker compose run --rm taskloom php bin/console …`). `lint:container
   --resolve-env-vars` runs before anything starts, so a missing variable fails

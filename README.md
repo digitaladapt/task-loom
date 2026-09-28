@@ -74,9 +74,45 @@ request) and takes you to its page:
   class; a failed step graph appears as its parent, carrying the failing
   step's diagnosis (SPEC §13.5).
 
-One trigger, two faces: the web **Run now** and `app:run:now --queue` share
-the same launch path (`RunLauncher`), so a UI run and a CLI run are the same
-run.
+One manual trigger, two faces: the web **Run now** and `app:run:now --queue`
+share the same launch path (`RunLauncher`), so a UI run and a CLI run are the
+same run — and the scheduler tick fires through the same path (see
+[Scheduling](#scheduling)).
+
+## Scheduling
+
+A task can carry a **cron schedule** (`task.schedule`; e.g. `0 8 * * *` for
+08:00 daily) and then fires on its own — no external cron needed, the
+container's fleet runs a scheduler daemon. Schedules are wall-clock in
+`TASKLOOM_TIMEZONE` (required; an 08:00 schedule silently running at 08:00
+UTC for a Chicago operator is not a thing this project does).
+
+How it works, in one breath: the **cursor** (`task.next_run_at`, epoch
+seconds) is the record of truth — an enabled scheduled task is *armed* on the
+first tick (cursor = next occurrence) and *fires* when its cursor arrives.
+Firing launches through `RunLauncher`, the same queue path as Run now, so a
+scheduled run is carried by the worker lanes; the run's ledger records
+`triggered_by = scheduled` (vs `manual`). The cursor advances by
+**compare-and-swap**, so a due occurrence fires **at most once** even if two
+ticks race; a **delayed tick catches the slot up** instead of skipping it; and
+a due occurrence is **held** (still owed) while a previous run of the same
+task is active, firing when it settles.
+
+- Invalid cron expressions are refused when the task is written *and* when it
+  is enabled — an invalid schedule never becomes a running task.
+- A scheduled launch that fails at dispatch (a toolbox that no longer
+  resolves) becomes a classified **failed run** in the ledger; the occurrence
+  is consumed, not retried forever.
+- The tick is one command — run it by hand, from cron, or not at all:
+
+```bash
+php bin/console app:schedule:tick     # one tick: arm / fire / report
+php bin/console app:schedule:run      # the daemon (what the container runs)
+```
+
+In the container the entrypoint supervises the daemon like any worker
+(`TASKLOOM_SCHEDULER_ENABLED`, `TASKLOOM_SCHEDULE_INTERVAL`); it shuts down
+gracefully on SIGTERM — the current tick finishes, exit 0.
 
 ## Concurrency
 
@@ -125,6 +161,8 @@ inline. Key knobs:
 | `TASKLOOM_LLM_BASE_URL` / `TASKLOOM_LLM_MODEL` | OpenAI-compatible endpoint (Ollama / vLLM / llama.cpp) |
 | `TASKLOOM_LLM_MAX_CONCURRENCY` | Concurrent LLM requests — the container runs this many llm workers (1 on a single local GPU) |
 | `TASKLOOM_TOOL_MAX_CONCURRENCY` | Concurrent tool-turn workers (default 2) |
+| `TASKLOOM_TIMEZONE` | Wall-clock timezone cron schedules are evaluated in (required) |
+| `TASKLOOM_SCHEDULER_ENABLED` / `TASKLOOM_SCHEDULE_INTERVAL` | Run the scheduler daemon in the fleet; tick interval (default 60s) |
 | `TASKLOOM_STEP_BUDGET` | Max tool-call exchanges per run (fail closed) |
 | `TASKLOOM_CONTEXT_LIMIT` | Context window for the fail-closed token budget |
 | `MESSENGER_TRANSPORT_DSN` | Doctrine-backed lane table; `auto_setup=0` — create it with `doctrine:migrations:migrate` |

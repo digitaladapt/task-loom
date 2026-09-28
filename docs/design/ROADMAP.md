@@ -39,7 +39,11 @@
 - **Step model (SPEC §13)** — DAG-of-steps authoring on tasks, run-per-step execution,
   parent-run aggregation, Inputs-block output flow, strict fail-closed failure policy.
   No orchestrator, no per-step behavioral knobs, no separate final-step entity.
-- Scheduler tick (cron → Messenger, task-weaver's proven pattern) + schedules on tasks
+- **Scheduling (SPEC §14)** — cron schedules on tasks, a cursor-based tick
+  (arm / fire / catch-up), at-most-once dispatch by compare-and-swap, the
+  overlap guard, and a supervised scheduler daemon in the container fleet.
+  The dispatch path is RunLauncher — scheduling is a trigger, not a second
+  dispatch mechanism.
 - Seeded reviewer task; improvement cycle live
 - Auto-tagging at task creation (cheap LLM turn, task-loop pattern)
 - Run digests / needs-attention notifications
@@ -60,6 +64,24 @@
   create/update and again at enable/approve.
 - A lost dispatch (simulated) is repaired by the requeue sweep: no step is wedged,
   no duplicate execution (verified by claim + state checks).
+
+**v1.1 scheduling exit criteria:**
+
+- A task enabled with a schedule is armed on the first tick (cursor set to the next
+  occurrence) and fires on it — through the same queue path as Run now, with
+  `triggered_by = scheduled` in the ledger.
+- A due occurrence fires at most once: re-observing the same due moment (two ticks,
+  two containers) consumes it once, by cursor compare-and-swap.
+- A delayed tick — or a daemon that was down — catches the slot up: one fire at the
+  next tick, not one per missed occurrence, and never a silent skip.
+- A due occurrence is held (still owed, reported) while a previous run of the task is
+  active, and fires when it settles.
+- An invalid cron expression is rejected at task create/update and again at
+  enable/approve.
+- A scheduled launch that fails at dispatch (an unresolvable toolbox) becomes a
+  classified failed run in the ledger; the occurrence is consumed, not retried
+  forever.
+- The daemon shuts down gracefully on SIGTERM: the current tick finishes, exit 0.
 
 ## v1.x (each needs its own design note before build)
 

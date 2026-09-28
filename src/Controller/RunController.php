@@ -21,8 +21,9 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
  * the completion artifact, the scheduler view (who holds the LLM slot,
  * who's queued), and the attention queue grouped by error class.
  *
- * Read-only — the only run trigger is Run now, a task action (SPEC §8:
- * "the only trigger in v1"), which runs on the task controller's side.
+ * Read-only — run triggers live elsewhere: the manual Run now action is a
+ * task action (SPEC §8) on the task controller, and scheduled tasks fire
+ * through the scheduler tick (SPEC §14).
  * Graph children are reached through their parent's run page (SPEC §13.6).
  */
 #[IsGranted('ROLE_ADMIN')]

@@ -12,6 +12,7 @@
         "doctrine/doctrine-bundle": "^3.3",
         "doctrine/doctrine-migrations-bundle": "^4.0",
         "doctrine/orm": "^3.7.2",
+        "dragonmantank/cron-expression": "^3.6",
         "guzzlehttp/psr7": "^2.13.1",
         "mcp/sdk": "0.8.1",
         "psr/simple-cache": "^3.0",

@@ -29,21 +29,33 @@ final class DeploymentContractTest extends TestCase
      * config/ rather than hand-listed, so a new one cannot be forgotten in
      * the deployment files.
      *
+     * Scans config/services.yaml as well as config/packages/: the service
+     * wiring is where the engine, catalog and scheduler knobs live, and an
+     * earlier version of this helper only looked in packages/ — so a variable
+     * added to services.yaml (as TASKLOOM_TIMEZONE was) would not have been
+     * flagged as missing from the compose files. Discovery must match where
+     * config actually lives.
+     *
      * @return list<string>
      */
     private function requiredEnvVars(): array
     {
         $names = [];
 
-        foreach (['yaml', 'php'] as $extension) {
-            $files = glob(self::ROOT.'/config/packages/*.'.$extension) ?: [];
-            $files = array_merge($files, glob(self::ROOT.'/config/packages/*/*.'.$extension) ?: []);
+        $directory = new \RecursiveDirectoryIterator(self::ROOT.'/config', \FilesystemIterator::SKIP_DOTS);
+        $files = new \RecursiveIteratorIterator($directory);
 
-            foreach ($files as $file) {
-                preg_match_all('/%env\((?:(?:[a-z_]+):)*([A-Z][A-Z0-9_]*)\)%/', (string) file_get_contents($file), $matches);
-                foreach ($matches[1] as $name) {
-                    $names[$name] = true;
-                }
+        foreach ($files as $file) {
+            if (!$file instanceof \SplFileInfo) {
+                continue;
+            }
+            if (!\in_array($file->getExtension(), ['yaml', 'php'], true)) {
+                continue;
+            }
+
+            preg_match_all('/%env\((?:(?:[a-z_]+):)*([A-Z][A-Z0-9_]*)\)%/', (string) file_get_contents($file->getPathname()), $matches);
+            foreach ($matches[1] as $name) {
+                $names[$name] = true;
             }
         }
 
