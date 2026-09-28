@@ -26,5 +26,11 @@ The boundary is tool scoping, not a sandbox (see `docs/design/SPEC.md` §4):
 - Enabled tasks are immutable records: updates create replacement drafts, never
   mutations (preserving version history for forensics and the improvement cycle).
 - MCP server credentials live only in the harness environment (`cred_var` names an
-  env var — never the value), injected at call time, scrubbed from all traces.
+  env var — never the value), injected at call time, scrubbed from all traces. A
+  server's `cred_var` is converted to an `Authorization` header by
+  `App\Toolbox\CredentialResolver` at sync *and* call time; a bare token is sent
+  as `Bearer <token>`, a value that spells its own scheme is sent verbatim. The
+  resolved value never enters the run's frozen toolbox snapshot (which carries the
+  variable NAME only), a log line, the attempt ledger, or an exception message — a
+  missing variable fails loudly with the variable's name in the message.
 - `.env` is never committed; secrets are env vars injected at runtime (§8.12).

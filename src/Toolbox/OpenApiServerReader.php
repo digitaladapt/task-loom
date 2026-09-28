@@ -33,8 +33,10 @@ final readonly class OpenApiServerReader implements ServerReader
 
     private HttpClientInterface $httpClient;
 
-    public function __construct(?HttpClientInterface $httpClient = null)
-    {
+    public function __construct(
+        ?HttpClientInterface $httpClient = null,
+        private CredentialResolver $credentials = new CredentialResolver(),
+    ) {
         $this->httpClient = $httpClient ?? HttpClient::create(['timeout' => self::TIMEOUT]);
     }
 
@@ -45,7 +47,7 @@ final readonly class OpenApiServerReader implements ServerReader
             throw new \LogicException(\sprintf('OpenApiServerReader cannot read a %s server.', $server->getProtocol()->value));
         }
 
-        $spec = $this->fetchSpec($server->getUrl());
+        $spec = $this->fetchSpec($server->getUrl(), $server->getCredVar());
 
         return $this->specToTools($spec);
     }
@@ -53,9 +55,15 @@ final readonly class OpenApiServerReader implements ServerReader
     /**
      * @return array<string, mixed> the decoded spec document
      */
-    private function fetchSpec(string $url): array
+    private function fetchSpec(string $url, ?string $credVar = null): array
     {
-        $response = $this->httpClient->request('GET', $url);
+        // `cred_var` is protocol-agnostic (SPEC §7): a secured OpenAPI server
+        // guards its spec endpoint the same way an MCP server guards its
+        // endpoint, so the same resolved header applies. Resolution fails
+        // loudly (naming the env var only) before any request is sent.
+        $response = $this->httpClient->request('GET', $url, [
+            'headers' => $this->credentials->headersFor($credVar),
+        ]);
 
         $status = $response->getStatusCode();
         if (200 !== $status) {

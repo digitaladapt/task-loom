@@ -37,6 +37,7 @@ final readonly class McpServerReader implements ServerReader
 
     public function __construct(
         private ?int $timeoutSeconds = null,
+        private CredentialResolver $credentials = new CredentialResolver(),
     ) {
     }
 
@@ -62,7 +63,16 @@ final readonly class McpServerReader implements ServerReader
 
         // Streamable HTTP only: no stdio, no SSE (SPEC §11). The URL is the
         // full endpoint, which is what HttpTransport expects.
-        $client->connect(new HttpTransport(endpoint: $server->getUrl()));
+        //
+        // The credential headers come from the server's `cred_var` (an env var
+        // NAME, resolved here at call time). A secured server answers an
+        // unauthenticated handshake with 401, which the synchronizer would
+        // record as a plain sync failure — hence resolving before connecting,
+        // and failing loudly (and safely) when the named var is missing.
+        $client->connect(new HttpTransport(
+            endpoint: $server->getUrl(),
+            headers: $this->credentials->headersFor($server->getCredVar()),
+        ));
 
         try {
             $tools = $client->listTools();
