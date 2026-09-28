@@ -63,6 +63,13 @@
 
 ## v1.x (each needs its own design note before build)
 
+- **Task authoring in the admin UI** — create and edit tasks (including the
+  step graph) without going through MCP or the console. Today the admin
+  surface covers the *lifecycle* (list, enable/approve/reject/archive, run,
+  ledger) while authoring exists only as MCP tools and the console; a human
+  who wants to change a task must currently use an agent or SQL. The step
+  model (§13) landed first deliberately, so the editor is built once against
+  the final data shape.
 - `session` tasks: workspace, compaction contract, milestone semantics
 - `request_tool` escape hatch for mid-run pivots (still gated)
 - Per-task priority / queue jumping

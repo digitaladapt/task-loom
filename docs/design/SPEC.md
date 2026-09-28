@@ -250,6 +250,16 @@ the full, honest record — only what's sent to the model is trimmed.
 - Ready queue is FIFO and persisted; a crash/restart keeps waiting tasks waiting.
 - `X=1` (typical local setup) → tasks effectively serialize; fairness is plain FIFO.
 - Tools never call the LLM in v1 → no nested-acquire deadlock, by construction.
+- **Where the semaphore physically lives:** the engine is turn-based — one LLM
+  request per queued message — so the semaphore is *worker count*, not a counter
+  in the app. The container's entrypoint (`serve`) starts
+  `TASKLOOM_LLM_MAX_CONCURRENCY` `messenger:consume llm` workers and
+  `TASKLOOM_TOOL_MAX_CONCURRENCY` tool workers, restarting any that exit;
+  each worker holds at most one request on the wire. One container therefore
+  is the whole deployment (web + MCP endpoint + fleet) — see
+  `docs/design/SINGLE_CONTAINER_RUNTIME.md`. The claim protocol (§6.1 of the
+  run engine) is what makes duplicate deliveries and dying workers safe
+  regardless of how many workers exist.
 
 ---
 

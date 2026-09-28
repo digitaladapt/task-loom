@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The deployment is one container: `serve` runs the whole application.**
+  `docker/entrypoint.sh` now supervises the fleet — the web/MCP process plus
+  `TASKLOOM_LLM_MAX_CONCURRENCY` llm workers and `TASKLOOM_TOOL_MAX_CONCURRENCY`
+  tools workers — instead of asking the operator to run (and scale) two extra
+  compose services. That variable was previously only a comment telling the
+  operator how many containers to start; the entrypoint is now what actually
+  reads it, so the count *is* the semaphore (SPEC §6). Workers are restarted
+  with backoff when they exit; the web process is critical, so the container's
+  lifetime and exit code follow it. Reasoned through in
+  `docs/design/SINGLE_CONTAINER_RUNTIME.md`.
+- **Both compose files were unbootable and now boot.** The image runs with
+  dotenv disabled, so every `%env(...)%` the app resolves must be passed in —
+  `DEFAULT_URI` and the run-engine budget variables were not, and
+  `cache:warmup` failed on the way up. Compose files now pass the full
+  contract, and a test derives the required list from `config/` so a newly
+  added variable cannot be forgotten in them.
+- **Migrations are wired, not remembered.** A one-shot `migrate` service runs
+  before the app and the app waits for its success
+  (`service_completed_successfully`). Still an explicit deployment step per
+  §8.6 — a container that migrates at boot cannot be scaled — but
+  `docker compose up` is once again a single command. The entrypoint verifies
+  the schema is current before it starts the fleet, and fails naming the
+  command to run if it is not.
 - **MCP libraries: `php-mcp/client` + `php-mcp/server` (fork) → the official
   `mcp/sdk`** (pinned `0.8.1`). Upstream `php-mcp/server` has not been pushed to
   since 2025-08-09 and `php-mcp/client` since 2025-05-07; the server side was
@@ -42,6 +65,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Container entrypoint (`serve`):** supervised single-container runtime —
+  boot gates (env contract, schema), worker fleet, restart-with-backoff,
+  signal-driven shutdown with a SIGKILL escalation window
+  (`TASKLOOM_SHUTDOWN_TIMEOUT`), and `exec` pass-through for one-shot commands
+  (`docker compose run --rm taskloom php bin/console …`). `lint:container
+  --resolve-env-vars` runs before anything starts, so a missing variable fails
+  at boot, named, rather than as a worker dying mid-run.
+- **`TASKLOOM_TOOL_MAX_CONCURRENCY`, `TASKLOOM_WORKER_TIME_LIMIT`,
+  `TASKLOOM_WORKER_MEMORY_LIMIT`, `TASKLOOM_SHUTDOWN_TIMEOUT`,
+  `TASKLOOM_MIGRATE_ON_BOOT`** — the fleet and boot knobs, documented in
+  `.env.example`.
+- **Tests for the container contract** (`tests/Container/`): the supervisor
+  suite drives the real entrypoint against stub `php`/`frankenphp` executables
+  (fleet composition, crash restart, web-exit propagation, TERM propagation,
+  escalation, boot gates); the deployment suite asserts the compose files
+  against the app's actual env requirements. No Docker daemon required.
 - **Run surface (SPEC §8):** the admin UI now covers the whole run lifecycle.
   `GET /runs` is the scheduler view (who holds an execution claim — the claim
   *is* the wire slot, with its lane and staleness) over the run history;
@@ -87,8 +126,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (phpstan, php-cs-fixer, editorconfig), Dockerfile (FrankenPHP, non-root),
   compose example, docs/examples with inline-documented .env.example, CI workflow
   (lyra/ci php-test.yaml@v1), docs/design trio (SPEC, DESIGN_CONSIDERATIONS, ROADMAP).
-- Compose example ships `worker-llm` / `worker-tools` services (same image); scale
-  `worker-llm` to the concurrency setting.
+- Compose example ships the application as one container (web + MCP endpoint +
+  supervised worker fleet) with a one-shot migration service ahead of it; the
+  separate `worker-llm` / `worker-tools` services this example used to define
+  are gone — see the entrypoint change above.
 
 ### Removed
 

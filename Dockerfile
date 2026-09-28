@@ -1,11 +1,15 @@
 # syntax=docker/dockerfile:1.7
 #
-# TaskLoom — one app, one image. The admin UI, run engine, and MCP task-tools
-# server all live in this single Symfony application; the scheduler tick
-# (v1.1) is a Messenger worker started from the same image.
+# TaskLoom — one app, one image, one container at runtime.
 #
-# Runtime: FrankenPHP (worker mode, warm kernel), non-root, SQLite (WAL) on a
-# volume. TLS is terminated upstream of the container; FrankenPHP serves :80.
+# The admin UI and the MCP task-tools server share the FrankenPHP process
+# (`POST /mcp` is an app route), and the run engine's worker fleet is started
+# from this same image by docker/entrypoint.sh: `serve` supervises the web
+# process plus N `llm` and M `tools` Messenger workers (SPEC §6). The image is
+# production-shaped: no dev dependencies, APP_ENV=prod.
+#
+# Runtime: FrankenPHP (non-root, SQLite WAL on a volume); TLS is terminated
+# upstream of the container and FrankenPHP serves :80.
 
 # ── Stage: deps — composer dependencies (layer-cached) ─────────────────────
 FROM dunglas/frankenphp:1-php8.5-trixie AS deps
@@ -14,11 +18,11 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /app
 
-# Manifests first so dependency layers only rebuild when they change.
-# php-mcp/server is referenced via a VCS repo (our fork with the Symfony 8
-# constraint fix) — composer needs git to resolve it.
+# unzip: extraction of dist archives. git is not required — every locked
+# package resolves to a dist archive (the fork that needed a VCS repository
+# was removed with the mcp/sdk migration).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git unzip \
+    && apt-get install -y --no-install-recommends unzip \
     && rm -rf /var/lib/apt/lists/*
 
 COPY composer.json composer.lock symfony.lock ./
@@ -35,26 +39,21 @@ RUN composer dump-autoload --classmap-authoritative --no-dev \
     APP_RUNTIME_OPTIONS='{"disable_dotenv":true}' php bin/console asset-map:compile \
     && rm -rf var/cache/* var/log/*
 
-# Attempt a build-time cache warm. The prod boot guard (Kernel::boot)
-# rejects APP_SECRET=build-secret — a placeholder — so this ALWAYS fails;
-# the warm-up is a no-op that also exercises the autoloader. The real
-# warm-up runs at container start with injected secrets (entrypoint).
-# (asset-map:compile above also sets APP_ENV=prod: with no APP_ENV the
-# runtime defaults to dev, which boots MakerBundle — dev-only, absent
-# from the --no-dev autoloader — and fatals.)
-RUN APP_ENV=prod APP_SECRET=build-secret \
-    APP_RUNTIME_OPTIONS='{"disable_dotenv":true}' \
-    bin/console cache:warmup || true \
-    && rm -rf var/cache/*
+# No cache warmup here: the prod container resolves its deployment secrets
+# (DATABASE_URL, APP_SECRET, …) at boot, so a warm prod cache cannot be built
+# at image-build time. The entrypoint warms it inside the container instead,
+# before the fleet starts.
 
 # ── Stage: app — the runtime image ─────────────────────────────────────────
 FROM dunglas/frankenphp:1-php8.5-trixie AS app
 
-# Runtime set: ca-certificates (TLS for LLM/MCP calls), curl (health checks),
-# tini (PID 1 / signal handling for the Messenger worker).
+# Runtime set: ca-certificates (TLS for LLM/MCP calls), curl (health check),
+# tini (PID 1: reaps zombies and forwards signals to the entrypoint, which
+# supervises the fleet), bash (the entrypoint's interpreter), sqlite3 (the
+# CLI bin/backup-db.sh uses for WAL-aware snapshots).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl tini \
+        bash ca-certificates curl sqlite3 tini \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -82,10 +81,13 @@ ENV APP_ENV=prod \
 
 EXPOSE 80
 
-# Health check the actual endpoints: /health (liveness, no deps) and /ready
-# (readiness, may query the DB). (§8.4)
+# Liveness only: /health touches no dependencies, so a database hiccup cannot
+# kill the container (§8.4). Readiness (which may query the DB) is /ready.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD curl -f http://localhost/health || exit 1
 
-ENTRYPOINT ["/usr/local/bin/entrypoint"]
-CMD ["frankenphp", "run", "--config", "/etc/frankenphp/Caddyfile"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint"]
+# `serve` = the whole application: web + MCP endpoint + the worker fleet,
+# supervised (docker/entrypoint.sh). Override CMD for a one-shot container:
+#   docker compose run --rm taskloom php bin/console doctrine:migrations:migrate
+CMD ["serve"]
