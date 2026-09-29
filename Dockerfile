@@ -54,6 +54,7 @@ FROM dunglas/frankenphp:1-php8.5-trixie AS app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash ca-certificates curl sqlite3 tini \
+    && install-php-extensions pcntl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
