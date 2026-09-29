@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Task authoring in the admin UI (SPEC §8) — create and edit tasks from the
+  browser, including the step graph and the schedule.** The last v1.x roadmap
+  item: until now the admin surface covered a task's *lifecycle* (list,
+  enable/approve/reject/archive, run, ledger) while authoring existed only as
+  MCP tools and the console, so a human who wanted to change a task needed an
+  agent or SQL. The editor is one form: title/brief/kind, the toolbox (by tag
+  or by explicit tool, picked from the discovered catalog), an optional
+  multi-level step graph with per-step toolboxes, and a schedule.
+
+  **Authoring is gated for the human exactly as for an agent.** A save lands a
+  *disabled draft* (SPEC §4.3) and enabling stays a separate, deliberate act
+  from the task's page — the queue is a queue, not a formality. Editing an
+  *enabled* task opens a replacement draft and says so on the page before
+  anything is saved; the running task is never mutated (SPEC §4.4). The editor
+  and the MCP tools now share **one gated write path** (`TaskCrud`, taught to
+  record the author: `user` vs `agent`), so the two cannot drift — what the
+  browser submits is valid authoring/wire format, accepted verbatim by
+  `task_create`/`task_update`, and the tests assert exactly that.
+
+  **Schedules are composed, not typed.** Presets (every N minutes, hourly,
+  daily, weekdays, weekly, monthly) compose to cron *server-side*, so the
+  picker, the preview, and the stored expression cannot disagree about what
+  "every weekday at 6:30am" means; a live preview shows the composed
+  expression, a plain-English sentence, and the next three occurrences in
+  `TASKLOOM_TIMEZONE`. Composition and recognition are round-trippable, so a
+  saved schedule reopens on the preset that produced it — while an expression
+  no preset composed reopens as *custom* rather than being silently rewritten
+  on the next save. Invalid cron is refused at the editor boundary with the
+  same authority the enable gate uses (SPEC §14.5).
+
+  A submission with problems is re-rendered with every problem anchored to its
+  field and the human's work intact — never a redirect that loses it.
+
+### Fixed
+
+- **No JavaScript ran anywhere in the admin UI: the strict CSP had no nonce
+  for the app's own inline scripts.** `base.html.twig` renders the AssetMapper
+  importmap and entrypoint import, which are inline `<script>` blocks by
+  design, while `SecurityHeadersSubscriber` serves `script-src 'self'` with no
+  `'unsafe-inline'` — so the browser blocked both. The visible symptom was a
+  service worker that never registered; the latent one was that any scripted
+  surface (the new step-graph builder) would have been dead on arrival. The
+  policy was right and the delivery was missing its nonce: `CspNonce` mints
+  one per request, the header names it, and the tags carry it. Responses with
+  no inline script do not advertise a nonce they never use.
+- **A CSS module published as a `data:` script was blocked by that same
+  policy.** `assets/app.js` imported `styles/app.css`, which AssetMapper
+  surfaces as an importmap entry spelled `data:application/javascript,…`; the
+  browser loaded it as a *script* and the CSP refused it, so the entrypoint
+  module never evaluated. The stylesheet is now a `<link>` — CSS is CSS — and
+  a test asserts the importmap carries no `data:` entry.
+- **A newly added step's toolbox could not be used.** The mode switcher bound
+  its listeners per fieldset at load, so field sets that the step builder
+  cloned into existence never got one: the explicit-tools panel stayed hidden
+  and its checkboxes could not be ticked. Delegation from the form fixes it.
+- **The schedule's preset fields are now hidden when the chosen preset does
+  not use them.** An author rule setting `display` beats the `hidden`
+  attribute, so a `[hidden] { display: none }` utility is needed for anything
+  the editor toggles; without it "every 15 minutes" sat next to a day-of-month
+  picker.
+- **`SchedulePreset::compose()` read `HH:MM` backwards**, producing `06 30 *
+  * *` (30:06) for a 06:30 schedule. Caught by the round-trip test, which
+  asserts both the composed expression and the recovered time.
+- **A declaration outside the catalog is no longer dropped on re-save.** The
+  toolbox free-text field is seeded with the declared entries the catalog does
+  not offer as checkboxes; previously, opening a task whose tools were not in
+  the catalog and pressing save silently emptied its toolbox.
+- `button.small` rendered at 14px, tripping the GUIDING-LIGHT §3.3a
+  controls-16px check (the iOS auto-zoom trigger). Compact by padding, never
+  by font-size.
+
 ### Changed
 
 - **The deployment is one container: `serve` runs the whole application.**

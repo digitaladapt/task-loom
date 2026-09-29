@@ -44,9 +44,34 @@
   overlap guard, and a supervised scheduler daemon in the container fleet.
   The dispatch path is RunLauncher — scheduling is a trigger, not a second
   dispatch mechanism.
+- **Task authoring in the admin UI (SPEC §8)** — create and edit tasks, including
+  the step graph and the schedule, from the browser. Authoring exists alongside
+  the existing MCP tools, not instead of them: both go through the same gated
+  write path, and both land disabled drafts for a human to enable. The step
+  model (§13) landed first deliberately, so the editor was built once against
+  the final data shape.
 - Seeded reviewer task; improvement cycle live
 - Auto-tagging at task creation (cheap LLM turn, task-loop pattern)
 - Run digests / needs-attention notifications
+
+**v1.1 task-authoring exit criteria:**
+
+- A task can be created from the browser with a multi-level step graph, a
+  toolbox by tag or by explicit tool, and a schedule chosen from presets —
+  and the saved graph is the one authored (levels in, `depends_on` edges
+  stored, per-step toolboxes intact).
+- The same write path serves both front doors: what the editor submits is
+  valid authoring/wire format, accepted verbatim by the MCP tools, so the two
+  cannot drift.
+- Authoring is gated for the human exactly as for an agent: a save lands a
+  disabled draft, and enabling stays a separate, deliberate act.
+- Editing an enabled task produces a replacement draft; the running task is
+  never mutated (SPEC §4.4).
+- A schedule's preset round-trips: what the picker composes reopens as the
+  picker's selection, and an expression no preset composed reopens as custom
+  rather than being silently rewritten on the next save.
+- A submission with problems is re-rendered with every problem anchored to
+  its field and the human's work intact — never a redirect that loses it.
 
 **v1.1 step-model exit criteria:**
 
@@ -85,13 +110,6 @@
 
 ## v1.x (each needs its own design note before build)
 
-- **Task authoring in the admin UI** — create and edit tasks (including the
-  step graph) without going through MCP or the console. Today the admin
-  surface covers the *lifecycle* (list, enable/approve/reject/archive, run,
-  ledger) while authoring exists only as MCP tools and the console; a human
-  who wants to change a task must currently use an agent or SQL. The step
-  model (§13) landed first deliberately, so the editor is built once against
-  the final data shape.
 - `session` tasks: workspace, compaction contract, milestone semantics
 - `request_tool` escape hatch for mid-run pivots (still gated)
 - Per-task priority / queue jumping

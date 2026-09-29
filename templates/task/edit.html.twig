@@ -1,0 +1,176 @@
+{% extends 'base.html.twig' %}
+
+{% import 'task/_step_card.html.twig' as step_ui %}
+{% import 'task/_toolbox.html.twig' as toolbox_ui %}
+{% import 'task/_schedule.html.twig' as schedule_ui %}
+
+{% set editing = task is not null %}
+{% set is_enabled = editing and task.enabled %}
+
+{% block title %}{{ editing ? 'Edit task #' ~ task.id : 'New task' }} — TaskLoom{% endblock %}
+
+{#
+    Two entrypoints, one importmap() call: the shell plus the editor's step
+    builder. A document may contain only one <script type="importmap">, so the
+    block is overridden wholesale rather than extended.
+#}
+{% block javascripts %}
+    {{ importmap(['app', 'task-editor'], {nonce: csp_nonce()}) }}
+{% endblock %}
+
+{% block body %}
+<header class="page-header">
+    <h1>{{ editing ? 'Edit task #' ~ task.id : 'New task' }}</h1>
+    <nav>
+        {% if editing %}
+            <a href="{{ path('app_task_detail', {id: task.id}) }}">← Task</a>
+        {% endif %}
+        <a href="{{ path('app_task_list') }}">All tasks</a>
+    </nav>
+</header>
+
+{% for label, messages in app.flashes %}
+    {% for message in messages %}
+        <p class="flash flash-{{ label }}" role="status">{{ message }}</p>
+    {% endfor %}
+{% endfor %}
+
+{% if errors['_form'] is defined %}
+    <p class="flash flash-error" role="alert">{{ errors['_form'] }}</p>
+{% endif %}
+
+{% if errors is not empty %}
+    <p class="flash flash-error" role="alert">
+        Nothing was saved — see the problems marked below.
+    </p>
+{% endif %}
+
+{% if is_enabled %}
+    {#
+        SPEC §4.4 — the single most important thing to say on this page. An
+        enabled task is immutable *for everyone*: saving produces a disabled
+        replacement draft, and the running task is untouched until a human
+        approves it.
+    #}
+    <section aria-labelledby="immutable-heading" class="notice">
+        <h2 id="immutable-heading">This task is enabled</h2>
+        <p>
+            Enabled tasks are immutable — saving here creates a <strong>replacement draft</strong>
+            with your changes. Task #{{ task.id }} keeps running, untouched, until you approve the draft
+            from its page (SPEC §4.4). Its step graph is copied onto the draft, then replaced by whatever
+            you submit below.
+        </p>
+    </section>
+{% endif %}
+
+<form method="post"
+      action="{{ editing ? path('app_task_update', {id: task.id}) : path('app_task_create') }}"
+      data-task-editor>
+    <input type="hidden" name="_token"
+           value="{{ csrf_token(editing ? 'task-update' : 'task-create') }}">
+
+    <section aria-labelledby="basics-heading">
+        <h2 id="basics-heading">The task</h2>
+
+        <label class="field">
+            <span>Title</span>
+            <input type="text" name="title" value="{{ values.title }}" maxlength="200" required autofocus>
+        </label>
+        {% if errors['title'] is defined %}<p class="field-error" role="alert">{{ errors['title'] }}</p>{% endif %}
+
+        <label class="field">
+            <span>
+                Brief
+                <span class="muted">
+                    — the task prompt. {% if values.steps is empty %}What the model is asked to do, in full.
+                    {% else %}The final consumer: runs after every step, with each step's output as an input.{% endif %}
+                </span>
+            </span>
+            <textarea name="brief" rows="6" required>{{ values.brief }}</textarea>
+        </label>
+        {% if errors['brief'] is defined %}<p class="field-error" role="alert">{{ errors['brief'] }}</p>{% endif %}
+
+        <label class="field">
+            <span>Kind</span>
+            <select name="kind">
+                <option value="run" {{ values.kind != 'session' ? 'selected' }}>run — completes in one pass</option>
+                <option value="session" {{ values.kind == 'session' ? 'selected' }}>session — long-lived (not implemented yet)</option>
+            </select>
+        </label>
+        {% if errors['kind'] is defined %}<p class="field-error" role="alert">{{ errors['kind'] }}</p>{% endif %}
+    </section>
+
+    <section aria-labelledby="toolbox-heading">
+        <h2 id="toolbox-heading">Toolbox</h2>
+        <p class="muted">
+            The model only ever sees the tools declared here — fixed at run start (SPEC §4.1).
+            {% if values.steps is not empty %}This is the final consumer's toolbox; each step declares its own below.{% endif %}
+        </p>
+        {#  Empty prefix: the task's own scalars are top-level form fields. #}
+        {{ toolbox_ui.toolbox('', values, known_tags, catalog_tools, errors, 'toolbox') }}
+    </section>
+
+    <section aria-labelledby="steps-heading">
+        <h2 id="steps-heading">Steps</h2>
+        <p class="muted">
+            Optional. A task with no steps runs as a single unit (SPEC §13.1). Steps are grouped into
+            <strong>levels</strong>: steps in the same level run <em>in parallel</em>, and each level waits for
+            the one before it. Each step's run receives the previous level's outputs as inputs.
+        </p>
+
+        {% if errors['steps'] is defined %}<p class="field-error" role="alert">{{ errors['steps'] }}</p>{% endif %}
+
+        <div class="levels" data-levels>
+            {% for level_index, level in values.steps %}
+                <div class="level" data-level>
+                    <p class="level-head">
+                        <span class="level-title">Level {{ level_index + 1 }}</span>
+                        <span class="muted">— these run in parallel</span>
+                        <button type="button" class="danger small" data-remove-level>Remove level</button>
+                    </p>
+                    {% if errors['steps.' ~ level_index] is defined %}
+                        <p class="field-error" role="alert">{{ errors['steps.' ~ level_index] }}</p>
+                    {% endif %}
+                    <div class="steps-in-level" data-steps-in-level>
+                        {% for step_index, step in level %}
+                            {{ step_ui.step_card(level_index, step_index, step, errors, known_tags, catalog_tools) }}
+                        {% endfor %}
+                    </div>
+                    <button type="button" class="small" data-add-step>+ Add step to this level</button>
+                </div>
+            {% endfor %}
+        </div>
+
+        <p class="steps-empty muted" data-levels-empty {{ values.steps is empty ? '' : 'hidden' }}>
+            No steps — this task runs as a single unit.
+        </p>
+
+        <p>
+            <button type="button" data-add-level>+ Add level</button>
+        </p>
+
+        {#
+            The prototype the editor script clones (never submitted: its inputs
+            are disabled until they are cloned and enabled, and its names carry
+            placeholders rather than indices).
+        #}
+        <template data-step-prototype>
+            {{ step_ui.step_card('__level__', '__step__', {}, {}, known_tags, catalog_tools, true) }}
+        </template>
+    </section>
+
+    <section aria-labelledby="schedule-heading">
+        <h2 id="schedule-heading">Schedule</h2>
+        {{ schedule_ui.schedule('task', values, presets, errors, timezone, schedule_preview_url) }}
+    </section>
+
+    <section aria-labelledby="save-heading">
+        <h2 id="save-heading" class="visually-hidden">Save</h2>
+        <p class="muted">
+            Saving lands a <strong>disabled draft</strong> — for you exactly as for an agent (SPEC §4.3).
+            Nothing runs until it is enabled from the task's page.
+        </p>
+        <button type="submit">{{ submit_label }}</button>
+    </section>
+</form>
+{% endblock %}

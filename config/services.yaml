@@ -79,6 +79,14 @@ services:
         arguments:
             $timezone: '%env(TASKLOOM_TIMEZONE)%'
 
+    # Plain-English schedule narration and the upcoming-occurrence list for
+    # the admin editor (SPEC §8, §14). Same required deployment timezone as
+    # the scheduler: a schedule is only meaningful together with the clock it
+    # is interpreted in.
+    App\Scheduler\ScheduleNarrator:
+        arguments:
+            $timezone: '%env(TASKLOOM_TIMEZONE)%'
+
     App\Context\ContextWindow:
         arguments:
             $contextLimitTokens: '%env(int:TASKLOOM_CONTEXT_LIMIT)%'

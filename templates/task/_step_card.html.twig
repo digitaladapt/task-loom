@@ -1,0 +1,43 @@
+{#
+    One step card in the graph builder (SPEC §13.2): title, brief, toolbox —
+    and a level to sit in. "Level N" is the whole dependency model a human
+    needs, because the wire format's levels *are* the edges: steps in a level
+    run in parallel, levels run in sequence.
+
+    Rendered for saved steps, and once as a <template> the editor script
+    clones when the human adds a step or a level. The prototype carries
+    __level__/__step__ placeholders that become real indices on insert. The
+    server re-indexes whatever it receives regardless
+    (TaskEditorSubmission::parseSteps), so those indices only have to be
+    unique and in display order — not dense.
+#}
+{% macro step_card(levelIndex, stepIndex, values, errors, tags, tools, disabled = false) %}
+{% import 'task/_toolbox.html.twig' as toolbox_ui %}
+{% set prefix = 'steps[' ~ levelIndex ~ '][' ~ stepIndex ~ ']' %}
+{% set scope = 'steps.' ~ levelIndex ~ '.' ~ stepIndex %}
+<div class="step-card" data-step-card>
+    <p class="step-card-head">
+        <span class="step-badge">Step</span>
+        <button type="button" class="danger small" data-remove-step {{ disabled ? 'disabled' }}>Remove step</button>
+    </p>
+
+    <label class="field">
+        <span>Title</span>
+        <input type="text" name="{{ prefix }}[title]" value="{{ values.title|default('') }}"
+               maxlength="200" {{ disabled ? 'disabled' : 'required' }}>
+    </label>
+    {% if errors[scope ~ '.title'] is defined %}
+        <p class="field-error" role="alert">{{ errors[scope ~ '.title'] }}</p>
+    {% endif %}
+
+    <label class="field">
+        <span>Brief <span class="muted">— what this step's own run is asked to do</span></span>
+        <textarea name="{{ prefix }}[brief]" rows="3" {{ disabled ? 'disabled' : 'required' }}>{{ values.brief|default('') }}</textarea>
+    </label>
+    {% if errors[scope ~ '.brief'] is defined %}
+        <p class="field-error" role="alert">{{ errors[scope ~ '.brief'] }}</p>
+    {% endif %}
+
+    {{ toolbox_ui.toolbox(prefix, values, tags, tools, errors, scope ~ '.toolbox', disabled) }}
+</div>
+{% endmacro %}
