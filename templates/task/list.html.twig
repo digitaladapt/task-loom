@@ -9,6 +9,7 @@
         <a href="{{ path('app_run_list') }}">Runs</a>
         <a href="{{ path('app_attention') }}">Attention</a>
         <a href="{{ path('app_tool_list') }}">Tool catalog</a>
+        <a href="{{ path('app_task_new') }}">New task</a>
     </nav>
 </header>
 
@@ -21,7 +22,7 @@
 <section aria-labelledby="approval-heading">
     <h2 id="approval-heading">Approval queue</h2>
     {% if approval_queue is empty %}
-        <p class="muted">Nothing waiting for review.</p>
+        <p class="muted">Nothing waiting for review. <a href="{{ path('app_task_new') }}">Create a task</a>.</p>
     {% else %}
         <ul class="cards">
         {% for task in approval_queue %}

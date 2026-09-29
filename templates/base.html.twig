@@ -9,9 +9,26 @@
         <title>{% block title %}TaskLoom{% endblock %}</title>
         <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 128 128%22><text y=%221.2em%22 font-size=%2296%22>🧵</text></svg>">
         <link rel="manifest" href="{{ asset('manifest.webmanifest') }}">
-        {% block stylesheets %}{% endblock %}
+        {% block stylesheets %}
+            {#
+                CSS is linked, never imported from JavaScript: an import would
+                surface as a `data:application/javascript,…` importmap entry,
+                which the browser loads as a script and our CSP blocks.
+            #}
+            <link rel="stylesheet" href="{{ asset('styles/app.css') }}">
+        {% endblock %}
+        {#
+            The importmap and its entrypoint imports are inline scripts, so
+            they carry the request's CSP nonce — the policy is script-src
+            'self' with no 'unsafe-inline' (App\Observability\CspNonce explains
+            the bug that made this necessary).
+
+            One importmap() call per page, ever: a document may contain only
+            one <script type="importmap">. Pages needing an extra entrypoint
+            override this block and list them all.
+        #}
         {% block javascripts %}
-            {{ importmap('app') }}
+            {{ importmap(entrypoints|default('app'), {nonce: csp_nonce()}) }}
         {% endblock %}
     </head>
     <body>

@@ -15,13 +15,21 @@ use Symfony\Component\HttpKernel\KernelEvents;
  * means they survive a proxy swap or direct exposure. The listener uses
  * set() (replace), so app-level values win over proxy-injected ones.
  *
- * CSP is strict: self only, no inline script/style, no framing. Turbo/
- * Stimulus or any future inline usage must go through nonces or hashes.
+ * CSP stays strict: self only, no framing. The app's own inline scripts (the
+ * AssetMapper importmap and entrypoint tag) are the one exception, and they
+ * are admitted by **nonce** rather than by 'unsafe-inline' — see CspNonce
+ * for the bug that made this necessary. Every response that carries an inline
+ * script carries the matching nonce; responses with no scripts are unaffected.
  */
 #[AsEventListener(event: KernelEvents::RESPONSE, method: 'onKernelResponse', priority: 0)]
 final class SecurityHeadersSubscriber
 {
-    private const string CSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
+    private const string CSP_TEMPLATE = "default-src 'self'; script-src 'self'{NONCE}; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
+
+    public function __construct(
+        private readonly CspNonce $nonce,
+    ) {
+    }
 
     public function onKernelResponse(ResponseEvent $event): void
     {
@@ -31,9 +39,26 @@ final class SecurityHeadersSubscriber
 
         $headers = $event->getResponse()->headers;
 
-        $headers->set('Content-Security-Policy', self::CSP);
+        $headers->set('Content-Security-Policy', $this->policy());
         $headers->set('X-Content-Type-Options', 'nosniff');
         $headers->set('X-Frame-Options', 'DENY');
         $headers->set('Referrer-Policy', 'same-origin');
+    }
+
+    /**
+     * The policy for the current request. The nonce is only minted when it is
+     * already present on the request — i.e. the renderer asked for one — so
+     * responses that emit no inline scripts keep the plain `'self'` policy and
+     * do not advertise a nonce nobody used.
+     */
+    private function policy(): string
+    {
+        $nonce = $this->nonce->current();
+
+        return str_replace(
+            '{NONCE}',
+            '' === $nonce ? '' : " 'nonce-{$nonce}'",
+            self::CSP_TEMPLATE,
+        );
     }
 }

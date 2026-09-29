@@ -55,6 +55,34 @@ changes stay an explicit step, they are simply wired for you). `TASKLOOM_LLM_MAX
 is the number of llm workers the container runs, so there is nothing to scale
 by hand. See [docs/design/SINGLE_CONTAINER_RUNTIME.md](docs/design/SINGLE_CONTAINER_RUNTIME.md).
 
+## Authoring tasks
+
+Tasks are authored in the admin UI: **New task** from the task list, or **Edit
+task** on any task's page. The editor covers everything a task is — title and
+brief, kind, the toolbox (by tag or by explicit tool, chosen from the catalog),
+an optional **step graph**, and a **schedule**.
+
+- **Steps are levels.** Steps in the same level run in parallel; each level
+  waits for the one before it, and every step's run receives the previous
+  level's outputs as inputs. Add and remove levels and steps in place; the
+  graph is saved as authored (nested levels in, `depends_on` edges stored —
+  SPEC §13.2).
+- **Schedules are composed, not typed.** Pick one of the offered schedules
+  (every N minutes, hourly, daily, weekdays, weekly, monthly) or write your own
+  cron. The preview updates as you change the fields and shows the composed
+  expression, a plain-English sentence, and the next three times it will
+  actually run — in `TASKLOOM_TIMEZONE`, which is where it fires.
+- **Saving lands a disabled draft.** For you exactly as for an agent
+  (SPEC §4.3): nothing runs until it is enabled from the task's page. Editing
+  an *enabled* task produces a **replacement draft** (SPEC §4.4) — the running
+  task is never touched until you approve the replacement.
+
+The editor and the task MCP tools share one gated write path, so the two
+cannot drift: what the browser submits is valid authoring/write format, and
+what an agent submits is what the editor reopens. The difference is only the
+author recorded on the draft (`user` vs `agent`), which is what the task list's
+approval queue shows you.
+
 ## Run surface
 
 The admin UI covers the whole run lifecycle (SPEC §8). **Run now** on an
@@ -78,6 +106,8 @@ One manual trigger, two faces: the web **Run now** and `app:run:now --queue`
 share the same launch path (`RunLauncher`), so a UI run and a CLI run are the
 same run — and the scheduler tick fires through the same path (see
 [Scheduling](#scheduling)).
+
+On the task page, **Edit task** opens the [authoring surface](#authoring-tasks).
 
 ## Scheduling
 
@@ -161,7 +191,7 @@ inline. Key knobs:
 | `TASKLOOM_LLM_BASE_URL` / `TASKLOOM_LLM_MODEL` | OpenAI-compatible endpoint (Ollama / vLLM / llama.cpp) |
 | `TASKLOOM_LLM_MAX_CONCURRENCY` | Concurrent LLM requests — the container runs this many llm workers (1 on a single local GPU) |
 | `TASKLOOM_TOOL_MAX_CONCURRENCY` | Concurrent tool-turn workers (default 2) |
-| `TASKLOOM_TIMEZONE` | Wall-clock timezone cron schedules are evaluated in (required) |
+| `TASKLOOM_TIMEZONE` | Wall-clock timezone cron schedules are evaluated in — also what the editor's schedule preview shows (required) |
 | `TASKLOOM_SCHEDULER_ENABLED` / `TASKLOOM_SCHEDULE_INTERVAL` | Run the scheduler daemon in the fleet; tick interval (default 60s) |
 | `TASKLOOM_STEP_BUDGET` | Max tool-call exchanges per run (fail closed) |
 | `TASKLOOM_CONTEXT_LIMIT` | Context window for the fail-closed token budget |

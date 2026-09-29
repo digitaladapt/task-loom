@@ -1,0 +1,110 @@
+{#
+    The schedule block of the task editor (SPEC §14), as a macro. Import with:
+
+        {% import 'task/_schedule.html.twig' as schedule_ui %}
+
+    Three mutually exclusive answers to "when does this run?":
+      none    — manual Run now only, exactly v1
+      preset  — the offered schedules (every hour, daily at…, weekdays at…,
+                weekly on…, monthly on…) composed server-side to cron
+      custom  — the operator's own cron expression, for the shapes the presets
+                do not cover
+
+    The preset fields (time, weekday, day-of-month) are all submitted whichever
+    preset is chosen; SchedulePreset::compose() reads only the ones its shape
+    needs. That keeps the form stateless — switching preset never loses a
+    value the operator set.
+
+    The live preview (cron, English sentence, next few occurrences) is filled
+    by the editor script from the server, which is the only place cron is
+    composed and occurrences are computed (see TaskEditorController::
+    schedulePreview): a JavaScript re-implementation would be a second opinion
+    about when the task runs, and the two would eventually disagree.
+#}
+{% macro schedule(prefix, values, presets, errors, timezone, preview_url) %}
+{% set mode = values.schedule_mode|default('none') %}
+{% set selected_preset = values.schedule_preset|default('') %}
+
+<fieldset class="schedule" data-schedule>
+    <legend>Schedule</legend>
+
+    <div class="radio-row" role="radiogroup" aria-label="When this task runs">
+        <label class="radio">
+            <input type="radio" name="schedule_mode" value="none" data-schedule-mode {{ mode == 'none' ? 'checked' }}>
+            <span>Manual only <span class="muted">— runs when you press Run now</span></span>
+        </label>
+        <label class="radio">
+            <input type="radio" name="schedule_mode" value="preset" data-schedule-mode {{ mode == 'preset' ? 'checked' }}>
+            <span>On a schedule <span class="muted">— pick one of the common ones</span></span>
+        </label>
+        <label class="radio">
+            <input type="radio" name="schedule_mode" value="custom" data-schedule-mode {{ mode == 'custom' ? 'checked' }}>
+            <span>Custom cron <span class="muted">— for anything the presets do not cover</span></span>
+        </label>
+    </div>
+
+    <div class="schedule-panel" data-schedule-panel="preset" {% if mode != 'preset' %}hidden{% endif %}>
+        <label class="field">
+            <span>How often</span>
+            <select name="schedule_preset" data-schedule-preset>
+                {% for preset in presets %}
+                    <option value="{{ preset.value }}"
+                            data-needs-time="{{ preset.needsTime ? '1' : '0' }}"
+                            data-needs-weekday="{{ preset.needsWeekday ? '1' : '0' }}"
+                            data-needs-day="{{ preset.needsDayOfMonth ? '1' : '0' }}"
+                            {{ preset.value == selected_preset ? 'selected' }}>
+                        {{ preset.label }}
+                    </option>
+                {% endfor %}
+            </select>
+        </label>
+
+        <div class="field-row">
+            <label class="field" data-schedule-field="time">
+                <span>At</span>
+                <input type="time" name="schedule_time" value="{{ values.schedule_time|default('07:00') }}" data-schedule-time>
+            </label>
+
+            <label class="field" data-schedule-field="weekday">
+                <span>Day</span>
+                <select name="schedule_weekday" data-schedule-weekday>
+                    {% for name in weekday_names() %}
+                        <option value="{{ loop.index0 }}" {{ (values.schedule_weekday|default('1')) == (loop.index0 ~ '') ? 'selected' }}>{{ name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+
+            <label class="field" data-schedule-field="day-of-month">
+                <span>Day of month</span>
+                <select name="schedule_day_of_month" data-schedule-day>
+                    {% for day in 1..31 %}
+                        <option value="{{ day }}" {{ (values.schedule_day_of_month|default('1')) == (day ~ '') ? 'selected' }}>{{ day }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+        </div>
+    </div>
+
+    <div class="schedule-panel" data-schedule-panel="custom" {% if mode != 'custom' %}hidden{% endif %}>
+        <label class="field">
+            <span>Cron expression <span class="muted">— five fields: minute hour day-of-month month day-of-week</span></span>
+            <input type="text" name="schedule_custom" value="{{ values.schedule_custom|default('') }}"
+                   autocomplete="off" spellcheck="false" placeholder="0 7 * * *" data-schedule-custom>
+        </label>
+    </div>
+
+    {% if errors['schedule'] is defined %}
+        <p class="field-error" role="alert">{{ errors['schedule'] }}</p>
+    {% endif %}
+
+    <div class="schedule-preview" data-schedule-preview hidden aria-live="polite">
+        <p class="schedule-narration" data-schedule-narration></p>
+        <p class="muted" data-schedule-expression></p>
+        <p class="muted">Next runs:</p>
+        <ul class="schedule-upcoming" data-schedule-upcoming></ul>
+    </div>
+    <p class="muted">Times are wall-clock in <code>{{ timezone }}</code> (TASKLOOM_TIMEZONE).</p>
+
+    <span hidden data-schedule-preview-url="{{ preview_url }}"></span>
+</fieldset>
+{% endmacro %}

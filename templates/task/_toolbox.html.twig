@@ -1,0 +1,103 @@
+{#
+    The toolbox declaration widget (SPEC §4.1), as a macro — shared by the
+    task's own declaration and every step's, because they are the same
+    declaration at different scopes. Import with:
+
+        {% import 'task/_toolbox.html.twig' as toolbox_ui %}
+
+    Two pickers, one active: `tags` resolves against the discovered catalog
+    (task.tags ∩ tool.tags), `explicit` names tools exactly. The inactive
+    picker is hidden by the editor script but stays in the DOM, so a mode
+    switch never loses what was typed — and the server honours only the
+    selected mode's list (TaskEditorSubmission), so the hidden one cannot leak
+    into the saved declaration.
+
+    Alongside each checkbox list is a free-text companion: the catalog is
+    discovered, not authoritative, so a human must be able to declare a tool
+    or tag it does not carry yet. The detail page's preview is what tells them
+    when such a declaration resolves to nothing. It is seeded with the
+    declared entries the catalog does not offer as a checkbox — otherwise
+    reopening and re-saving a task would silently drop them.
+
+    `prefix` is the field-name scope: 'task' for the task's own declaration,
+    'steps[l][s]' for a step's. The empty prefix means top-level field names
+    (`toolbox_mode`), which is what the task's own declaration uses — the
+    parser reads the task's scalars flat, so the toolbox has to match.
+#}
+{% macro toolbox(prefix, values, tags, tools, errors, group, disabled = false) %}
+{% set open = prefix == '' ? '' : prefix ~ '[' %}
+{% set close = prefix == '' ? '' : ']' %}
+{% set mode = values.toolbox_mode|default('tags') %}
+{% set selected = values.toolbox|default([]) %}
+{% set unknown = selected|filter(v => v not in tags) %}
+{% set unknown_tools = selected|filter(v => v not in tools|map(t => t.name)) %}
+<fieldset class="toolbox">
+    <legend>Toolbox</legend>
+
+    <div class="radio-row" role="radiogroup" aria-label="How the toolbox is resolved">
+        <label class="radio">
+            <input type="radio" name="{{ open }}toolbox_mode{{ close }}" value="tags"
+                   data-toolbox-mode {{ mode == 'tags' ? 'checked' }} {{ disabled ? 'disabled' }}>
+            <span>By tag <span class="muted">— the catalog's tools carrying these tags</span></span>
+        </label>
+        <label class="radio">
+            <input type="radio" name="{{ open }}toolbox_mode{{ close }}" value="explicit"
+                   data-toolbox-mode {{ mode == 'explicit' ? 'checked' }} {{ disabled ? 'disabled' }}>
+            <span>Explicit tools <span class="muted">— exactly these, by name</span></span>
+        </label>
+    </div>
+
+    <div class="toolbox-panel" data-toolbox-panel="tags" {% if mode != 'tags' %}hidden{% endif %}>
+        {% if tags is empty %}
+            <p class="muted">No tags in the catalog yet — tag tools on the <a href="{{ path('app_tool_list') }}">tool catalog</a> page, or type tags below.</p>
+        {% else %}
+            <ul class="check-list">
+                {% for tag in tags %}
+                    <li>
+                        <label class="check">
+                            <input type="checkbox" name="{{ open }}toolbox_tags[]{{ close }}" value="{{ tag }}"
+                                   {{ tag in selected ? 'checked' }} {{ disabled ? 'disabled' }}>
+                            <span><code>{{ tag }}</code></span>
+                        </label>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+        <label class="field">
+            <span>More tags <span class="muted">(comma-separated; for tags the catalog does not carry yet)</span></span>
+            <input type="text" name="{{ open }}toolbox_tags_extra{{ close }}" value="{{ unknown|join(', ') }}" autocomplete="off"
+                   placeholder="e.g. weather, calendar" {{ disabled ? 'disabled' }}>
+        </label>
+    </div>
+
+    <div class="toolbox-panel" data-toolbox-panel="explicit" {% if mode != 'explicit' %}hidden{% endif %}>
+        {% if tools is empty %}
+            <p class="muted">No tools in the catalog yet — register a server and sync on the <a href="{{ path('app_tool_list') }}">tool catalog</a> page, or type tool names below.</p>
+        {% else %}
+            <ul class="check-list">
+                {% for tool in tools %}
+                    <li>
+                        <label class="check">
+                            <input type="checkbox" name="{{ open }}toolbox_tools[]{{ close }}" value="{{ tool.name }}"
+                                   {{ tool.name in selected ? 'checked' }} {{ disabled ? 'disabled' }}>
+                            <span>
+                                <code>{{ tool.server.name }}.{{ tool.name }}</code>
+                                {% if tool.hasSideEffect %}<span class="muted"> · side effects</span>{% endif %}
+                            </span>
+                        </label>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+        <label class="field">
+            <span>More tools <span class="muted">(comma-separated tool names)</span></span>
+            <input type="text" name="{{ open }}toolbox_tools_extra{{ close }}" value="{{ unknown_tools|join(', ') }}" autocomplete="off"
+                   placeholder="e.g. get_weather" {{ disabled ? 'disabled' }}>
+        </label>
+    </div>
+
+    {% if errors[group] is defined %}
+        <p class="field-error" role="alert">{{ errors[group] }}</p>
+    {% endif %}
+</fieldset>
+{% endmacro %}

@@ -19,13 +19,21 @@ use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\EntityNotFoundException;
 
 /**
- * The gated task CRUD persistence layer (SPEC §4.3).
+ * The gated task CRUD persistence layer (SPEC §4.3): the single write path
+ * for task content, shared by both authoring entry points — the task MCP
+ * tools (author = agent) and the admin editor (author = user).
  *
- * Every write performed through the task MCP tools routes through this
- * service, and every one of those writes persists with enabled = false.
- * That is not configurable. There is no flag, no prompt instruction, and
- * no argument that can change it — the gate lives here, in the
- * persistence layer, below any caller.
+ * Every write through this service persists with enabled = false. That is
+ * not configurable. There is no flag, no prompt instruction, and no
+ * argument that can change it — the gate lives here, in the persistence
+ * layer, below any caller. Enabling is a human lifecycle action
+ * (App\Admin\TaskAdminService), never a write.
+ *
+ * Sharing one path is what keeps the two entry points from drifting: the
+ * gate, the replacement semantics, and the step-graph transaction are
+ * identical whether an agent or the human's browser authored the change.
+ * The author is recorded on created_by so the approval queue can say who
+ * proposed what.
  *
  * This service also implements the SPEC §4.4 replacement semantics for
  * updates: an update to an enabled task creates a disabled replacement
@@ -53,11 +61,12 @@ final class TaskCrud
     }
 
     /**
-     * Create a task. Agent-authored tasks are always persisted disabled —
-     * the enabled flag does not exist as an argument.
+     * Create a task. Every task is persisted disabled — the enabled flag
+     * does not exist as an argument, for either author.
      *
      * @param list<string> $toolbox
      * @param mixed        $steps   wire-format step graph (nested arrays, SPEC §13.2); null = no steps
+     * @param TaskAuthor   $author  who is proposing this task: agent (MCP tools), user (admin editor)
      *
      * @throws \App\StepModel\StepFormatException     when the steps input is malformed
      * @throws \App\Scheduler\ScheduleFormatException when the schedule is not a valid cron expression
@@ -70,6 +79,7 @@ final class TaskCrud
         array $toolbox,
         ?string $schedule,
         mixed $steps = null,
+        TaskAuthor $author = TaskAuthor::Agent,
     ): Task {
         $specs = $this->codec->parse($steps);
 
@@ -78,7 +88,7 @@ final class TaskCrud
         // again, where it is the enforcement gate.
         $this->scheduleExpression->assertValid($schedule);
 
-        $task = new Task($title, $brief, $kind, $toolboxMode, $toolbox, TaskAuthor::Agent);
+        $task = new Task($title, $brief, $kind, $toolboxMode, $toolbox, $author);
         $task->setSchedule(ScheduleExpression::normalize($schedule));
 
         return $this->inTransaction(function () use ($task, $specs): Task {
@@ -104,11 +114,12 @@ final class TaskCrud
      * replacement draft, the original's graph is cloned onto it.
      *
      * @param array{title?: string, brief?: string, kind?: TaskKind|string, toolbox_mode?: ToolboxMode|string, toolbox?: list<string>, schedule?: ?string, steps?: mixed} $changes
+     * @param TaskAuthor                                                                                                                                                  $author  recorded on a generated replacement draft
      *
      * @throws \App\StepModel\StepFormatException     when the steps input is malformed
      * @throws \App\Scheduler\ScheduleFormatException when the schedule is not a valid cron expression
      */
-    public function update(int $taskId, array $changes): Task
+    public function update(int $taskId, array $changes, TaskAuthor $author = TaskAuthor::Agent): Task
     {
         $task = $this->findOrThrow($taskId);
 
@@ -120,7 +131,7 @@ final class TaskCrud
         $specs = $hasSteps ? $this->codec->parse($changes['steps']) : null;
 
         if ($task->isEnabled()) {
-            return $this->createReplacementDraft($task, $changes, $specs);
+            return $this->createReplacementDraft($task, $changes, $specs, $author);
         }
 
         return $this->inTransaction(function () use ($task, $changes, $hasSteps, $specs): Task {
@@ -175,9 +186,9 @@ final class TaskCrud
      * @param array{title?: string, brief?: string, kind?: TaskKind|string, toolbox_mode?: ToolboxMode|string, toolbox?: list<string>, schedule?: ?string, steps?: mixed} $changes
      * @param list<StepSpec>|null                                                                                                                                         $specs   null = clone the original's graph
      */
-    private function createReplacementDraft(Task $original, array $changes, ?array $specs): Task
+    private function createReplacementDraft(Task $original, array $changes, ?array $specs, TaskAuthor $author): Task
     {
-        $draft = $original->createReplacementDraft(TaskAuthor::Agent);
+        $draft = $original->createReplacementDraft($author);
         $this->applyChanges($draft, $changes);
 
         return $this->inTransaction(function () use ($original, $draft, $specs): Task {
