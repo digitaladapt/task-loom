@@ -74,8 +74,8 @@ alternatives that were rejected on the way here.
 │  run history/logs     → validate tool calls    task_update,│
 │  run-now / inspect    → execute via MCP client task_list,  │
 │                       → append results         task_get,   │
-│  Scheduler (v1.1)     → checkpoint             run_read_log)│
-│                       → retry / fail / done                │
+│  Scheduler (v1.1)     → checkpoint             run_review, │
+│  app:run:review       → retry / fail / done    run_read_log)│
 │                                                            │
 │  LLM slot semaphore · attempt ledger · task store          │
 │  Doctrine + SQLite · structured JSON logs + request IDs    │
@@ -320,17 +320,46 @@ task — so the improvement cycle is provable in v1 even without sessions.
 
 ## 10. The improvement cycle
 
-A seeded **reviewer task** — an ordinary `run` task whose toolbox is the harness's own task
-tools:
+A **reviewer task** — an ordinary `run` task whose toolbox is the harness's own task
+tools. Nothing in the engine knows about reviewers: the cycle is a deployment choice,
+wired by connecting task-loom's own `/mcp` endpoint as a catalog server and giving the
+task the tools below. The same tools serve an external agent or a human at a terminal,
+so the reviewer may or may not itself be a task.
 
-- `task_list`, `task_get`, `run_read_log` (read-only)
-- `task_create`, `task_update` (write; always gated — §4.3)
+Read-only:
 
-On a schedule (or manually in v1), it reads recent run logs and failure-class rollups and
+- `task_list`, `task_get` — the task under review, briefs and step graph included
+- `run_review(taskId, runId?, budgetChars?, history?)` — a deterministic digest of the
+  latest **settled** run: the tool-call funnel (calls, distinct calls, repeats, retries),
+  per-tool repetition with whether the repeated results were byte-identical, the error
+  rollup attributed to tools, token spend, and the completion artifact. No LLM inside:
+  "the same call four times with the same answer" is a `GROUP BY`, not a judgement — and
+  it is precisely the signal an LLM asked to summarise a transcript would smooth away.
+  For a stepped task the digest rolls up parent + step children + final consumer, since a
+  parent executes no turns of its own (§13.3).
+- `run_read_log(runId, include, budgetChars?, entryChars?)` — the ledger raw: `artifact`
+  (the default), `thinking`, `tool_args`, `tool_results`, `errors`, `prompt`. Always
+  reports what its budget left out (`budget.elided`), because a reviewer that cannot tell
+  "this run had no reasoning" from "I was not shown the reasoning" will invent a finding
+  to cover the gap.
+
+Write (always gated — §4.3):
+
+- `task_create`, `task_update`
+
+On a schedule (or manually), the reviewer reads recent runs and failure-class rollups and
 proposes edits: tighten a brief, adjust a toolbox that repeatedly validated wrong
 arguments, split a task. Proposals land as **disabled drafts** in the approval queue, with
 `replacement_for_id` chains for enabled tasks. The human gate is the cycle's control point —
 the system can *propose* anything, but only a human makes it live.
+
+What the reviewer does with the digest is its instruction's business, not the harness's: an
+instruction may have it file findings in its completion artifact, or call `task_update` to
+build a replacement draft. Both are just uses of the tools above.
+
+`app:run:review <task-id>` prints the same digest at a terminal (digest by default,
+`--read-log` for the raw kinds), so the surface is debuggable and cron-usable without an
+MCP round trip.
 
 ---
 

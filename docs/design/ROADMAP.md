@@ -50,9 +50,24 @@
   write path, and both land disabled drafts for a human to enable. The step
   model (§13) landed first deliberately, so the editor was built once against
   the final data shape.
-- Seeded reviewer task; improvement cycle live
+- Seeded reviewer task; improvement cycle live (the read surface has landed — see below)
 - Auto-tagging at task creation (cheap LLM turn, task-loop pattern)
 - Run digests / needs-attention notifications
+
+**Landed: the reviewer's read surface (SPEC §10).** `run_review` and `run_read_log`
+are live on the MCP server, plus `app:run:review` at a terminal. The digest is
+deterministic and budget-bounded; the ledger read always reports what its budget
+left out. What remains of the cycle above is deployment, not code: connect
+task-loom's own `/mcp` as a catalog server, write the reviewer's instruction, and
+seed it as a task. Whether the reviewer is a task, an external agent, or a human
+is the operator's choice — the tools are the same either way.
+
+The digest deliberately stops at provable facts. It reports that a tool was
+called four times with identical arguments and byte-identical results; it does
+not attempt to decide whether a specific tool's output made another call
+redundant, since that requires understanding arbitrary tool semantics and a
+wrong guess would discredit the whole surface. Interpretation is the reviewer's
+job; arithmetic is the harness's.
 
 **v1.1 task-authoring exit criteria:**
 

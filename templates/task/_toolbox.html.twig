@@ -19,29 +19,49 @@
     declared entries the catalog does not offer as a checkbox — otherwise
     reopening and re-saving a task would silently drop them.
 
-    `prefix` is the field-name scope: 'task' for the task's own declaration,
-    'steps[l][s]' for a step's. The empty prefix means top-level field names
-    (`toolbox_mode`), which is what the task's own declaration uses — the
-    parser reads the task's scalars flat, so the toolbox has to match.
+    `prefix` is the field-name scope: '' for the task's own declaration
+    (top-level field names, `toolbox_mode` — the parser reads the task's
+    scalars flat, so the toolbox has to match), 'steps[l][s]' for a step's.
+
+    The checkbox arrays need their empty-bracket suffix OUTSIDE the prefix's
+    closing bracket — `steps[0][0][toolbox_tags][]`, never
+    `steps[0][0][toolbox_tags[]]`. The latter is not a PHP array at all: the
+    parser keeps `toolbox_tags[` as a literal key, so every checked box is
+    silently discarded and only the free-text companion survives the save.
+
+    Each free-text companion is seeded only from the declaration that belongs
+    to *its own* mode: a tags declaration seeds "More tags" (with the entries
+    the catalog does not carry), an explicit declaration seeds "More tools" —
+    and never the other way round. Seeding both from the same stored list is
+    how a tags task used to arrive with its tags pasted into the tool-name
+    field, ready to be saved as tool names by an accidental mode switch.
 #}
 {% macro toolbox(prefix, values, tags, tools, errors, group, disabled = false) %}
 {% set open = prefix == '' ? '' : prefix ~ '[' %}
 {% set close = prefix == '' ? '' : ']' %}
+{% set name_mode = open ~ 'toolbox_mode' ~ close %}
+{% set name_tags = open ~ 'toolbox_tags' ~ close ~ '[]' %}
+{% set name_tags_extra = open ~ 'toolbox_tags_extra' ~ close %}
+{% set name_tools = open ~ 'toolbox_tools' ~ close ~ '[]' %}
+{% set name_tools_extra = open ~ 'toolbox_tools_extra' ~ close %}
 {% set mode = values.toolbox_mode|default('tags') %}
-{% set selected = values.toolbox|default([]) %}
-{% set unknown = selected|filter(v => v not in tags) %}
-{% set unknown_tools = selected|filter(v => v not in tools|map(t => t.name)) %}
+{% set declared = values.toolbox|default([]) %}
+{# Each panel is seeded only from a declaration in *its own* mode. #}
+{% set tag_selection = mode == 'tags' ? declared : [] %}
+{% set tool_selection = mode == 'explicit' ? declared : [] %}
+{% set unknown = mode == 'tags' ? declared|filter(v => v not in tags) : [] %}
+{% set unknown_tools = mode == 'explicit' ? declared|filter(v => v not in tools|map(t => t.name)) : [] %}
 <fieldset class="toolbox">
     <legend>Toolbox</legend>
 
     <div class="radio-row" role="radiogroup" aria-label="How the toolbox is resolved">
         <label class="radio">
-            <input type="radio" name="{{ open }}toolbox_mode{{ close }}" value="tags"
+            <input type="radio" name="{{ name_mode }}" value="tags"
                    data-toolbox-mode {{ mode == 'tags' ? 'checked' }} {{ disabled ? 'disabled' }}>
             <span>By tag <span class="muted">— the catalog's tools carrying these tags</span></span>
         </label>
         <label class="radio">
-            <input type="radio" name="{{ open }}toolbox_mode{{ close }}" value="explicit"
+            <input type="radio" name="{{ name_mode }}" value="explicit"
                    data-toolbox-mode {{ mode == 'explicit' ? 'checked' }} {{ disabled ? 'disabled' }}>
             <span>Explicit tools <span class="muted">— exactly these, by name</span></span>
         </label>
@@ -55,8 +75,8 @@
                 {% for tag in tags %}
                     <li>
                         <label class="check">
-                            <input type="checkbox" name="{{ open }}toolbox_tags[]{{ close }}" value="{{ tag }}"
-                                   {{ tag in selected ? 'checked' }} {{ disabled ? 'disabled' }}>
+                            <input type="checkbox" name="{{ name_tags }}" value="{{ tag }}"
+                                   {{ tag in tag_selection ? 'checked' }} {{ disabled ? 'disabled' }}>
                             <span><code>{{ tag }}</code></span>
                         </label>
                     </li>
@@ -65,7 +85,7 @@
         {% endif %}
         <label class="field">
             <span>More tags <span class="muted">(comma-separated; for tags the catalog does not carry yet)</span></span>
-            <input type="text" name="{{ open }}toolbox_tags_extra{{ close }}" value="{{ unknown|join(', ') }}" autocomplete="off"
+            <input type="text" name="{{ name_tags_extra }}" value="{{ unknown|join(', ') }}" autocomplete="off"
                    placeholder="e.g. weather, calendar" {{ disabled ? 'disabled' }}>
         </label>
     </div>
@@ -78,8 +98,8 @@
                 {% for tool in tools %}
                     <li>
                         <label class="check">
-                            <input type="checkbox" name="{{ open }}toolbox_tools[]{{ close }}" value="{{ tool.name }}"
-                                   {{ tool.name in selected ? 'checked' }} {{ disabled ? 'disabled' }}>
+                            <input type="checkbox" name="{{ name_tools }}" value="{{ tool.name }}"
+                                   {{ tool.name in tool_selection ? 'checked' }} {{ disabled ? 'disabled' }}>
                             <span>
                                 <code>{{ tool.server.name }}.{{ tool.name }}</code>
                                 {% if tool.hasSideEffect %}<span class="muted"> · side effects</span>{% endif %}
@@ -91,7 +111,7 @@
         {% endif %}
         <label class="field">
             <span>More tools <span class="muted">(comma-separated tool names)</span></span>
-            <input type="text" name="{{ open }}toolbox_tools_extra{{ close }}" value="{{ unknown_tools|join(', ') }}" autocomplete="off"
+            <input type="text" name="{{ name_tools_extra }}" value="{{ unknown_tools|join(', ') }}" autocomplete="off"
                    placeholder="e.g. get_weather" {{ disabled ? 'disabled' }}>
         </label>
     </div>
