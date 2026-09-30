@@ -16,6 +16,7 @@ use App\Repository\TaskRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
+use Symfony\Component\DomCrawler\Crawler;
 
 /**
  * The admin task editor over real HTTP (SPEC §8, ROADMAP v1.x): create and
@@ -367,6 +368,142 @@ final class AdminTaskEditorTest extends WebTestCase
     }
 
     /**
+     * SPEC §4.1 — a step's toolbox checkboxes carry the step's field scope,
+     * and the empty brackets go AFTER the prefix's closing bracket. The
+     * malformed spelling (`steps[0][0][toolbox_tags[]]`) is not a PHP array at
+     * all: the form parser keeps `toolbox_tags[` as a literal key, so every
+     * tick is silently dropped and only the free-text companion is saved.
+     *
+     * The test submits the browser's own shape: it reads the *rendered* form,
+     * serializes it the way a browser does, ticks one more catalog box, and
+     * runs the body through PHP's form parser before it reaches the
+     * controller. A name that renders but does not parse cannot pass.
+     */
+    public function testTickedStepTagCheckboxesSurviveTheBrowserShape(): void
+    {
+        $this->catalogTool('get_weather', ['weather', 'core']);
+
+        // A stepped task with a tags toolbox, saved through the editor once so
+        // the step card is in the server-rendered HTML with `weather` ticked.
+        $task = $this->makeDraft('Stepped');
+        $this->postEditor($task, [
+            'title' => 'Stepped',
+            'brief' => 'A brief.',
+            'steps' => [0 => [0 => ['title' => 'Only step', 'brief' => 'Do it.', 'toolbox_mode' => 'tags', 'toolbox_tags' => ['weather']]]],
+        ]);
+        self::assertResponseRedirects();
+        $id = $this->refetch($task)->getId();
+
+        // Tick the *other* catalog tag in the step, as a human would, and save
+        // the whole form as the browser submits it.
+        $body = $this->browserFormBody('/tasks/'.$id.'/edit', [['steps[0][0][toolbox_tags][]', 'core']]);
+
+        $this->client->request('POST', '/tasks/'.$id.'/edit', $body);
+        self::assertResponseRedirects();
+
+        $steps = $this->steps()->findForTask($this->refetch($task));
+        self::assertCount(1, $steps);
+        self::assertSame(ToolboxMode::Tags, $steps[0]->getToolboxMode());
+        self::assertEqualsCanonicalizing(
+            ['weather', 'core'],
+            $steps[0]->getToolbox(),
+            'both the previously ticked and the newly ticked step checkbox must persist',
+        );
+    }
+
+    /**
+     * The other half of the same bug: a step's explicit-tools panel must also
+     * save ticked catalog tools, not just its free-text companion.
+     */
+    public function testTickedStepToolCheckboxesSurviveTheBrowserShape(): void
+    {
+        $this->catalogTool('get_weather', ['weather']);
+        $this->catalogTool('get_events', ['calendar']);
+
+        $task = $this->makeDraft('Stepped tools');
+        $this->postEditor($task, [
+            'title' => 'Stepped tools',
+            'brief' => 'A brief.',
+            'steps' => [0 => [0 => ['title' => 'Only step', 'brief' => 'Do it.', 'toolbox_mode' => 'explicit', 'toolbox_tools' => ['get_weather']]]],
+        ]);
+        self::assertResponseRedirects();
+        $id = $this->refetch($task)->getId();
+
+        $body = $this->browserFormBody('/tasks/'.$id.'/edit', [['steps[0][0][toolbox_tools][]', 'get_events']]);
+
+        $this->client->request('POST', '/tasks/'.$id.'/edit', $body);
+        self::assertResponseRedirects();
+
+        $steps = $this->steps()->findForTask($this->refetch($task));
+        self::assertCount(1, $steps);
+        self::assertSame(ToolboxMode::Explicit, $steps[0]->getToolboxMode());
+        self::assertEqualsCanonicalizing(['get_weather', 'get_events'], $steps[0]->getToolbox());
+    }
+
+    /**
+     * The mode switcher keeps both panels in the DOM, so each panel's free-text
+     * companion is seeded only from the declaration that belongs to **its own**
+     * mode. Seeding both from the same stored list is how a tags task used to
+     * arrive with its tags pasted into the tool-name field — switch to
+     * "Explicit tools" and save, and tags became (unresolvable) tool names.
+     * The reverse holds too.
+     */
+    public function testEachToolboxPanelIsSeededOnlyFromItsOwnMode(): void
+    {
+        // A tags task whose declaration includes an off-catalog tag: the tag
+        // belongs in "More tags" and nowhere else.
+        $tagsTask = $this->makeDraft('Tags task');
+        $tagsTask->setToolbox(['weather', 'a tag nobody carries']);
+        $this->tasks()->save($tagsTask);
+
+        $this->client->request('GET', '/tasks/'.$tagsTask->getId().'/edit');
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+        self::assertMatchesRegularExpression('/name="toolbox_tags_extra" value="[^"]*a tag nobody carries[^"]*"/', $content,
+            'off-catalog tags stay in More tags');
+        self::assertDoesNotMatchRegularExpression('/name="toolbox_tools_extra" value="[^"]*a tag nobody carries[^"]*"/', $content,
+            'a tags declaration must not seed the tool-name field');
+
+        // An explicit task with an off-catalog tool: mirrored.
+        $toolsTask = $this->makeDraft('Tools task');
+        $toolsTask->setToolboxMode(ToolboxMode::Explicit);
+        $toolsTask->setToolbox(['get_weather', 'a tool nobody registered']);
+        $this->tasks()->save($toolsTask);
+
+        $this->client->request('GET', '/tasks/'.$toolsTask->getId().'/edit');
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+        self::assertMatchesRegularExpression('/name="toolbox_tools_extra" value="[^"]*a tool nobody registered[^"]*"/', $content);
+        self::assertDoesNotMatchRegularExpression('/name="toolbox_tags_extra" value="[^"]*a tool nobody registered[^"]*"/', $content,
+            'an explicit declaration must not seed the tag field');
+    }
+
+    /**
+     * The same seeding rule inside a step card: a step whose toolbox is tags
+     * must not carry those tags in its tool-name field either. This is the
+     * shape that was wrong when the inspector switched modes.
+     */
+    public function testEachStepToolboxPanelIsSeededOnlyFromItsOwnMode(): void
+    {
+        $task = $this->makeDraft('Stepped seeding');
+        $this->postEditor($task, [
+            'title' => 'Stepped seeding',
+            'brief' => 'A brief.',
+            'steps' => [0 => [0 => ['title' => 'Only step', 'brief' => 'Do it.', 'toolbox_mode' => 'tags', 'toolbox_tags' => ['weather', 'a tag nobody carries']]]],
+        ]);
+        self::assertResponseRedirects();
+
+        $this->client->request('GET', '/tasks/'.$this->refetch($task)->getId().'/edit');
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+
+        // The off-catalog tag lives in the step's tags field...
+        self::assertMatchesRegularExpression('/name="steps\[\d+\]\[\d+\]\[toolbox_tags_extra\]" value="[^"]*a tag nobody carries[^"]*"/', $content);
+        // ...and never in its tool-name field.
+        self::assertDoesNotMatchRegularExpression('/name="steps\[\d+\]\[\d+\]\[toolbox_tools_extra\]" value="[^"]*a tag nobody carries[^"]*"/', $content);
+    }
+
+    /**
      * A declaration the catalog does not carry must survive a round trip: it
      * is re-offered in the free-text field, not silently dropped by the next
      * save. Nothing carries that tag in this test, so the preview reports the
@@ -428,10 +565,105 @@ final class AdminTaskEditorTest extends WebTestCase
         $crawler = $this->client->request('GET', '/tasks/'.$task->getId().'/edit');
         self::assertResponseIsSuccessful();
 
+        $this->client->request('POST', '/tasks/'.$task->getId().'/edit', ['_token' => $this->tokenFrom($crawler)] + $fields);
+    }
+
+    /**
+     * The CSRF token off a rendered editor page, so a POST is what a browser
+     * would send.
+     */
+    private function tokenFrom(Crawler $crawler): string
+    {
         $token = $crawler->filter('input[name="_token"]')->attr('value');
         self::assertNotNull($token);
 
-        $this->client->request('POST', '/tasks/'.$task->getId().'/edit', ['_token' => $token] + $fields);
+        return $token;
+    }
+
+    /**
+     * The editor form serialized the way a browser submits it: every enabled,
+     * non-template field (text, hidden, the checked radio/checkbox of each
+     * group, selects, textareas), plus the extra picks the caller asks for.
+     * The pairs are encoded and run through PHP's form parser, so this returns
+     * exactly what `$request->request->all()` would hold -- malformed names
+     * included, which is the point: a name that renders but does not parse
+     * cannot sneak through.
+     *
+     * @param list<array{string, string}> $tick name/value pairs to tick (a
+     *                                          checkbox that is currently
+     *                                          unticked)
+     *
+     * @return array<array-key, mixed>
+     */
+    private function browserFormBody(string $url, array $tick = []): array
+    {
+        $crawler = $this->client->request('GET', $url);
+        self::assertResponseIsSuccessful();
+
+        $pairs = [];
+        $nodes = $crawler->filter('form[data-task-editor] input, form[data-task-editor] textarea, form[data-task-editor] select');
+        foreach ($nodes as $node) {
+            if (!$node instanceof \DOMElement || $node->hasAttribute('disabled') || $this->insideTemplate($node)) {
+                continue;
+            }
+
+            $name = $node->getAttribute('name');
+            if ('' === $name) {
+                continue;
+            }
+
+            if ('textarea' === $node->nodeName) {
+                $pairs[] = [$name, $node->textContent];
+                continue;
+            }
+
+            if ('select' === $node->nodeName) {
+                foreach ($node->getElementsByTagName('option') as $option) {
+                    if ($option->hasAttribute('selected')) {
+                        $pairs[] = [$name, $option->getAttribute('value')];
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            $type = strtolower($node->getAttribute('type'));
+            $value = $node->getAttribute('value');
+
+            if (\in_array($type, ['radio', 'checkbox'], true)) {
+                $wanted = \in_array([$name, $value], $tick, true);
+                if (!$node->hasAttribute('checked') && !$wanted) {
+                    continue;
+                }
+                $pairs[] = [$name, $value];
+                continue;
+            }
+
+            if (\in_array($type, ['submit', 'button', 'image', 'file', 'reset'], true)) {
+                continue;
+            }
+
+            $pairs[] = [$name, $value];
+        }
+
+        $body = [];
+        parse_str(implode('&', array_map(
+            static fn (array $pair): string => urlencode($pair[0]).'='.urlencode($pair[1]),
+            $pairs,
+        )), $body);
+
+        return $body;
+    }
+
+    private function insideTemplate(\DOMElement $node): bool
+    {
+        for ($parent = $node->parentNode; $parent instanceof \DOMElement; $parent = $parent->parentNode) {
+            if ('template' === $parent->nodeName) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function onlyTask(): Task
