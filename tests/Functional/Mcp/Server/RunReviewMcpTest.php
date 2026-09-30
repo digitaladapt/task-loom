@@ -40,8 +40,8 @@ final class RunReviewMcpTest extends WebTestCase
         static::ensureKernelShutdown();
         $this->client = static::createClient();
 
-        $this->client->setServerParameter('PHP_AUTH_USER', 'admin');
-        $this->client->setServerParameter('PHP_AUTH_PW', 'test-admin-password');
+        // The MCP endpoint takes a bearer key (TASKLOOM_MCP_API_KEY).
+        $this->client->setServerParameter('HTTP_AUTHORIZATION', 'Bearer test-mcp-api-key');
 
         $this->em = static::getContainer()->get('doctrine')->getManager();
         $this->em->createQuery('DELETE FROM App\Entity\ToolCall')->execute();
