@@ -33,4 +33,13 @@ The boundary is tool scoping, not a sandbox (see `docs/design/SPEC.md` §4):
   resolved value never enters the run's frozen toolbox snapshot (which carries the
   variable NAME only), a log line, the attempt ledger, or an exception message — a
   missing variable fails loudly with the variable's name in the message.
+- **Two credentials, two front doors.** The admin UI is a session: sign in
+  with `TASKLOOM_ADMIN_PASSWORD`, optionally kept in the browser's
+  localStorage for seamless re-login, cleared on sign-out. The MCP endpoint
+  at `POST /mcp` is stateless and authenticates
+  `Authorization: Bearer <TASKLOOM_MCP_API_KEY>` — an agent credential
+  deliberately separate from the human one, rotatable independently. Both
+  comparisons are constant-time, both fail closed when unset, and neither
+  door opens for the other's credential (a UI session cannot call MCP; an
+  MCP key cannot read the UI). HTTP Basic is no longer accepted.
 - `.env` is never committed; secrets are env vars injected at runtime (§8.12).

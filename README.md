@@ -27,22 +27,43 @@ Successor to task-loop (Python) and task-weaver (PHP/Symfony). Design docs:
   `N` `llm` workers mean at most `N` requests in flight. Tasks interleave naturally
   during tool I/O — see "Concurrency" below.
 
+## Authentication
+
+Two front doors, two credentials:
+
+- **The admin UI is a session.** Visiting any page signs you in through
+  `/login` with `TASKLOOM_ADMIN_PASSWORD`; the form offers "stay signed in on
+  this device", which keeps the password in the browser's localStorage and
+  signs you back in seamlessly on the next visit (a CSRF-protected re-login
+  endpoint; the stored value is cleared by signing out or by a failed
+  attempt). Sign out from the strip on any page.
+- **The MCP endpoint takes a bearer key.** `POST /mcp` authenticates
+  `Authorization: Bearer <TASKLOOM_MCP_API_KEY>`. It is deliberately not the
+  admin password: rotate the agent key without touching the human login, and
+  vice versa. The `mcp` firewall is stateless — a UI session cookie cannot
+  open the endpoint, and the key cannot reach the UI.
+
+Both credentials fail closed when their variable is unset. **Migration note:**
+earlier versions used HTTP Basic (`Authorization: Basic base64(admin:password)`)
+for both. That is gone; MCP clients must switch to `Authorization: Bearer
+<key>`, and browsers to the login page. Generate a key with
+`openssl rand -base64 32`.
+
 ## Quick start
 
 Requirements: PHP 8.5, Composer 2, SQLite.
 
 ```bash
 composer install
-cp .env.example .env           # then set APP_SECRET + TASKLOOM_ADMIN_PASSWORD
+cp .env.example .env           # then set APP_SECRET + TASKLOOM_ADMIN_PASSWORD (+ TASKLOOM_MCP_API_KEY)
 php bin/console doctrine:migrations:migrate
-php bin/console app:taskloom:admin-user    # creates the admin user from TASKLOOM_ADMIN_PASSWORD
 symfony serve                          # or: php -S 127.0.0.1:8000 -t public/
 ```
 
 Docker:
 
 ```bash
-cp .env.example .env           # set APP_SECRET + TASKLOOM_ADMIN_PASSWORD
+cp .env.example .env           # set APP_SECRET + TASKLOOM_ADMIN_PASSWORD + TASKLOOM_MCP_API_KEY
 docker compose -f docs/examples/compose.yaml up -d
 # admin UI: http://localhost:8080
 ```
@@ -188,6 +209,8 @@ inline. Key knobs:
 
 | Variable | Purpose |
 |---|---|
+| `TASKLOOM_ADMIN_PASSWORD` | The admin UI's sign-in password (the browser may keep it in localStorage for seamless re-login) |
+| `TASKLOOM_MCP_API_KEY` | The MCP endpoint's bearer key — the credential external agents present (`Authorization: Bearer <key>`) |
 | `TASKLOOM_LLM_BASE_URL` / `TASKLOOM_LLM_MODEL` | OpenAI-compatible endpoint (Ollama / vLLM / llama.cpp) |
 | `TASKLOOM_LLM_MAX_CONCURRENCY` | Concurrent LLM requests — the container runs this many llm workers (1 on a single local GPU) |
 | `TASKLOOM_TOOL_MAX_CONCURRENCY` | Concurrent tool-turn workers (default 2) |

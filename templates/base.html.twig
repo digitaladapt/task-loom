@@ -32,6 +32,23 @@
         {% endblock %}
     </head>
     <body>
+        {#
+            The signed-in strip: a sign-out control on every page that has a
+            session, and nothing at all on the login page (a visitor there has
+            no session to end). `logout_path()` asks the security bundle for
+            the configured path, so it cannot drift from security.yaml; the
+            CSRF token is the one the logout listener validates.
+        #}
+        {% if app.user %}
+            <div class="session-bar">
+                <span class="muted">signed in as {{ app.user.userIdentifier }}</span>
+                <form method="post" action="{{ logout_path() }}" data-signout>
+                    <input type="hidden" name="_csrf_token" value="{{ csrf_token('logout') }}">
+                    <button type="submit" class="small">Sign out</button>
+                </form>
+            </div>
+        {% endif %}
+
         {% block body %}{% endblock %}
     </body>
 </html>

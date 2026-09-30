@@ -22,6 +22,7 @@
 x-taskloom-env: &taskloom-env
   APP_SECRET: ${APP_SECRET:?set APP_SECRET in .env}
   TASKLOOM_ADMIN_PASSWORD: ${TASKLOOM_ADMIN_PASSWORD:?set TASKLOOM_ADMIN_PASSWORD in .env}
+  TASKLOOM_MCP_API_KEY: ${TASKLOOM_MCP_API_KEY:?set TASKLOOM_MCP_API_KEY in .env}
   # LLM endpoint (OpenAI-compatible). Local-first: typically Ollama.
   TASKLOOM_LLM_BASE_URL: ${TASKLOOM_LLM_BASE_URL:-http://host.docker.internal:11434}
   TASKLOOM_LLM_MODEL: ${TASKLOOM_LLM_MODEL:-qwen3:14b}

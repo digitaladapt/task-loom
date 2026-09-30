@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional\Admin;
 
+use App\Security\AdminUser;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
 
@@ -30,8 +31,7 @@ final class AdminSchedulePreviewTest extends WebTestCase
     {
         static::ensureKernelShutdown();
         $this->client = static::createClient();
-        $this->client->setServerParameter('PHP_AUTH_USER', 'admin');
-        $this->client->setServerParameter('PHP_AUTH_PW', 'test-admin-password');
+        $this->client->loginUser(new AdminUser());
     }
 
     public function testAPresetIsComposedAndNarrated(): void
@@ -165,12 +165,11 @@ final class AdminSchedulePreviewTest extends WebTestCase
     {
         static::ensureKernelShutdown();
         $client = static::createClient();
-        $client->setServerParameter('PHP_AUTH_USER', '');
-        $client->setServerParameter('PHP_AUTH_PW', '');
 
         $client->request('GET', '/tasks/schedule/preview', ['schedule_mode' => 'none']);
 
-        self::assertSame(401, $client->getResponse()->getStatusCode());
+        // No session: the firewall sends the visitor to the sign-in page.
+        self::assertTrue($client->getResponse()->isRedirect('/login'));
     }
 
     /**

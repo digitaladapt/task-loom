@@ -65,11 +65,18 @@ services:
             $apiKey: '%env(TASKLOOM_LLM_API_KEY)%'
             $timeoutSeconds: '%env(int:TASKLOOM_LLM_TIMEOUT)%'
 
-    # HTTP Basic admin auth (SPEC §4.3): one env-provided password, one
-    # admin principal, constant-time comparison. Fail closed when unset.
-    App\Security\AdminAuthenticator:
+    # Admin auth (SPEC §4.3): one env-provided password for the UI's session
+    # login, one env-provided key for the MCP bearer endpoint, one admin
+    # principal. Both credentials are compared constant-time and both fail
+    # closed when unset — see App\Security\AdminPassword and
+    # App\Security\McpApiKey for why they are deliberately separate secrets.
+    App\Security\AdminPassword:
         arguments:
-            $adminPassword: '%env(TASKLOOM_ADMIN_PASSWORD)%'
+            $password: '%env(TASKLOOM_ADMIN_PASSWORD)%'
+
+    App\Security\McpApiKey:
+        arguments:
+            $apiKey: '%env(TASKLOOM_MCP_API_KEY)%'
 
     # The scheduler (SPEC §14). TASKLOOM_TIMEZONE is required, not
     # defaulted: a schedule means "this wall-clock time where the operator

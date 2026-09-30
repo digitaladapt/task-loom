@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Browser sign-in for the admin UI, a bearer key for MCP — HTTP Basic is
+  gone (SPEC §4.3).** Two front doors, two credentials, both fail closed:
+  - **The UI is a session now.** `GET /login` renders a one-field password
+    form; a successful POST establishes a session and `/logout` ends it.
+    "Stay signed in on this device" keeps the password in the browser's
+    localStorage and trades it for a session through `POST /login/api-key`
+    (CSRF-required, constant-time comparison) — a returning visitor is
+    signed in seamlessly, and a failed attempt clears the stored value so a
+    changed password cannot loop. `assets/auth.js` is the small module that
+    does both, loaded on every page.
+  - **The MCP endpoint authenticates with `Authorization: Bearer
+    <TASKLOOM_MCP_API_KEY>`.** A new, dedicated variable — deliberately not
+    the admin password, so the agent credential rotates without touching the
+    human login (and vice versa). The endpoint got its own *stateless*
+    firewall (`^/mcp`), so a UI session cookie cannot be replayed against it
+    and the key cannot reach the UI; failures answer with a
+    `WWW-Authenticate: Bearer` challenge. The old HTTP Basic flow is removed
+    — MCP client configs must migrate to Bearer (README has the note).
+
 - **Task authoring in the admin UI (SPEC §8) — create and edit tasks from the
   browser, including the step graph and the schedule.** The last v1.x roadmap
   item: until now the admin surface covered a task's *lifecycle* (list,

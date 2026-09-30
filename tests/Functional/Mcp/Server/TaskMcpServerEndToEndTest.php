@@ -44,10 +44,11 @@ final class TaskMcpServerEndToEndTest extends WebTestCase
         static::ensureKernelShutdown();
         $this->client = static::createClient();
 
-        // The MCP endpoint is admin-guarded like every other app route
-        // (config/packages/security.yaml ends with `^/ → ROLE_ADMIN`).
-        $this->client->setServerParameter('PHP_AUTH_USER', 'admin');
-        $this->client->setServerParameter('PHP_AUTH_PW', 'test-admin-password');
+        // The MCP endpoint authenticates with a bearer key (TASKLOOM_MCP_API_KEY,
+        // fail closed when unset) — the credential external agents present.
+        // Set as a client default so every request in this suite carries it;
+        // the unauthenticated test builds its own client without it.
+        $this->client->setServerParameter('HTTP_AUTHORIZATION', 'Bearer test-mcp-api-key');
 
         $em = static::getContainer()->get('doctrine')->getManager();
         $em->createQuery('DELETE FROM App\Entity\ToolCall')->execute();
@@ -217,12 +218,9 @@ final class TaskMcpServerEndToEndTest extends WebTestCase
 
     public function testUnauthenticatedRequestIsRejected(): void
     {
-        // The endpoint inherits the app's admin guard (no access_control
-        // exemption), so reaching it requires credentials.
+        // No bearer token: the MCP firewall refuses with a Bearer challenge.
         static::ensureKernelShutdown();
         $client = static::createClient();
-        $client->setServerParameter('PHP_AUTH_USER', '');
-        $client->setServerParameter('PHP_AUTH_PW', '');
 
         $client->request('POST', '/mcp', server: [
             'CONTENT_TYPE' => 'application/json',
@@ -230,6 +228,7 @@ final class TaskMcpServerEndToEndTest extends WebTestCase
         ], content: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}');
 
         self::assertSame(401, $client->getResponse()->getStatusCode());
+        self::assertSame('Bearer realm="task-loom mcp"', $client->getResponse()->headers->get('WWW-Authenticate'));
     }
 
     public function testToolsCallTaskCreateWithStepsPersistsGraphAndRendersItBack(): void
