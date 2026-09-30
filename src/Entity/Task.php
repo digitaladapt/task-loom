@@ -329,12 +329,19 @@ class Task
      * logical transaction — B is enabled, A is disabled and archived with
      * superseded_by = B. Callers must flush atomically. Throws if this task
      * is not a replacement draft.
+     *
+     * Only a *pending* draft approves: an approved replacement is enabled and
+     * its work here is done, so calling this again must fail rather than
+     * silently re-run the swap against a stale original.
      */
     public function approve(): void
     {
         $original = $this->replacementFor;
         if (null === $original) {
             throw new \LogicException('Cannot approve a task that is not a replacement draft.');
+        }
+        if ($this->enabled) {
+            throw new \LogicException('Cannot approve an already-approved replacement — it is enabled.');
         }
         if ($original->isSuperseded()) {
             throw new \LogicException('Cannot approve a replacement whose original is already superseded.');
@@ -351,11 +358,24 @@ class Task
 
     /**
      * Reject this replacement draft: archive it; the original is unaffected.
+     *
+     * The rejection is for a draft awaiting a decision — the same moment
+     * approve() serves (SPEC §4.4). Without the enabled guard, POSTing reject
+     * to an *approved* replacement would archive the task the swap just made
+     * live, so the one action that is meant to be destructive only for a
+     * proposal would destroy a running task instead. Superseded rows are
+     * already dead records and stay that way.
      */
     public function reject(): void
     {
         if (null === $this->replacementFor) {
             throw new \LogicException('Cannot reject a task that is not a replacement draft.');
+        }
+        if ($this->enabled) {
+            throw new \LogicException('Cannot reject an enabled task — approve it instead, or approve a replacement (SPEC §4.4).');
+        }
+        if ($this->isArchived()) {
+            throw new \LogicException('Cannot reject an archived replacement draft.');
         }
 
         $this->archivedAt = new \DateTimeImmutable();

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Mcp\Server;
 
+use App\Admin\RunDigest;
 use Mcp\Schema\ToolAnnotations;
 use Mcp\Server;
 use Mcp\Server\Builder;
@@ -16,7 +17,9 @@ use Symfony\Component\Cache\Psr16Cache;
 
 /**
  * Builds the task-loom MCP server role (SPEC §10, §11): task_create,
- * task_update, task_list, task_get over Streamable HTTP.
+ * task_update, task_list, task_get over Streamable HTTP, plus the
+ * reviewer's read-only pair run_review and run_read_log (SPEC §10's
+ * improvement cycle).
  *
  * Each handler is registered with an explicit JSON input schema. Explicit
  * schemas keep the wire contract stable regardless of how the SDK's schema
@@ -26,6 +29,11 @@ use Symfony\Component\Cache\Psr16Cache;
  * The server is built per request and driven by the controller — the SDK's
  * HTTP transport is a PSR-7 request handler, not a web server, so there is no
  * socket and no event loop here (see docs/design/MCP_SDK_MIGRATION.md).
+ *
+ * The reviewer tools are here rather than on a second server because SPEC
+ * §10's reviewer is an ordinary task whose toolbox is the harness's own
+ * tools: what it can reach is a deployment choice (the operator connects
+ * task-loom to itself as an MCP client), not a separate surface to build.
  */
 final class TaskServerFactory
 {
@@ -91,6 +99,7 @@ final class TaskServerFactory
                 'Writes are gated: every task_create and task_update persists disabled and lands in the human approval queue (SPEC §4.3). You cannot create or enable tasks directly.',
                 'Tasks may declare a step graph (SPEC §13): an array of levels; steps within a level run in parallel, levels run in sequence. Steps are optional — a task with no steps runs as a single unit.',
                 'Read tools: task_list, task_get. Write tools: task_create, task_update.',
+                'Review tools (SPEC §10): run_review digests what a run actually did (tool-call repetition, retries, errors, tokens) and run_read_log reads the ledger raw on request. Both are read-only; neither writes.',
             ]))
             ->setLogger($this->logger)
             // The container is what makes handler resolution work: TaskTools
@@ -100,6 +109,7 @@ final class TaskServerFactory
             ->setSession($this->sessionStore());
 
         $this->registerTaskTools($builder);
+        $this->registerReviewTools($builder);
 
         return $builder->build();
     }
@@ -226,6 +236,84 @@ final class TaskServerFactory
                         'taskId' => ['type' => 'integer', 'description' => 'Task ID.', 'minimum' => 1],
                     ],
                     'required' => ['taskId'],
+                ],
+            );
+    }
+
+    /**
+     * The reviewer tools (SPEC §10). Every one is read-only: readOnlyHint is
+     * true and no schema exposes a write. The gate that keeps proposals
+     * human-approved (SPEC §4.3) is untouched by this pair — a reviewer that
+     * wants to propose an edit calls task_update, which drafts.
+     */
+    private function registerReviewTools(Builder $builder): void
+    {
+        $builder
+            ->addTool(
+                handler: [RunReviewTools::class, 'review'],
+                name: 'run_review',
+                description: 'Digest the most recent settled run of a task: what it did, which tool calls repeated, what errored, what it cost, and the completion artifact. Deterministic (no LLM inside) and bounded by budgetChars. Use this first when reviewing a task for speed or reliability problems.',
+                annotations: new ToolAnnotations(
+                    title: 'Review a run',
+                    readOnlyHint: true,
+                    destructiveHint: false,
+                    idempotentHint: true,
+                    openWorldHint: false,
+                ),
+                inputSchema: [
+                    'type' => 'object',
+                    'properties' => [
+                        'taskId' => ['type' => 'integer', 'description' => 'ID of the task to review.', 'minimum' => 1],
+                        'runId' => ['type' => ['integer', 'null'], 'description' => 'Review this specific run instead of the newest settled one. Must belong to taskId.'],
+                        'budgetChars' => [
+                            'type' => 'integer',
+                            'description' => 'Approximate cap on the digest, in characters. Sections that do not fit are listed under budget.elided rather than dropped silently.',
+                            'minimum' => RunDigest::MIN_BUDGET,
+                            'default' => RunDigest::DEFAULT_REVIEW_BUDGET,
+                        ],
+                        'history' => [
+                            'type' => ['integer', 'null'],
+                            'description' => 'Also include this run plus the settled runs before it as a trend (tool calls, repeats, errors, tokens). Use to answer "is this task getting worse?". Omit for the latest run only.',
+                            'minimum' => 2,
+                        ],
+                    ],
+                    'required' => ['taskId'],
+                ],
+            )
+            ->addTool(
+                handler: [RunReviewTools::class, 'readLog'],
+                name: 'run_read_log',
+                description: 'Read a run\'s attempt ledger raw: reasoning, tool arguments, tool results, errors, the prompt head, and the completion artifact. Defaults to the completion artifact only. The response always reports what did not fit under budget.elided — never conclude from a partial view without checking it.',
+                annotations: new ToolAnnotations(
+                    title: 'Read a run log',
+                    readOnlyHint: true,
+                    destructiveHint: false,
+                    idempotentHint: true,
+                    openWorldHint: false,
+                ),
+                inputSchema: [
+                    'type' => 'object',
+                    'properties' => [
+                        'runId' => ['type' => 'integer', 'description' => 'ID of the run to read.', 'minimum' => 1],
+                        'include' => [
+                            'type' => 'array',
+                            'description' => 'Entry kinds to include. Defaults to ["artifact"]. reasoning holds the model\'s thinking; omit it when only the outcome matters.',
+                            'items' => ['type' => 'string', 'enum' => ['artifact', 'errors', 'tool_args', 'tool_results', 'thinking', 'prompt']],
+                        ],
+                        'budgetChars' => [
+                            'type' => 'integer',
+                            'description' => 'Character budget shared across the requested kinds. Entries are taken in ledger order; what does not fit is reported under budget.elided.',
+                            'minimum' => RunDigest::MIN_BUDGET,
+                            'default' => 8000,
+                        ],
+                        'entryChars' => [
+                            'type' => 'integer',
+                            'description' => 'Per-entry cap, in characters. Longer entries are truncated with an explicit marker.',
+                            'minimum' => 200,
+                            'default' => 4000,
+                        ],
+                    ],
+                    'required' => ['runId'],
                 ],
             );
     }
