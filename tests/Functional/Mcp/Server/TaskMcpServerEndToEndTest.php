@@ -123,7 +123,7 @@ final class TaskMcpServerEndToEndTest extends WebTestCase
         self::assertSame('task-loom', $init['body']['result']['serverInfo']['name']);
     }
 
-    public function testToolsListExposesFourTaskTools(): void
+    public function testToolsListExposesTheTaskAndReviewTools(): void
     {
         $sessionId = $this->initializeSession();
         $list = $this->rpc('tools/list', [], $sessionId);
@@ -131,16 +131,19 @@ final class TaskMcpServerEndToEndTest extends WebTestCase
         self::assertSame(200, $list['code']);
         $names = array_map(static fn (array $t): string => $t['name'], $list['body']['result']['tools']);
         sort($names);
-        self::assertSame(['task_create', 'task_get', 'task_list', 'task_update'], $names);
+        self::assertSame(
+            ['run_read_log', 'run_review', 'task_create', 'task_get', 'task_list', 'task_update'],
+            $names,
+        );
     }
 
-    public function testToolsListWriteSchemasHaveNoEnabledParameter(): void
+    public function testNoToolSchemaExposesAnEnabledParameter(): void
     {
         $sessionId = $this->initializeSession();
         $list = $this->rpc('tools/list', [], $sessionId);
 
         $tools = $list['body']['result']['tools'];
-        self::assertCount(4, $tools);
+        self::assertNotSame([], $tools);
 
         foreach ($tools as $tool) {
             $props = $tool['inputSchema']['properties'] ?? [];

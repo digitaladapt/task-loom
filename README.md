@@ -109,6 +109,54 @@ same run — and the scheduler tick fires through the same path (see
 
 On the task page, **Edit task** opens the [authoring surface](#authoring-tasks).
 
+## Reviewing runs
+
+Asking "why was the briefing slow, or flaky?" means reading a run's ledger — and
+the answer is usually a pattern, not a line: the same tool called four times with
+the same arguments, a toolbox that keeps failing validation, a step whose brief
+is asking for work an earlier step already did.
+
+`run_review` computes that pattern. It is deterministic (no LLM inside) and
+budget-bounded, and it works retroactively on runs recorded before it existed:
+
+```bash
+php bin/console app:run:review 33                # digest the latest settled run
+php bin/console app:run:review 33 --history 5    # is it getting worse?
+php bin/console app:run:review 33 --read-log thinking,errors
+```
+
+The digest reports the **funnel** (requests, tool calls, distinct calls, repeats,
+retries), **per-tool repetition** including whether the repeated results were
+byte-identical, the **error rollup attributed to tools**, token spend, and the
+completion artifact — plus the task's own brief and step graph, since "tighten
+this brief" needs to see what the task *is*.
+
+A repeated call whose answer **changed** is polling, not waste, and is counted
+separately: `identical_results` is the strong signal, because the same question
+with the same answer is unambiguously redundant.
+
+It defaults to the newest **settled** run. An in-flight run is not reviewable,
+and an `incomplete` run — one that hit a budget without ever declaring a
+completion — is a record of a crash, not of how the task behaves; it is skipped
+by default and named in `notes` when it is.
+
+Two details worth knowing:
+
+- **A stepped task's digest rolls up the whole graph.** The parent run of a step
+graph executes no turns of its own (SPEC §13.3), so reviewing it alone would
+report "0 tool calls, 0 tokens" — for exactly the tasks most worth reviewing.
+- **`run_read_log` always reports what it left out.** Its `budget.elided` says
+which kinds were cut short and by how much. A reviewer that cannot tell "this
+run had no reasoning" from "I was not shown the reasoning" will invent a finding
+to cover the gap, so the budget manifest is not optional.
+
+Both are on the MCP server too (`run_review`, `run_read_log`, both read-only),
+which is what makes the SPEC §10 improvement cycle a deployment choice rather
+than a feature flag: connect task-loom's own `/mcp` endpoint as a catalog server,
+point a task's toolbox at those tools, and write the reviewer's instruction.
+Whether that reviewer is a task, an external agent, or you at a terminal, it is
+the same two tools.
+
 ## Scheduling
 
 A task can carry a **cron schedule** (`task.schedule`; e.g. `0 8 * * *` for
