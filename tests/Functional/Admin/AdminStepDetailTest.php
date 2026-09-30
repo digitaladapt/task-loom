@@ -13,6 +13,7 @@ use App\Entity\TaskKind;
 use App\Entity\ToolboxMode;
 use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
+use App\Security\AdminUser;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
@@ -31,8 +32,7 @@ final class AdminStepDetailTest extends WebTestCase
     {
         static::ensureKernelShutdown();
         $this->client = static::createClient();
-        $this->client->setServerParameter('PHP_AUTH_USER', 'admin');
-        $this->client->setServerParameter('PHP_AUTH_PW', 'test-admin-password');
+        $this->client->loginUser(new AdminUser());
 
         $em = $this->em();
         $em->createQuery('DELETE FROM App\Entity\Step')->execute();

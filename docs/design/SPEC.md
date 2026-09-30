@@ -139,6 +139,16 @@ except the process.
   persistence layer, not the prompt.
 - Approval is a manual, UI-driven action (`POST /tasks/{id}/approve`), restricted to
   user-authenticated sessions. Agent identities cannot reach it.
+- **Two front doors, two credentials (v1.x).** The admin UI is a *session*: the
+  browser signs in with `TASKLOOM_ADMIN_PASSWORD` (`GET/POST /login`), may keep
+  the password in localStorage for seamless re-login (`POST /login/api-key` —
+  CSRF-required, constant-time comparison), and signs out via `/logout`
+  (CSRF-protected). The MCP endpoint at `POST /mcp` is *stateless* and
+  authenticates **`Authorization: Bearer <TASKLOOM_MCP_API_KEY>`** — an agent
+  credential deliberately separate from the human one, so it can be rotated
+  without touching the login. Both credentials fail closed when unset; HTTP
+  Basic is gone (migration note in the README). A UI session cannot open the
+  MCP endpoint and an MCP key cannot reach the UI.
 
 ### 4.4 Replacement, not mutation — once enabled, a task is an immutable record
 
@@ -400,10 +410,11 @@ Transports supported: **MCP Streamable HTTP** and **OpenAPI (HTTP/JSON)**. No st
   route. There is no standalone process and no separate port: the SDK's HTTP
 transport is a PSR-7 request handler, not a web server.
 
-  Because it is an app route, it inherits `config/packages/security.yaml`'s
-  final rule (`^/ → ROLE_ADMIN`): **the endpoint is admin-guarded**, and
-  external agents authenticate with the admin credentials. The gate itself
-  (§4.3) is behavioural and lives in `TaskCrud`, below the transport.
+  The endpoint sits behind its own **stateless firewall** (`^/mcp`) and
+  authenticates `Authorization: Bearer <TASKLOOM_MCP_API_KEY>` — the agent
+  credential, separate from the UI's session password (§4.3). A UI session
+  cookie cannot reach the endpoint, and the key cannot reach the UI. The gate
+  itself (§4.3) is behavioural and lives in `TaskCrud`, below the transport.
 
   MCP sessions are required (the SDK answers non-`initialize` requests without
   one with `400`/`-32600`) and are stored in the `mcp_sessions` cache pool so a

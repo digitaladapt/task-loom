@@ -1,0 +1,64 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Sign in — TaskLoom{% endblock %}
+
+{#
+    The sign-in page (SPEC §4.3, §8): one password field.
+
+    Kept deliberately bare — no navigation, no task data — because a visitor
+    who reaches this page has no session yet, and nothing here should be
+    visible before credentials are presented.
+
+    The page is also the entry point for the *seamless* path: if the password
+    is already in this browser's localStorage (someone signed in before),
+    `assets/auth.js` — loaded on every page through the `app` entrypoint —
+    posts it to the re-login endpoint and reloads straight through; the form
+    below is what remains when that fails. The script is a module, not an
+    inline script, so the strict CSP needs no exception for it.
+#}
+
+{% block body %}
+<main class="login-shell">
+    <section class="login-card" aria-labelledby="login-heading">
+        <h1 id="login-heading">TaskLoom</h1>
+
+        {% if not configured %}
+            {#
+                No TASKLOOM_ADMIN_PASSWORD is set, so no password can ever
+                succeed — say exactly that instead of showing a form that
+                cannot work.
+            #}
+            <p class="flash flash-error" role="alert">
+                Admin access is not configured — set <code>TASKLOOM_ADMIN_PASSWORD</code>
+                in the environment (see <code>.env.example</code>) and restart.
+            </p>
+        {% else %}
+            <p class="muted">Enter the admin password to continue.</p>
+
+            {% if error %}
+                <p class="flash flash-error" role="alert">
+                    {{ error.messageKey|trans(error.messageData, 'security') }}
+                </p>
+            {% endif %}
+
+            <form method="post" action="{{ path('app_login_check') }}"
+                  data-login-form data-login-api-url="{{ path('app_login_api_key') }}">
+                <input type="hidden" name="_token" value="{{ csrf_token }}">
+
+                <label class="field">
+                    <span>Password</span>
+                    <input type="password" name="password" autocomplete="current-password"
+                           required autofocus>
+                </label>
+
+                <label class="check">
+                    <input type="checkbox" data-remember checked>
+                    <span>Stay signed in on this device <span class="muted">(stores the password in this browser, and signs you back in automatically)</span></span>
+                </label>
+
+                <button type="submit">Sign in</button>
+            </form>
+        {% endif %}
+    </section>
+</main>
+{% endblock %}

@@ -126,6 +126,12 @@ in-app, the route inherits `security.yaml`'s final rule:
 `access_control` exemption. External agents authenticate with the admin
 credentials (HTTP Basic, stateless — the same authenticator the UI uses).
 
+> **Superseded (v1.x, [AUTH.md](AUTH.md)):** the *shape* survives — the
+> endpoint stays authenticated and the gate stays in `TaskCrud` — but the
+> credential does not. HTTP Basic is gone; the endpoint now takes
+> `Authorization: Bearer <TASKLOOM_MCP_API_KEY>` on a dedicated stateless
+> firewall, and the UI uses a session. See [AUTH.md](AUTH.md).
+
 That is the conservative choice and the one that keeps the gate coherent: the
 whole point of the gated-write model is that agents cannot enable tasks, and
 this keeps the agent-facing write surface behind auth rather than beside the

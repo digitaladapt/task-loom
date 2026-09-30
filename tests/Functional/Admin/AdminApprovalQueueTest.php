@@ -9,6 +9,7 @@ use App\Entity\TaskAuthor;
 use App\Entity\TaskKind;
 use App\Entity\ToolboxMode;
 use App\Repository\TaskRepository;
+use App\Security\AdminUser;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
@@ -29,8 +30,7 @@ final class AdminApprovalQueueTest extends WebTestCase
     {
         static::ensureKernelShutdown();
         $this->client = static::createClient();
-        $this->client->setServerParameter('PHP_AUTH_USER', 'admin');
-        $this->client->setServerParameter('PHP_AUTH_PW', 'test-admin-password');
+        $this->client->loginUser(new AdminUser());
 
         $em = $this->em();
         $em->createQuery('DELETE FROM App\Entity\ToolCall')->execute();
@@ -43,35 +43,38 @@ final class AdminApprovalQueueTest extends WebTestCase
 
     public function testUnauthenticatedListIsRejected(): void
     {
-        // Fresh client without the admin credentials.
+        // Fresh client, no session: the firewall sends the visitor to sign in.
         static::ensureKernelShutdown();
         $client = static::createClient();
-        $client->setServerParameter('PHP_AUTH_USER', '');
-        $client->setServerParameter('PHP_AUTH_PW', '');
 
         $client->request('GET', '/');
 
-        self::assertSame(401, $client->getResponse()->getStatusCode());
+        self::assertTrue($client->getResponse()->isRedirect('/login'));
     }
 
     public function testWrongPasswordIsRejected(): void
     {
         static::ensureKernelShutdown();
         $client = static::createClient();
-        $client->setServerParameter('PHP_AUTH_USER', 'admin');
-        $client->setServerParameter('PHP_AUTH_PW', 'wrong-password');
 
-        $client->request('GET', '/');
+        // Sign in with the wrong password: back to the form, with the error.
+        $crawler = $client->request('GET', '/login');
+        self::assertResponseIsSuccessful();
+        $token = $crawler->filter('input[name="_token"]')->attr('value');
+        self::assertNotNull($token);
 
-        self::assertSame(401, $client->getResponse()->getStatusCode());
+        $client->request('POST', '/login', ['_token' => $token, 'password' => 'wrong-password']);
+        self::assertTrue($client->getResponse()->isRedirect('/login'));
+
+        // And the session is not established.
+        $client->request('GET', '/', server: ['HTTP_ACCEPT' => 'text/html']);
+        self::assertTrue($client->getResponse()->isRedirect('/login'));
     }
 
     public function testHealthStaysPublicWithAuthConfigured(): void
     {
         static::ensureKernelShutdown();
         $client = static::createClient();
-        $client->setServerParameter('PHP_AUTH_USER', '');
-        $client->setServerParameter('PHP_AUTH_PW', '');
 
         $client->request('GET', '/health');
 

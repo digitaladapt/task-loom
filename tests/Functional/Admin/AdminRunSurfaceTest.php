@@ -15,6 +15,7 @@ use App\Entity\TaskAuthor;
 use App\Entity\TaskKind;
 use App\Entity\ToolboxMode;
 use App\Message\LlmTurnMessage;
+use App\Security\AdminUser;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
@@ -36,8 +37,7 @@ final class AdminRunSurfaceTest extends WebTestCase
     {
         static::ensureKernelShutdown();
         $this->client = static::createClient();
-        $this->client->setServerParameter('PHP_AUTH_USER', 'admin');
-        $this->client->setServerParameter('PHP_AUTH_PW', 'test-admin-password');
+        $this->client->loginUser(new AdminUser());
 
         $em = $this->em();
         $em->createQuery('DELETE FROM App\Entity\Step')->execute();
@@ -55,12 +55,10 @@ final class AdminRunSurfaceTest extends WebTestCase
     {
         static::ensureKernelShutdown();
         $client = static::createClient();
-        $client->setServerParameter('PHP_AUTH_USER', '');
-        $client->setServerParameter('PHP_AUTH_PW', '');
 
         $client->request('GET', '/runs');
 
-        self::assertSame(401, $client->getResponse()->getStatusCode());
+        self::assertTrue($client->getResponse()->isRedirect('/login'));
     }
 
     public function testRunListShowsSchedulerAndHistory(): void

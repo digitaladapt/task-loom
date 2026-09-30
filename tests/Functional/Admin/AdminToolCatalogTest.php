@@ -8,6 +8,7 @@ use App\Entity\McpServer;
 use App\Entity\ServerProtocol;
 use App\Entity\Tool;
 use App\Repository\ToolRepository;
+use App\Security\AdminUser;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
 
@@ -26,8 +27,7 @@ final class AdminToolCatalogTest extends WebTestCase
     {
         static::ensureKernelShutdown();
         $this->client = static::createClient();
-        $this->client->setServerParameter('PHP_AUTH_USER', 'admin');
-        $this->client->setServerParameter('PHP_AUTH_PW', 'test-admin-password');
+        $this->client->loginUser(new AdminUser());
 
         $em = $this->em();
         $em->createQuery('DELETE FROM App\Entity\Tool')->execute();

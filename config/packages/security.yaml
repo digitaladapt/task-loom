@@ -1,6 +1,7 @@
 security:
-    password_hashers:
-        App\Security\AdminUser: { algorithm: auto }
+    # One admin account, no user store: the password lives in the environment
+    # (App\Security\AdminPassword) and is compared constant-time, so there is
+    # no hasher-backed user row to configure here.
 
     providers:
         admin_provider:
@@ -15,15 +16,36 @@ security:
             pattern: ^/(health|ready)$
             security: false
 
+        # The MCP endpoint (SPEC §11): Authorization: Bearer <TASKLOOM_MCP_API_KEY>.
+        # A separate, stateless firewall: the wire protocol carries no browser
+        # cookies, SDK sessions live in their own cache pool (not a PHP
+        # session), and statelessness means a UI session cookie can never be
+        # replayed against the endpoint. See App\Security\McpBearerAuthenticator.
+        mcp:
+            pattern: ^/mcp
+            stateless: true
+            provider: admin_provider
+            custom_authenticators:
+                - App\Security\McpBearerAuthenticator
+            entry_point: App\Security\McpBearerAuthenticator
+
+        # The admin UI: a session, established by the password form (or the
+        # seamless localStorage re-login), ended by /logout. See
+        # App\Security\AdminPasswordAuthenticator.
         main:
             lazy: true
             provider: admin_provider
             custom_authenticators:
-                - App\Security\AdminAuthenticator
-            entry_point: App\Security\AdminAuthenticator
-            # HTTP Basic: stateless, credentials on every request — no
-            # session fixation or logout surface to manage.
+                - App\Security\AdminPasswordAuthenticator
+            entry_point: App\Security\AdminPasswordAuthenticator
+            logout:
+                enable_csrf: true
+                path: /logout
+                target: app_login
 
     access_control:
         - { path: ^/(_profiler|_wdt|health|ready|assets|build|css|js), roles: PUBLIC_ACCESS }
+        # The sign-in surface is public by definition — the firewall redirects
+        # here when it needs credentials.
+        - { path: ^/(login|logout)($|/), roles: PUBLIC_ACCESS }
         - { path: ^/, roles: ROLE_ADMIN }

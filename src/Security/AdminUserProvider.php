@@ -8,8 +8,8 @@ use Symfony\Component\Security\Core\User\UserInterface;
 use Symfony\Component\Security\Core\User\UserProviderInterface;
 
 /**
- * The user provider behind the AdminAuthenticator's UserBadge — hands out
- * the single AdminUser. No lookups, no persistence.
+ * The user provider behind the authenticators' UserBadges — hands out the
+ * single AdminUser. No lookups, no persistence.
  *
  * @implements UserProviderInterface<AdminUser>
  */

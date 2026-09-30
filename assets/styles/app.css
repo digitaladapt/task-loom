@@ -574,3 +574,62 @@ fieldset legend {
     box-sizing: border-box;
     line-height: 1.75rem;
 }
+
+/* ===== Sign-in (SPEC §4.3) ===== */
+
+/*
+ * The login page centers a single card; nothing else on the page. The shell
+ * is a flex container at full viewport height, so the form sits mid-screen
+ * on a phone and a desktop alike.
+ */
+.login-shell {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 1rem;
+    box-sizing: border-box;
+}
+
+.login-card {
+    width: 100%;
+    max-width: 24rem;
+    background: var(--surface);
+    border: 1px solid var(--muted);
+    border-radius: 6px;
+    padding: 1.25rem;
+    box-sizing: border-box;
+}
+
+.login-card h1 {
+    margin: 0 0 0.5rem;
+    font-size: 1.5rem;
+}
+
+.login-card button[type="submit"] {
+    width: 100%;
+    margin-top: 0.5rem;
+}
+
+/*
+ * The signed-in bar: a compact strip above the page header carrying the
+ * sign-out control. Kept out of every template's own header so it appears
+ * exactly once, on every signed-in page.
+ */
+.session-bar {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.25rem 1rem;
+    max-width: 40rem;
+    margin: 0 auto;
+}
+
+.session-bar form {
+    margin: 0;
+}
+
+.session-bar .muted {
+    margin: 0;
+}

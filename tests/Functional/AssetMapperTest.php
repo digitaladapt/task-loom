@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional;
 
+use App\Security\AdminUser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
 use Twig\Environment;
 
@@ -41,8 +42,7 @@ final class AssetMapperTest extends WebTestCase
     public function testImportMapDoesNotExposeCssAsADataUrlScript(): void
     {
         $client = static::createClient();
-        $client->setServerParameter('PHP_AUTH_USER', 'admin');
-        $client->setServerParameter('PHP_AUTH_PW', 'test-admin-password');
+        $client->loginUser(new AdminUser());
 
         $client->request('GET', '/');
         self::assertResponseIsSuccessful();
@@ -66,8 +66,7 @@ final class AssetMapperTest extends WebTestCase
     public function testInlineScriptsCarryTheNonceNamedByThePolicy(): void
     {
         $client = static::createClient();
-        $client->setServerParameter('PHP_AUTH_USER', 'admin');
-        $client->setServerParameter('PHP_AUTH_PW', 'test-admin-password');
+        $client->loginUser(new AdminUser());
 
         $client->request('GET', '/');
         self::assertResponseIsSuccessful();
