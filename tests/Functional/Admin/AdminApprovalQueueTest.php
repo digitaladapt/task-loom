@@ -179,6 +179,95 @@ final class AdminApprovalQueueTest extends WebTestCase
         self::assertFalse($draft->isEnabled());
     }
 
+    /**
+     * SPEC §4.4 — after the swap, the approved replacement is the live task
+     * and must present itself as one: **Run now**, not Approve/Reject. The
+     * entity keeps its replacementFor pointer for the record's history, so
+     * the template has to distinguish "pending replacement draft" (offer the
+     * decision) from "approved replacement" (a running task).
+     */
+    public function testApprovedReplacementShowsRunNowNotTheApprovalActions(): void
+    {
+        $original = $this->makeDraft('Original', 'b', TaskAuthor::User);
+        $original->enable();
+        $this->tasks()->save($original);
+
+        $draft = $original->createReplacementDraft(TaskAuthor::Agent);
+        $draft->setTitle('Improved');
+        $this->tasks()->save($draft);
+
+        $this->postAction($draft, 'approve');
+        self::assertResponseRedirects();
+
+        $this->client->request('GET', '/tasks/'.$draft->getId());
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+
+        self::assertStringContainsString('Run now', $content, 'an approved replacement is a runnable task');
+        self::assertStringNotContainsString('Approve replacement', $content, 'its approval moment has passed');
+        self::assertStringNotContainsString('>Reject<', $content, 'there is no draft left to reject');
+        self::assertStringContainsString('/tasks/'.$draft->getId().'/run', $content);
+    }
+
+    /**
+     * The counterpart: the proposal still gets its decision buttons while it
+     * is pending. (Guards against "fix by removing the buttons everywhere".).
+     */
+    public function testPendingReplacementStillShowsTheApprovalActions(): void
+    {
+        $original = $this->makeDraft('Original', 'b', TaskAuthor::User);
+        $original->enable();
+        $this->tasks()->save($original);
+
+        $draft = $original->createReplacementDraft(TaskAuthor::Agent);
+        $this->tasks()->save($draft);
+
+        $this->client->request('GET', '/tasks/'.$draft->getId());
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+
+        self::assertStringContainsString('Approve replacement', $content);
+        self::assertStringContainsString('>Reject<', $content);
+        self::assertStringNotContainsString('/tasks/'.$draft->getId().'/run', $content, 'a disabled draft is not runnable');
+    }
+
+    /**
+     * And the guard behind the button: a stale POST of reject to an approved
+     * replacement must not archive the task the swap just made live.
+     */
+    public function testRejectPostToAnApprovedReplacementIsRefusedGracefully(): void
+    {
+        $original = $this->makeDraft('Original', 'b', TaskAuthor::User);
+        $original->enable();
+        $this->tasks()->save($original);
+
+        $draft = $original->createReplacementDraft(TaskAuthor::Agent);
+        $this->tasks()->save($draft);
+
+        // Pull a valid task-reject token from an actual pending draft, then
+        // aim it at the approved replacement (as a re-submitted form would).
+        $other = $original->createReplacementDraft(TaskAuthor::Agent);
+        $other->setTitle('Another idea');
+        $this->tasks()->save($other);
+        $crawler = $this->client->request('GET', '/tasks/'.$other->getId());
+        self::assertResponseIsSuccessful();
+        $token = $crawler->filter('form[action*="/reject"] input[name="_token"]')->attr('value');
+        self::assertNotNull($token);
+
+        // Now approve the first draft (which archives the original, so the
+        // second draft's original is superseded — irrelevant to this POST).
+        $this->postAction($draft, 'approve');
+        self::assertResponseRedirects();
+
+        $this->client->request('POST', '/tasks/'.$draft->getId().'/reject', ['_token' => $token]);
+
+        // A graceful error redirect, not a 500 — and the live task survives.
+        self::assertResponseRedirects();
+        $draft = $this->refetch($draft);
+        self::assertTrue($draft->isEnabled(), 'the live task stays enabled');
+        self::assertFalse($draft->isArchived(), 'a stale reject must not archive a running task');
+    }
+
     public function testArchiveDiscardsDraft(): void
     {
         $task = $this->makeDraft('Throwaway', 'b', TaskAuthor::Agent);

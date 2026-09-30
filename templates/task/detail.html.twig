@@ -158,7 +158,14 @@
             <input type="hidden" name="_token" value="{{ csrf_token('task-archive') }}">
             <button type="submit" class="danger">Discard draft</button>
         </form>
-    {% elseif task.replacementFor and not task.archived %}
+    {% elseif task.replacementFor and not task.archived and not task.enabled %}
+        {#
+            A *pending* replacement draft — SPEC §4.4's approval moment.
+            The `not task.enabled` half matters: an approved replacement keeps
+            its replacementFor pointer for the record's history, so without it
+            this branch would claim the live task and offer to approve or
+            reject it again. Enabled tasks get Run now, below.
+        #}
         <form method="post" action="{{ path('app_task_approve', {id: task.id}) }}">
             <input type="hidden" name="_token" value="{{ csrf_token('task-approve') }}">
             <button type="submit">Approve replacement</button>

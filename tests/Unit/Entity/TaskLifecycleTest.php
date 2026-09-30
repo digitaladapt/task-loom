@@ -132,4 +132,77 @@ final class TaskLifecycleTest extends TestCase
         self::assertFalse($original->isArchived());
         self::assertTrue($original->isEnabled());
     }
+
+    /**
+     * An approved replacement is enabled and its swap is done, so approving
+     * it again must fail rather than re-run the swap against a stale original.
+     */
+    public function testApproveRejectedWhenAlreadyApproved(): void
+    {
+        $original = $this->makeTask();
+        $original->enable();
+        $draft = $original->createReplacementDraft(TaskAuthor::Agent);
+        $draft->approve();
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('already-approved');
+
+        $draft->approve();
+    }
+
+    /**
+     * Reject is the destructive answer to a *proposal*. An approved
+     * replacement is a live task; rejecting it would archive the task the
+     * swap just made runnable. (Post-swap, the entity still carries its
+     * replacementFor pointer for the record's history, which is why the
+     * enabled guard is what has to catch this.).
+     */
+    public function testRejectRejectedWhenAlreadyApproved(): void
+    {
+        $original = $this->makeTask();
+        $original->enable();
+        $draft = $original->createReplacementDraft(TaskAuthor::Agent);
+        $draft->approve();
+
+        try {
+            $draft->reject();
+            self::fail('Rejecting an approved replacement must be refused.');
+        } catch (\LogicException $e) {
+            self::assertStringContainsString('Cannot reject an enabled task', $e->getMessage());
+        }
+
+        self::assertTrue($draft->isEnabled(), 'the live task stays enabled');
+        self::assertFalse($draft->isArchived(), 'the live task is not archived by a stale reject');
+    }
+
+    /**
+     * A rejected draft is already a dead record; a second reject is a
+     * no-op-shaped request the entity refuses, not a second archive.
+     */
+    public function testRejectRejectedWhenAlreadyArchived(): void
+    {
+        $original = $this->makeTask();
+        $original->enable();
+        $draft = $original->createReplacementDraft(TaskAuthor::Agent);
+        $draft->reject();
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('archived');
+
+        $draft->reject();
+    }
+
+    /**
+     * A plain draft — no replacementFor — still cannot be rejected: reject is
+     * a replacement decision, and discard is the action for a stray draft.
+     */
+    public function testRejectRequiresAReplacement(): void
+    {
+        $task = $this->makeTask();
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('not a replacement draft');
+
+        $task->reject();
+    }
 }
