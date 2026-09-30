@@ -44,6 +44,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An approved replacement presented itself as a pending proposal.** After
+  the SPEC §4.4 swap the approved replacement *is* the live task, but it keeps
+  its `replacement_for` pointer for the record's history, and the task detail
+  page branched on that pointer alone. The result: the newly-enabled task
+  showed **Approve replacement** / **Reject** where every other enabled task
+  shows **Run now** — and the Reject button was both visible and dangerous. The
+  branch now requires a *pending* draft (`replacementFor` and not enabled),
+  and the entity refuses the two misdirected actions outright: `reject()` on
+  an enabled task would have archived the task the swap just made runnable,
+  and `approve()` on an already-approved replacement is refused rather than
+  re-running the swap against a stale original.
 - **No JavaScript ran anywhere in the admin UI: the strict CSP had no nonce
   for the app's own inline scripts.** `base.html.twig` renders the AssetMapper
   importmap and entrypoint import, which are inline `<script>` blocks by
