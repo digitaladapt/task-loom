@@ -21,13 +21,16 @@
 {% block body %}
 <header class="page-header">
     <h1>{{ editing ? 'Edit task #' ~ task.id : 'New task' }}</h1>
-    <nav>
-        {% if editing %}
-            <a href="{{ path('app_task_detail', {id: task.id}) }}">← Task</a>
-        {% endif %}
-        <a href="{{ path('app_task_list') }}">All tasks</a>
-    </nav>
 </header>
+
+{% if editing %}
+    {#
+        The page's own parent, not navigation: the site header carries the
+        global links on every page, but "back to the task I am editing" is
+        about this page's context and belongs with the page.
+    #}
+    <p class="page-back"><a href="{{ path('app_task_detail', {id: task.id}) }}">← Back to task #{{ task.id }}</a></p>
+{% endif %}
 
 {% for label, messages in app.flashes %}
     {% for message in messages %}

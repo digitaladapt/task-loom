@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One menu bar on every page (SPEC §8).** Until now each template grew its
+  own `<nav>` with whatever links that page happened to need: the tool
+  catalog was reachable from exactly one page, the attention queue from two,
+  and a page's "where can I go from here" depended on where you already
+  were. The bar replaces all of them — the same five sections (`Tasks`,
+  `Runs`, `Attention`, `Tool catalog`, `New task`) plus the sign-out control,
+  rendered once from `base.html.twig`, so a new page cannot forget it and a
+  link cannot drift between pages.
+
+  **It says where you are, and "where" is precise.** The item matching the
+  current route carries `aria-current="page"`; on a sub-page (`/tasks/47`,
+  `/tasks/47/edit`) the containing section carries `aria-current="true"`
+  instead, because the Tasks item does not point at that page. Marking the
+  section `page` when it navigates elsewhere is exactly the small lie the
+  attribute exists to avoid.
+
+  **Mobile-friendly without depending on JavaScript.** The header is a real
+  flex layout at every width: two rows with a `Menu` disclosure under 40rem,
+  one row with inline links above it. The toggle is progressive
+  enhancement — the markup ships the panel and the control, `assets/menu.js`
+  (loaded with the shell entrypoint) adds the collapsible state, and CSS
+  hides the toggle until the script claims the header. A browser that never
+  runs the script gets a plain, fully visible navigation list and no button
+  that does nothing. Tap targets are 44px and labels stay at 16px
+  (GUIDING-LIGHT §3.3a), and Escape closes the panel and returns focus to
+  the control.
+
+  Contextual links are *not* navigation and did not move: the task editor
+  keeps its "back to this task" link, since that is about the page's own
+  parent rather than the app's sections.
+
+### Changed
+
+- **The tool catalog and the task editor's tool picker now list tools by
+  server, then tool name.** A single `ToolRepository::findAllOrdered()`
+  backs every human-facing list — the catalog page, the task-level picker,
+  and every step's — so a tool sits in the same position wherever the
+  operator meets it, and one server's tools stay together instead of
+  interleaving alphabetically with every other server's. Name-only order put
+  `weather.get_forecast` between `calendar.create_event` and
+  `calendar.list_events`, which is not an order a person can scan.
+
+  The run engine's resolution passes (`ToolboxResolver`, `ToolboxPreviewer`)
+  and the tag listing share it too, so a toolbox preview, the frozen
+  snapshot, and the picker that authored the declaration all present the
+  same tools in the same order rather than three opinions about it. Tags
+  stay alphabetical: they are a flat vocabulary with no server axis.
+
 - **Browser sign-in for the admin UI, a bearer key for MCP — HTTP Basic is
   gone (SPEC §4.3).** Two front doors, two credentials, both fail closed:
   - **The UI is a session now.** `GET /login` renders a one-field password

@@ -5,12 +5,6 @@
 {% block body %}
 <header class="page-header">
     <h1>Tasks</h1>
-    <nav>
-        <a href="{{ path('app_run_list') }}">Runs</a>
-        <a href="{{ path('app_attention') }}">Attention</a>
-        <a href="{{ path('app_tool_list') }}">Tool catalog</a>
-        <a href="{{ path('app_task_new') }}">New task</a>
-    </nav>
 </header>
 
 {% for label, messages in app.flashes %}
