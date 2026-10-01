@@ -522,16 +522,50 @@ final class RunEngine
             return RunTurnResult::Done;
         }
 
+        // A local model sometimes asks for the same call several times in one
+        // turn — the same tool with the same arguments. Dispatching every
+        // repeat buys nothing (the first answer stands) and costs a duplicate
+        // ledger row plus the wall-clock of a whole extra tool round-trip,
+        // which on a local GPU is the scarce resource. Drop the repeats here,
+        // at the boundary where the assistant message is frozen, so the
+        // message and its tool results stay consistent for the next request.
+        //
+        // Only exact within-turn repeats are affected: the same call in a
+        // LATER turn can be a legitimate poll for state that has changed, and
+        // is left alone.
+        [$calls, $droppedCalls] = $this->dropDuplicateToolCalls($response->getToolCalls());
+
+        if ([] !== $droppedCalls) {
+            $this->logger->info(
+                'Run {run}: dropped {count} duplicate tool call(s) in step {step} — the model asked for the same (tool, arguments) more than once.',
+                [
+                    'run' => $run->getId(),
+                    'step' => $step,
+                    'count' => \count($droppedCalls),
+                    'tools' => array_map(static fn (array $call): string => $call['name'], $droppedCalls),
+                ],
+            );
+        }
+
+        // The ledger records what the model actually asked for — every call,
+        // including the ones just dropped — alongside what was dropped. The
+        // dispatched set is `toolCalls` minus `droppedDuplicates`, which is
+        // what the tool_call events below will show; keeping both makes
+        // "did the model repeat itself, or did the harness double-fire?"
+        // answerable from the record alone (SPEC §5.3).
+        $responsePayload['toolCalls'] = $response->getToolCalls();
+        $responsePayload['droppedDuplicates'] = $droppedCalls;
+
         // Tool calls: the work item is persisted — and, when async, the
         // tool lane's message enqueued — in one commit. A worker that dies
         // anywhere before this commit leaves no trace and the redelivered
         // LLM turn re-executes; after it, the tool turn has a carrier.
-        $this->commitTurn(function () use ($run, $state, $step, $response, $responsePayload): void {
+        $this->commitTurn(function () use ($run, $state, $step, $response, $responsePayload, $calls): void {
             $this->appendEvent($run, RunEventType::LlmResponse, $responsePayload, durationMs: $response->durationMs);
             $state->pendingToolTurn = new PendingToolTurn(
                 step: $step,
                 assistantContent: $response->content,
-                calls: $response->getToolCalls(),
+                calls: $calls,
             );
             $run->setCheckpoint($state->toCheckpoint());
             $this->em->flush();
@@ -601,6 +635,62 @@ final class RunEngine
     }
 
     /**
+     * Drop exact within-turn repeats from a model's tool-call list: the same
+     * tool name with arguments that are equal as data (key order is not
+     * semantic difference).
+     *
+     * Order is preserved and the FIRST occurrence wins, so the surviving
+     * call keeps its original id — and the replayed assistant message
+     * (`toolCalls`) matches the results the tool turn will produce, which
+     * the endpoint requires. This is deliberately narrower than the run
+     * digest's repetition metric: that one counts repeats ACROSS a run to
+     * diagnose the model, while this removes them WITHIN a single turn to
+     * stop paying for them.
+     *
+     * @param list<array{id: string, name: string, arguments: array<string, mixed>}> $calls
+     *
+     * @return array{0: list<array{id: string, name: string, arguments: array<string, mixed>}>, 1: list<array{id: string, name: string, arguments: array<string, mixed>}>} the kept calls and the dropped ones
+     */
+    private function dropDuplicateToolCalls(array $calls): array
+    {
+        $seen = [];
+        $kept = [];
+        $dropped = [];
+
+        foreach ($calls as $call) {
+            $signature = $call['name'].'|'.$this->canonicalJson($call['arguments']);
+
+            if (isset($seen[$signature])) {
+                $dropped[] = $call;
+                continue;
+            }
+
+            $seen[$signature] = true;
+            $kept[] = $call;
+        }
+
+        return [$kept, $dropped];
+    }
+
+    /**
+     * A stable string for any argument tree: keys sorted at every depth, so
+     * two calls that differ only in key order compare equal. Mirrors
+     * {@see \App\Admin\RunDigest}'s canonicalisation — the two must agree on
+     * what "the same call" means.
+     */
+    private function canonicalJson(mixed $value): string
+    {
+        if (\is_array($value)) {
+            if (!array_is_list($value)) {
+                ksort($value);
+            }
+            $value = array_map($this->canonicalJson(...), $value);
+        }
+
+        return (string) json_encode($value, \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE);
+    }
+
+    /**
      * Execute one tool call: validate → dispatch → result, with retries
      * feeding errors back to the model (§5.1, §5.2).
      *
@@ -623,7 +713,7 @@ final class RunEngine
             $this->appendEvent(
                 $run,
                 RunEventType::ToolValidationError,
-                ['tool' => $toolName, 'detail' => 'tool not in this run\'s toolbox'],
+                ['tool' => $toolName, 'detail' => 'tool not in this run\'s toolbox', 'toolCallId' => $callId],
                 errorClass: ErrorClass::ToolNotFound,
             );
 
@@ -642,7 +732,7 @@ final class RunEngine
                 $this->appendEvent(
                     $run,
                     RunEventType::ToolValidationError,
-                    ['tool' => $toolName, 'detail' => implode('; ', $errors), 'attempt' => $attempt],
+                    ['tool' => $toolName, 'detail' => implode('; ', $errors), 'attempt' => $attempt, 'toolCallId' => $callId],
                     errorClass: ErrorClass::InvalidArguments,
                     attemptNo: $attempt,
                 );
@@ -657,7 +747,7 @@ final class RunEngine
             $this->appendEvent(
                 $run,
                 RunEventType::ToolCall,
-                ['tool' => $toolName, 'arguments' => $arguments, 'attempt' => $attempt],
+                ['tool' => $toolName, 'arguments' => $arguments, 'attempt' => $attempt, 'toolCallId' => $callId],
                 attemptNo: $attempt,
             );
 
@@ -667,7 +757,7 @@ final class RunEngine
                 $this->appendEvent(
                     $run,
                     RunEventType::ToolResult,
-                    ['tool' => $toolName, 'detail' => $e->getMessage(), 'attempt' => $attempt],
+                    ['tool' => $toolName, 'detail' => $e->getMessage(), 'attempt' => $attempt, 'toolCallId' => $callId],
                     errorClass: $e->errorClass,
                     attemptNo: $attempt,
                 );
@@ -708,7 +798,7 @@ final class RunEngine
             $this->appendEvent(
                 $run,
                 RunEventType::ToolResult,
-                ['tool' => $toolName, 'content' => $cappedContent, 'isError' => false],
+                ['tool' => $toolName, 'content' => $cappedContent, 'isError' => false, 'toolCallId' => $callId],
                 attemptNo: $attempt,
                 durationMs: (int) ($payload['durationMs'] ?? 0),
             );

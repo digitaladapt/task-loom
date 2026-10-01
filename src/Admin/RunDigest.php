@@ -450,6 +450,7 @@ final readonly class RunDigest
         $calls = 0;
         $retries = 0;
         $repeats = 0;
+        $droppedDuplicates = 0;
         $errorEvents = 0;
         $tools = [];
         $argSets = [];
@@ -464,6 +465,14 @@ final readonly class RunDigest
                         break;
                     case RunEventType::LlmResponse:
                         ++$responses;
+                        // Repeats the engine dropped in-turn, so they never
+                        // became tool_call rows. Counting them here keeps the
+                        // model's repetition visible even though the engine
+                        // no longer dispatches it.
+                        $dropped = $payload['droppedDuplicates'] ?? null;
+                        if (\is_array($dropped)) {
+                            $droppedDuplicates += \count($dropped);
+                        }
                         break;
                     case RunEventType::ToolCall:
                         ++$calls;
@@ -499,6 +508,12 @@ final readonly class RunDigest
             // Dispatches whose (tool, arguments) pair had already been seen:
             // the model asked for the same thing twice.
             'repeated_calls' => $repeats,
+            // Exact repeats WITHIN one assistant turn: the engine dispatched
+            // the first and dropped the rest, so they are absent from the
+            // tool_call rows above. A non-zero count here is the model
+            // repeating itself, and is the honest counterpart to the
+            // dispatches that were removed.
+            'dropped_duplicates' => $droppedDuplicates,
             'errors' => $errorEvents,
         ];
     }
@@ -856,7 +871,15 @@ final readonly class RunDigest
                             'tool_args',
                             $this->canonicalJson($payload['arguments'] ?? []),
                             $entryChars,
-                            ['tool' => $this->string($payload['tool'] ?? null, '?')],
+                            [
+                                'tool' => $this->string($payload['tool'] ?? null, '?'),
+                                // The id the model gave this call. Two rows
+                                // sharing one id is a harness double-fire;
+                                // two rows with different ids is the model
+                                // repeating itself. Runs recorded before ids
+                                // were kept fall back to null.
+                                'tool_call_id' => \is_string($payload['toolCallId'] ?? null) ? $payload['toolCallId'] : null,
+                            ],
                         );
                     }
                     break;

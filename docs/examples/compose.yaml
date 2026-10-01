@@ -43,6 +43,8 @@ x-taskloom-env: &taskloom-env
   TASKLOOM_LLM_MODEL: ${TASKLOOM_LLM_MODEL:-qwen3:14b}
   TASKLOOM_LLM_API_KEY: ${TASKLOOM_LLM_API_KEY:-}
   TASKLOOM_LLM_TIMEOUT: ${TASKLOOM_LLM_TIMEOUT:-300}
+  # Debug: dump the raw LLM response body to the log (off by default).
+  TASKLOOM_DEBUG_RAW_LLM: ${TASKLOOM_DEBUG_RAW_LLM:-0}
   # Concurrency: llm workers to run (each holds one request on the wire).
   TASKLOOM_LLM_MAX_CONCURRENCY: ${TASKLOOM_LLM_MAX_CONCURRENCY:-1}
   # Tool turns mostly wait on external servers: a few personas at once is safe.

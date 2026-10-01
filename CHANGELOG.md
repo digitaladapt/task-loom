@@ -7,7 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A tool call the model repeats inside one turn is dispatched once**
+  (SPEC §5.1, §5.3). A local model sometimes asks for the same call twice
+  (or four times) in a single assistant turn — the same tool with the same
+  arguments. The engine dispatched every repeat, so the run paid a duplicate
+  ledger row and a whole extra tool round-trip for an answer it already had.
+  On a single local GPU that wall-clock is the scarce resource, so the
+  repeats are now dropped before dispatch.
+
+  **It is a within-turn rule, deliberately.** Only exact repeats in the
+  *same* assistant message are removed; the same call in a *later* turn is
+  left alone, because that can be a legitimate poll for state that has
+  changed (the digest makes the same distinction between waste and polling).
+  Arguments are compared as canonical JSON — key order is not semantic
+  difference — the first occurrence wins, and it keeps its original call id,
+  so the replayed assistant message still matches the tool results exactly
+  (which the endpoint requires).
+
+  **The drop is recorded, not swallowed.** Each drop logs an `info` line
+  naming the run, step and tools. But a log line is not enough on its own:
+  the production handlers are `fingers_crossed` at `action_level: error`, so
+  under normal operation an `info` line is buffered and discarded. The
+  durable record is the ledger: the `llm_response` event now carries the
+  model's full `toolCalls` list **and** a `droppedDuplicates` list, so
+  "did the model repeat itself, or did the harness double-fire?" is
+  answerable from the record. `run_review`'s funnel gains a
+  `dropped_duplicates` count, and `run_read_log`'s `tool_args` entries carry
+  the `tool_call_id` — two rows sharing one id is a harness double-fire, two
+  rows with different ids is the model repeating itself.
+
 ### Added
+
+- **`TASKLOOM_DEBUG_RAW_LLM` dumps the raw LLM response for debugging.**
+  Off by default. Set it (`1`/`true`/`on`) and every response body is logged
+  **before any parsing**, so "the model is being silly" and "our parsing is
+  being silly" can be told apart from the wire bytes — including a body the
+  parser rejects. The dump includes the full assistant turn and any
+  reasoning, which is why it is opt-in rather than always-on. A value that
+  is not a recognized boolean fails loudly at boot rather than leaving the
+  operator believing a dump is running when it is not.
 
 - **Disable an enabled task — the pause (SPEC §4.4, §8).** An enabled task
   now has a **Disable** action on its detail page. Disabling is a lifecycle

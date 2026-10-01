@@ -69,6 +69,10 @@ services:
             $model: '%env(TASKLOOM_LLM_MODEL)%'
             $apiKey: '%env(TASKLOOM_LLM_API_KEY)%'
             $timeoutSeconds: '%env(int:TASKLOOM_LLM_TIMEOUT)%'
+            # Off unless explicitly enabled — see the class. Wrapped in
+            # `default::` so an unset variable resolves to null (off)
+            # instead of failing the boot.
+            $debugRawResponse: '%env(default::TASKLOOM_DEBUG_RAW_LLM)%'
 
     # Admin auth (SPEC §4.3): one env-provided password for the UI's session
     # login, one env-provided key for the MCP bearer endpoint, one admin

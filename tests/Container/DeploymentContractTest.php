@@ -160,6 +160,7 @@ final class DeploymentContractTest extends TestCase
 
         self::assertContains('TASKLOOM_UNITS', $contract['optional'], 'a default::-guarded name is optional');
         self::assertContains('TASKLOOM_SYSTEM_PROMPT', $contract['optional']);
+        self::assertContains('TASKLOOM_DEBUG_RAW_LLM', $contract['optional'], 'the raw-response dump is opt-in');
 
         self::assertNotContains('SYMFONY_IDE', $contract['required'] + $contract['optional'], 'framework plumbing is not a TASKLOOM_ knob');
         self::assertNotContains('TEST_TOKEN', $contract['required'] + $contract['optional']);
