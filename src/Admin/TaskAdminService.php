@@ -141,6 +141,43 @@ final class TaskAdminService
     }
 
     /**
+     * Disable an enabled task (SPEC §4.4): the pause. The task keeps its
+     * content, its schedule, and its run history, but it is no longer
+     * runnable — Run now refuses it and the scheduler tick skips it, because
+     * both read the same enabled flag (findRunnable()). Enabling it again
+     * resumes it, and the tick re-arms it on its schedule like any fresh
+     * enable.
+     *
+     * Disabling is a lifecycle flag, not a content edit: it is the one
+     * mutation an enabled task is allowed (SPEC §4.4), and it is reversible
+     * in a way archiving is not — `archived_at` is a dead record, the
+     * disabled flag is a pause.
+     *
+     * @throws TaskLifecycleException when the task is not enabled
+     */
+    public function disableTask(int $taskId): Task
+    {
+        $task = $this->findOrThrow($taskId);
+
+        if ($task->isPendingReplacement()) {
+            throw new TaskLifecycleException(\sprintf('Task %d is a replacement draft — there is nothing to disable (SPEC §4.4).', $taskId));
+        }
+
+        if (!$task->isEnabled()) {
+            throw new TaskLifecycleException(\sprintf('Task %d is not enabled — only an enabled task can be disabled.', $taskId));
+        }
+
+        if ($task->isArchived()) {
+            throw new TaskLifecycleException(\sprintf('Task %d is archived and cannot be disabled.', $taskId));
+        }
+
+        $task->disable();
+        $this->em->flush();
+
+        return $task;
+    }
+
+    /**
      * Step-graph enforcement gate (SPEC §13.2): an invalid graph never
      * becomes an enabled task. Runs before the enable/approve flip; a
      * failure leaves the rows untouched (nothing was flushed yet).

@@ -18,7 +18,8 @@
     <dd>
         {% if task.archived %}archived
         {% elseif task.enabled %}enabled
-        {% elseif task.replacementFor %}replacement draft (for #{{ task.replacementFor.id }})
+        {% elseif task.pendingReplacement %}replacement draft (for #{{ task.replacementFor.id }})
+        {% elseif run_groups is not empty %}disabled
         {% else %}draft{% endif %}
     </dd>
 
@@ -145,22 +146,37 @@
         </p>
     {% endif %}
 
-    {% if not task.archived and not task.replacementFor and not task.enabled %}
+    {% if not task.archived and not task.enabled and not task.pendingReplacement %}
         <form method="post" action="{{ path('app_task_enable', {id: task.id}) }}">
             <input type="hidden" name="_token" value="{{ csrf_token('task-enable') }}">
             <button type="submit">Enable</button>
         </form>
-        <form method="post" action="{{ path('app_task_archive', {id: task.id}) }}">
-            <input type="hidden" name="_token" value="{{ csrf_token('task-archive') }}">
-            <button type="submit" class="danger">Discard draft</button>
-        </form>
-    {% elseif task.replacementFor and not task.archived and not task.enabled %}
+        {% if run_groups is empty %}
+            {#
+                A draft that never ran: the approval queue's Discard is still
+                the right way to throw it away. A *paused* task (one that has
+                run and been disabled) has a record worth keeping — it is
+                stopped by the disabled flag, not by archiving, so it is not
+                offered here; Enable is how it resumes.
+            #}
+            <form method="post" action="{{ path('app_task_archive', {id: task.id}) }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('task-archive') }}">
+                <button type="submit" class="danger">Discard draft</button>
+            </form>
+        {% else %}
+            <p class="muted">
+                This task is disabled — paused, not discarded. Its schedule and run history are kept;
+                Enable resumes it (the scheduler tick re-arms it on its next occurrence).
+            </p>
+        {% endif %}
+    {% elseif task.pendingReplacement %}
         {#
             A *pending* replacement draft — SPEC §4.4's approval moment.
-            The `not task.enabled` half matters: an approved replacement keeps
-            its replacementFor pointer for the record's history, so without it
-            this branch would claim the live task and offer to approve or
-            reject it again. Enabled tasks get Run now, below.
+            `pendingReplacement` carries the `not enabled` half deliberately:
+            an approved replacement keeps its replacementFor pointer for the
+            record's history (and can now be disabled), so `replacementFor`
+            alone would claim the live task and offer to approve or reject it
+            again. Enabled tasks get Run now, below.
         #}
         <form method="post" action="{{ path('app_task_approve', {id: task.id}) }}">
             <input type="hidden" name="_token" value="{{ csrf_token('task-approve') }}">
@@ -174,6 +190,16 @@
         <form method="post" action="{{ path('app_task_run', {id: task.id}) }}">
             <input type="hidden" name="_token" value="{{ csrf_token('task-run') }}">
             <button type="submit">Run now</button>
+        </form>
+        {#
+            Disable is the pause (SPEC §4.4): a lifecycle flag, not a content
+            edit. The task keeps its schedule and its history and stops being
+            runnable — Run now refuses it and the scheduler tick skips it,
+            because both read the same enabled flag. Enable resumes it.
+        #}
+        <form method="post" action="{{ path('app_task_disable', {id: task.id}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('task-disable') }}">
+            <button type="submit">Disable</button>
         </form>
         <p class="muted">
             Run now queues the run on the worker lanes.

@@ -309,6 +309,137 @@ final class AdminApprovalQueueTest extends WebTestCase
     }
 
     /**
+     * The pause (SPEC §4.4): an enabled task is disabled from the UI, and it
+     * stops being runnable without losing its record — the schedule and run
+     * history stay, and Enable brings it straight back.
+     */
+    public function testDisablePausesAnEnabledTask(): void
+    {
+        $task = $this->enabledTask('Pause me');
+        $this->runOnce($task); // give it history worth keeping
+
+        // An enabled task offers the pause, alongside Run now.
+        $this->client->request('GET', '/tasks/'.$task->getId());
+        self::assertResponseIsSuccessful();
+        self::assertStringContainsString('>Disable<', (string) $this->client->getResponse()->getContent());
+        self::assertStringContainsString('/tasks/'.$task->getId().'/disable', (string) $this->client->getResponse()->getContent());
+
+        $this->postAction($task, 'disable');
+
+        self::assertResponseRedirects();
+        $task = $this->refetch($task);
+        self::assertFalse($task->isEnabled());
+        self::assertFalse($task->isArchived(), 'disabling is a pause, not a discard');
+        self::assertSame('0 8 * * *', $task->getSchedule(), 'the schedule survives the pause');
+
+        $this->client->request('GET', '/tasks/'.$task->getId());
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+        self::assertStringContainsString('>Enable<', $content, 'a paused task offers Enable again');
+        self::assertStringNotContainsString('>Run now<', $content, 'a paused task is not runnable');
+        self::assertStringContainsString('disabled', $content, 'the status says the task was paused, not left as a draft');
+    }
+
+    public function testDisableFailsWithoutCsrfToken(): void
+    {
+        $task = $this->enabledTask('No csrf');
+
+        $this->client->request('GET', '/tasks/'.$task->getId());
+        self::assertResponseIsSuccessful();
+
+        $this->client->request('POST', '/tasks/'.$task->getId().'/disable');
+
+        self::assertSame(403, $this->client->getResponse()->getStatusCode());
+        $task = $this->refetch($task);
+        self::assertTrue($task->isEnabled(), 'a bad token must not pause anything');
+    }
+
+    /**
+     * Disable is only for enabled tasks — a draft has nothing to pause, and a
+     * stale POST must be refused gracefully rather than flipping a flag that
+     * was never on.
+     */
+    public function testDisableIsRefusedOnADraft(): void
+    {
+        $draft = $this->makeDraft('Still a draft', 'b', TaskAuthor::User);
+
+        // A draft's detail page correctly shows no Disable button, so mint a
+        // valid task-disable token from an enabled task's page (same session,
+        // same intent) and POST it at the draft.
+        $crawler = $this->client->request('GET', '/tasks/'.$this->enabledTask('Runnable sibling')->getId());
+        self::assertResponseIsSuccessful();
+        $token = $crawler->filter('form[action*="/disable"] input[name="_token"]')->attr('value');
+        self::assertNotNull($token);
+
+        $this->client->request('POST', '/tasks/'.$draft->getId().'/disable', ['_token' => $token]);
+
+        self::assertResponseRedirects();
+        $draft = $this->refetch($draft);
+        self::assertFalse($draft->isEnabled());
+        self::assertFalse($draft->isArchived(), 'a refused disable does not discard the draft');
+    }
+
+    /**
+     * Run now and the scheduler both read the same enabled flag, so a paused
+     * task is refused by the manual trigger too (SPEC §4.2) — the pause holds
+     * until Enable.
+     */
+    public function testRunNowRefusesAPausedTask(): void
+    {
+        $task = $this->enabledTask('Paused then triggered');
+        $this->postAction($task, 'disable');
+        self::assertResponseRedirects();
+
+        // Mint a valid task-run token from a different enabled task's page
+        // (same session, same intent) and aim it at the paused one.
+        $other = $this->enabledTask('Runnable sibling');
+        $crawler = $this->client->request('GET', '/tasks/'.$other->getId());
+        self::assertResponseIsSuccessful();
+        $token = $crawler->filter('form[action*="/run"] input[name="_token"]')->attr('value');
+        self::assertNotNull($token);
+
+        $this->client->request('POST', '/tasks/'.$task->getId().'/run', ['_token' => $token]);
+
+        self::assertResponseRedirects('/tasks/'.$task->getId());
+        $this->client->followRedirect();
+        self::assertStringContainsString('not enabled', (string) $this->client->getResponse()->getContent());
+        self::assertFalse($this->refetch($task)->isEnabled(), 'the refused run does not resume the task');
+    }
+
+    /**
+     * The corner the pause creates: an approved replacement (its swap done,
+     * so not pending) that is then disabled. Its page must offer Enable — not
+     * Run now, not the approval actions, and no Discard — because it is a
+     * live task that was paused, not a proposal and not a throwaway draft.
+     */
+    public function testADisabledApprovedReplacementOffersOnlyEnable(): void
+    {
+        $original = $this->makeDraft('Original', 'b', TaskAuthor::User);
+        $original->enable();
+        $this->tasks()->save($original);
+
+        $draft = $original->createReplacementDraft(TaskAuthor::Agent);
+        $this->tasks()->save($draft);
+        $this->postAction($draft, 'approve');
+        self::assertResponseRedirects();
+
+        $this->runOnce($draft); // it is a live task with a past
+        $this->postAction($draft, 'disable');
+        self::assertResponseRedirects();
+
+        $this->client->request('GET', '/tasks/'.$draft->getId());
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+
+        self::assertStringContainsString('>Enable<', $content, 'a paused live task resumes with Enable');
+        self::assertStringContainsString('disabled', $content, 'its status says it was paused');
+        self::assertStringNotContainsString('Run now', $content, 'it is paused, so it is not runnable');
+        self::assertStringNotContainsString('Approve replacement', $content, 'its approval moment has passed');
+        self::assertStringNotContainsString('>Reject<', $content);
+        self::assertStringNotContainsString('Discard draft', $content, 'a paused live task is not a throwaway draft');
+    }
+
+    /**
      * Re-fetch by id: entities go detached between requests in the test
      * client, so assertions read a fresh managed copy.
      */
@@ -340,6 +471,29 @@ final class AdminApprovalQueueTest extends WebTestCase
         $this->tasks()->save($task);
 
         return $task;
+    }
+
+    private function enabledTask(string $title): Task
+    {
+        $task = $this->makeDraft($title, 'b', TaskAuthor::User);
+        $task->setSchedule('0 8 * * *');
+        $task->enable();
+        $this->tasks()->save($task);
+
+        return $task;
+    }
+
+    /**
+     * Give a task a terminal run row, so its detail page renders as a task
+     * that has a past (the disabled-vs-plain-draft distinction).
+     */
+    private function runOnce(Task $task): void
+    {
+        $em = $this->em();
+        $run = new \App\Entity\Run($this->refetch($task));
+        $run->markSucceeded();
+        $em->persist($run);
+        $em->flush();
     }
 
     private function tasks(): TaskRepository
