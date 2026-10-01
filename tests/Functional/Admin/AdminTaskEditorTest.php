@@ -366,6 +366,48 @@ final class AdminTaskEditorTest extends WebTestCase
     }
 
     /**
+     * The picker lists tools in the catalog's canonical order — by server,
+     * then tool name — because the order is what makes the list scannable:
+     * the operator reads down one server's tools, not through every server's
+     * alphabetized together.
+     *
+     * The task's own picker and each step's render from the same list, so
+     * asserting it once at task level pins both (the step card is rendered
+     * from the same `catalog_tools` template variable).
+     */
+    public function testTheExplicitToolPickerOrdersByServerThenName(): void
+    {
+        // Inserted out of order and interleaved: name-only order would be
+        // alpha, get_events, zeta.
+        $this->catalogTool('zeta', ['core'], 'weather-srv');
+        $this->catalogTool('get_events', ['core'], 'calendar-srv');
+        $this->catalogTool('alpha', ['core'], 'weather-srv');
+
+        $this->client->request('GET', '/tasks/new');
+
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+
+        $positions = [];
+        foreach (['get_events', 'alpha', 'zeta'] as $name) {
+            $position = strpos($content, 'name="toolbox_tools[]" value="'.$name.'"');
+            self::assertNotFalse($position, \sprintf('%s is offered as a checkbox', $name));
+            $positions[$name] = $position;
+        }
+
+        self::assertLessThan(
+            $positions['alpha'],
+            $positions['get_events'],
+            'calendar-srv sorts before weather-srv',
+        );
+        self::assertLessThan(
+            $positions['zeta'],
+            $positions['alpha'],
+            'within one server, alpha sorts before zeta',
+        );
+    }
+
+    /**
      * SPEC §4.1 — a step's toolbox checkboxes carry the step's field scope,
      * and the empty brackets go AFTER the prefix's closing bracket. The
      * malformed spelling (`steps[0][0][toolbox_tags[]]`) is not a PHP array at
@@ -692,13 +734,35 @@ final class AdminTaskEditorTest extends WebTestCase
     /**
      * @param list<string> $tags
      */
-    private function catalogTool(string $name, array $tags): void
+    private function catalogTool(string $name, array $tags, ?string $serverName = null): void
     {
         $em = $this->em();
-        $server = new McpServer('catalog-'.uniqid(), 'https://server.example/mcp', ServerProtocol::Mcp);
-        $em->persist($server);
-        $em->persist(new Tool($server, $name, 'test tool', [], $tags));
+        $em->persist(new Tool(
+            $this->catalogServer($em, $serverName ?? 'catalog-'.uniqid()),
+            $name,
+            'test tool',
+            [],
+            $tags,
+        ));
         $em->flush();
+    }
+
+    /**
+     * One server per name, reused across tools: the picker's ordering test
+     * needs two tools on the same server, and a unique constraint stops it
+     * from creating the same server twice.
+     */
+    private function catalogServer(EntityManagerInterface $em, string $name): McpServer
+    {
+        $server = $em->getRepository(McpServer::class)->findOneBy(['name' => $name]);
+        if ($server instanceof McpServer) {
+            return $server;
+        }
+
+        $server = new McpServer($name, 'https://server.example/mcp', ServerProtocol::Mcp);
+        $em->persist($server);
+
+        return $server;
     }
 
     private function tasks(): TaskRepository

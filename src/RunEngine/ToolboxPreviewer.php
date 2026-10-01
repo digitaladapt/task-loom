@@ -99,7 +99,10 @@ final readonly class ToolboxPreviewer
             return new ToolboxPreview($resolved, $problems);
         }
 
-        $all = $this->tools->findBy([], ['name' => 'ASC']);
+        // Canonical order (server, then tool): the preview must present the
+        // same tools in the same order as the editor's picker and the run's
+        // frozen toolbox, or the operator sees one list and gets another.
+        $all = $this->tools->findAllOrdered();
 
         $matchedByTag = [];
         foreach ($all as $tool) {
