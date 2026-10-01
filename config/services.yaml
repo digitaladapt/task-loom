@@ -119,6 +119,20 @@ services:
             $timezone: '%env(TASKLOOM_TIMEZONE)%'
             $units: '%env(default::TASKLOOM_UNITS)%'
 
+    # The configurable parts of the run prompt (SPEC §4.1). Every text knob
+    # is optional: 'default::' resolves a missing (or empty) variable to
+    # null, and PromptTemplate falls back to the built-in text. The FILE
+    # forms exist because multi-line prose in an env var is a quoting
+    # minefield; set one form of a knob, not both (PromptTemplate refuses
+    # both — two sources for one value is ambiguous).
+    App\RunEngine\PromptTemplate:
+        arguments:
+            $preamble: '%env(default::TASKLOOM_SYSTEM_PROMPT)%'
+            $preambleFile: '%env(default::TASKLOOM_SYSTEM_PROMPT_FILE)%'
+            $completion: '%env(default::TASKLOOM_COMPLETION_PROMPT)%'
+            $completionFile: '%env(default::TASKLOOM_COMPLETION_PROMPT_FILE)%'
+            $listTools: '%env(default::TASKLOOM_PROMPT_TOOLBOX_LIST)%'
+
     App\RunEngine\RunEngine:
         arguments:
             $budgets:

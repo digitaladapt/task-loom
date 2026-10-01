@@ -36,11 +36,30 @@ final class DeploymentContractTest extends TestCase
      * flagged as missing from the compose files. Discovery must match where
      * config actually lives.
      *
-     * @return list<string>
+     * Two kinds of variable are discovered, and they are held to different
+     * standards by the caller:
+     *
+     *  - REQUIRED — no `default::` guard. The container will not boot without
+     *    a value, so the compose file must supply one.
+     *  - OPTIONAL — wrapped in `default::`/`bool:default::`. The app boots on
+     *    its built-in default, but the compose file must still FORWARD the
+     *    name: the image runs with dotenv disabled, so a variable the compose
+     *    file does not pass cannot be set by the operator at all. An
+     *    unforwarded knob is silently inert — configure TASKLOOM_UNITS in
+     *    .env, see metric anyway — which is exactly the quiet-wrongness this
+     *    contract exists to catch.
+     *
+     * Symfony's own variables (SYMFONY_*, TEST_TOKEN) are skipped: they are
+     * framework/harness plumbing with deliberate runtime semantics, not
+     * deployment knobs, and several are meaningful only in specific
+     * environments.
+     *
+     * @return array{required: list<string>, optional: list<string>}
      */
-    private function requiredEnvVars(): array
+    private function envContract(): array
     {
-        $names = [];
+        $required = [];
+        $optional = [];
 
         $directory = new \RecursiveDirectoryIterator(self::ROOT.'/config', \FilesystemIterator::SKIP_DOTS);
         $files = new \RecursiveIteratorIterator($directory);
@@ -53,13 +72,28 @@ final class DeploymentContractTest extends TestCase
                 continue;
             }
 
-            preg_match_all('/%env\((?:(?:[a-z_]+):)*([A-Z][A-Z0-9_]*)\)%/', (string) file_get_contents($file->getPathname()), $matches);
-            foreach ($matches[1] as $name) {
-                $names[$name] = true;
+            $contents = (string) file_get_contents($file->getPathname());
+
+            // The lazy prefix lets the capture start at the final name, so
+            // `enum:App\Context\Units:TASKLOOM_UNITS` yields TASKLOOM_UNITS.
+            preg_match_all('/%env\((?P<processors>[^)]*?)(?P<name>[A-Z][A-Z0-9_]*)\)%/', $contents, $matches, \PREG_SET_ORDER);
+
+            foreach ($matches as $match) {
+                $name = $match['name'];
+                if (!str_starts_with($name, 'TASKLOOM_')) {
+                    continue;
+                }
+
+                // A `default::` anywhere in the processor chain is the guard.
+                if (str_contains($match['processors'], 'default::')) {
+                    $optional[$name] = true;
+                } else {
+                    $required[$name] = true;
+                }
             }
         }
 
-        return array_keys($names);
+        return ['required' => array_keys($required), 'optional' => array_keys($optional)];
     }
 
     public function testTheProdEntrypointVerifiesTheEnvContractBeforeBoot(): void
@@ -73,6 +107,12 @@ final class DeploymentContractTest extends TestCase
         );
     }
 
+    /**
+     * Both compose files must carry the whole TASKLOOM_ env contract: every
+     * required variable (or the container cannot boot) and every optional one
+     * (or the operator cannot set it — the image disables dotenv, so an
+     * unforwarded knob is silently inert).
+     */
     public function testBothComposeFilesProvideTheFullEnvContract(): void
     {
         foreach (['/compose.yaml', '/docs/examples/compose.yaml'] as $file) {
@@ -89,11 +129,10 @@ final class DeploymentContractTest extends TestCase
                 }
             }
 
-            // DATABASE_URL and MESSENGER_TRANSPORT_DSN are covered by defaults
-            // in .env for local use, but the image disables dotenv: a container
-            // deployment must pass them explicitly or boot fails.
+            $contract = $this->envContract();
+
             $missing = [];
-            foreach ($this->requiredEnvVars() as $name) {
+            foreach ([...$contract['required'], ...$contract['optional']] as $name) {
                 if (!\array_key_exists($name, $provided)) {
                     $missing[] = $name;
                 }
@@ -105,6 +144,25 @@ final class DeploymentContractTest extends TestCase
                 \sprintf('%s must pass every variable the app resolves (image runs with dotenv disabled): %s', $file, implode(', ', $missing)),
             );
         }
+    }
+
+    /**
+     * The contract is discovered, not hand-listed — so this test proves the
+     * discovery actually works on the shapes config/ uses. A regex that
+     * silently matched nothing would make the check above vacuous.
+     */
+    public function testTheEnvContractDiscoveryFindsTheKnownKnobs(): void
+    {
+        $contract = $this->envContract();
+
+        self::assertContains('TASKLOOM_TIMEZONE', $contract['required'], 'a plain %env(...)% is required');
+        self::assertContains('TASKLOOM_STEP_BUDGET', $contract['required'], 'a processed %env(int:...)% is required');
+
+        self::assertContains('TASKLOOM_UNITS', $contract['optional'], 'a default::-guarded name is optional');
+        self::assertContains('TASKLOOM_SYSTEM_PROMPT', $contract['optional']);
+
+        self::assertNotContains('SYMFONY_IDE', $contract['required'] + $contract['optional'], 'framework plumbing is not a TASKLOOM_ knob');
+        self::assertNotContains('TEST_TOKEN', $contract['required'] + $contract['optional']);
     }
 
     public function testSecretsUseTheFailFastForm(): void

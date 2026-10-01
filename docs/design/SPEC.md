@@ -118,8 +118,22 @@ except the process.
   discovered catalog (`task.tags ∩ tool.tags`).
 - Resolution happens once, at run start. **No mid-run tool expansion** — deliberate.
   There is no `request_tool` escape hatch in v1.
-- The prompt contains: grounding block + task brief + toolbox schemas + trimmed window.
-  Nothing else. Nothing a tool returns is ever treated as instructions.
+- The prompt contains: preamble + task brief + toolbox schemas + completion instruction +
+  grounding block + trimmed window. Nothing else. Nothing a tool returns is ever treated as
+  instructions.
+- **Section order is fixed and harness-owned:** preamble → `## Task` → `## Inputs`
+  (stepped runs) → `## Toolbox` → `## Completion` → `## Grounding`. Grounding is last,
+  nearest the model's first reply: most of what a run states back is stamped with the
+  date, time, zone and units it reads there.
+- **Three parts are deployment-configurable** (`TASKLOOM_SYSTEM_PROMPT[_FILE]`,
+  `TASKLOOM_COMPLETION_PROMPT[_FILE]`, `TASKLOOM_PROMPT_TOOLBOX_LIST`); unset means the
+  built-in text, so an existing deployment's prompt does not change until it opts in. The
+  toolbox toggle controls the prompt's prose list only — tool definitions are sent on
+  every request regardless. A replacement preamble owns the untrusted-content sentence;
+  the structural defenses (§4.2, frozen toolbox) are unaffected.
+- **The completion *rule* is not configurable.** The engine refuses a contentless
+  terminal message and fails closed at the step budget (§5.4); the completion text is
+  instruction, not mechanism.
 
 ### 4.2 Untrusted content rules
 
@@ -128,6 +142,11 @@ except the process.
   `…[truncated]` marker, stored raw in the DB, and only a pruned window returns to the model.
 - The grounding block is harness-authored and identical in shape every run (date, time,
   timezone, units, optional location). Global config, never per-task, never tool-influenced.
+  It reports the deployment's clock: the wall-clock time and zone named in
+  `TASKLOOM_TIMEZONE`, and the units in `TASKLOOM_UNITS` (`metric` / `imperial`; unset →
+  metric). Both are validated at construction and fail loudly, naming the variable — a
+  deployment whose schedules fire at 08:00 Chicago time must not tell its runs it is
+  08:00 UTC.
 - MCP server credentials are resolved from the harness environment at call time and are
   scrubbed from all logged traces and error messages.
 
