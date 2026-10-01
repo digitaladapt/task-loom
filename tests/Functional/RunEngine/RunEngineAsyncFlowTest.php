@@ -213,6 +213,45 @@ final class RunEngineAsyncFlowTest extends KernelTestCase
         self::assertNull($this->claimedAt((int) $run->getId()));
     }
 
+    /**
+     * The dedup must hold across the lanes too: a turn delivered to a tool
+     * worker drops the repeats and commits a consistent exchange, exactly as
+     * the sync path does.
+     */
+    public function testDuplicateToolCallsAreDroppedAcrossTheLanes(): void
+    {
+        $this->catalogTool('get_transactions');
+        $task = $this->enabledTask();
+
+        $this->llm->method('chat')->willReturnCallback(
+            fn (): LlmResponse => 1 === ++$this->chatCount
+                ? $this->response(toolCalls: [
+                    ['id' => 'c1', 'name' => 'get_transactions', 'arguments' => ['day' => 'today']],
+                    ['id' => 'c2', 'name' => 'get_transactions', 'arguments' => ['day' => 'today']],
+                ])
+                : $this->response(content: 'Done.'),
+        );
+        $this->executor->method('validate')->willReturn([]);
+        $this->executor->expects($this->once())->method('execute')
+            ->willReturn(['tool' => 'get_transactions', 'content' => '[]', 'isError' => false, 'durationMs' => 1]);
+
+        $run = $this->engine->start($task);
+        $this->bus()->dispatch(new LlmTurnMessage((int) $run->getId(), 1));
+        $this->pump();
+
+        $this->em->clear();
+        $run = $this->runs()[0];
+        self::assertSame(RunStatus::Succeeded, $run->getStatus());
+
+        $toolCalls = 0;
+        foreach ($run->getEvents() as $event) {
+            if (RunEventType::ToolCall === $event->getType()) {
+                ++$toolCalls;
+            }
+        }
+        self::assertSame(1, $toolCalls, 'the repeat must not reach the tool lane');
+    }
+
     public function testRequeueCommandRedispatchsOwedTurnAfterPurge(): void
     {
         $this->catalogTool('get_weather');

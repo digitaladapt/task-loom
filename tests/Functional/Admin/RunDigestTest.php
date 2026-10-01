@@ -73,6 +73,58 @@ final class RunDigestTest extends KernelTestCase
     }
 
     /**
+     * Repeats the engine dropped never became tool_call rows, so without
+     * this count the model's self-repetition would vanish from the digest
+     * the moment the dedup shipped. It must stay visible.
+     */
+    public function testDroppedDuplicatesAreSurfacedFromTheResponsePayload(): void
+    {
+        $run = $this->persistedRun();
+        $this->append($run, RunEventType::LlmRequest, ['step' => 1]);
+        $this->append($run, RunEventType::LlmResponse, [
+            'step' => 1,
+            'content' => '',
+            'usage' => [],
+            'toolCalls' => [
+                ['id' => 'c1', 'name' => 'calendar_list', 'arguments' => ['day' => 'today']],
+                ['id' => 'c2', 'name' => 'calendar_list', 'arguments' => ['day' => 'today']],
+                ['id' => 'c3', 'name' => 'calendar_list', 'arguments' => ['day' => 'today']],
+            ],
+            'droppedDuplicates' => [
+                ['id' => 'c2', 'name' => 'calendar_list', 'arguments' => ['day' => 'today']],
+                ['id' => 'c3', 'name' => 'calendar_list', 'arguments' => ['day' => 'today']],
+            ],
+        ]);
+
+        // Only the first survived to dispatch.
+        $this->append($run, RunEventType::ToolCall, ['tool' => 'calendar_list', 'arguments' => ['day' => 'today'], 'attempt' => 1, 'toolCallId' => 'c1']);
+        $this->append($run, RunEventType::ToolResult, ['tool' => 'calendar_list', 'content' => '[]', 'isError' => false, 'toolCallId' => 'c1']);
+
+        $digest = $this->digest->review($run->getTask(), $run);
+
+        self::assertSame(1, $digest['funnel']['tool_calls'], 'only the first call was dispatched');
+        self::assertSame(0, $digest['funnel']['repeated_calls'], 'no dispatch repeated another');
+        self::assertSame(2, $digest['funnel']['dropped_duplicates'], 'the two the model repeated are still counted');
+    }
+
+    /**
+     * Two ledger rows sharing one tool_call id would be the harness
+     * double-firing; two rows with different ids is the model repeating
+     * itself. run_read_log must expose the id so the two are tellable apart.
+     */
+    public function testToolArgsEntriesCarryTheToolCallId(): void
+    {
+        $run = $this->persistedRun();
+        $this->append($run, RunEventType::ToolCall, ['tool' => 'fetch', 'arguments' => ['a' => 1], 'attempt' => 1, 'toolCallId' => 'call_xyz']);
+
+        $log = $this->digest->readLog($run, ['tool_args']);
+        $entry = $log['entries'][0] ?? null;
+
+        self::assertIsArray($entry);
+        self::assertSame('call_xyz', $entry['tool_call_id']);
+    }
+
+    /**
      * The distinction the digest exists to make: a repeat whose answer
      * CHANGED is polling, not waste. Counting it as redundancy would send a
      * reviewer to "fix" a task that is behaving correctly.

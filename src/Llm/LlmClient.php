@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Llm;
 
+use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpClient\Exception\TransportException;
 use Symfony\Component\HttpClient\HttpClient;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
@@ -19,16 +20,27 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
  * The model's `reasoning_content` (thinking models) is captured in the
  * response payload but NEVER re-sent as conversation content (SPEC §5.6:
  * prior thinking blocks are never re-sent).
+ *
+ * TASKLOOM_DEBUG_RAW_LLM=1 dumps the raw response body to the log BEFORE any
+ * parsing, so "is the model being silly, or is our parsing being silly?" can
+ * be answered from the wire bytes rather than inferred from the parsed
+ * result. It is off by default: the body includes the full assistant turn
+ * (and any reasoning), which is noise in a healthy production log.
  */
 final class LlmClient implements LlmClientInterface
 {
+    private readonly bool $debugRaw;
+
     public function __construct(
         private readonly HttpClientInterface $httpClient,
         private readonly string $baseUrl,
         private readonly string $model,
         private readonly string $apiKey = '',
         private readonly int $timeoutSeconds = 300,
+        private readonly ?LoggerInterface $logger = null,
+        ?string $debugRawResponse = null,
     ) {
+        $this->debugRaw = self::resolveBool('TASKLOOM_DEBUG_RAW_LLM', $debugRawResponse);
     }
 
     /**
@@ -73,6 +85,19 @@ final class LlmClient implements LlmClientInterface
             ]);
 
             $status = $response->getStatusCode();
+
+            // Dump the wire bytes BEFORE any parsing, so a body the parser
+            // rejects is still visible exactly as the endpoint sent it
+            // (getContent(false) never throws on a non-2xx body — that is
+            // the point of the dump).
+            if ($this->debugRaw) {
+                $this->logger?->info('Raw LLM response (TASKLOOM_DEBUG_RAW_LLM=1).', [
+                    'model' => $this->model,
+                    'status' => $status,
+                    'body' => $response->getContent(false),
+                ]);
+            }
+
             $body = $response->toArray(false);
         } catch (TransportException $e) {
             throw LlmRequestException::transport($e);
@@ -187,5 +212,22 @@ final class LlmClient implements LlmClientInterface
         $message = $body['error']['message'] ?? null;
 
         return \is_string($message) ? $message : 'unknown error';
+    }
+
+    /**
+     * Absent/empty means off — the flag is opt-in. Anything else must be a
+     * recognized boolean, so a typo fails loudly rather than leaving the
+     * operator believing a dump is running when it is not.
+     *
+     * @throws \InvalidArgumentException when the value is not a recognized boolean
+     */
+    private static function resolveBool(string $var, ?string $value): bool
+    {
+        if (null === $value || '' === trim($value)) {
+            return false;
+        }
+
+        return filter_var(trim($value), \FILTER_VALIDATE_BOOL, \FILTER_NULL_ON_FAILURE)
+            ?? throw new \InvalidArgumentException(\sprintf('%s must be a boolean like 1/0, true/false, or on/off, got "%s".', $var, $value));
     }
 }

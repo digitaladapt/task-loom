@@ -26,6 +26,9 @@ use App\RunEngine\ToolboxResolver;
 use App\RunEngine\ToolExecutionException;
 use App\RunEngine\ToolExecutorInterface;
 use Doctrine\ORM\EntityManagerInterface;
+use Monolog\Handler\TestHandler;
+use Monolog\Level;
+use Monolog\Logger;
 use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
 use PHPUnit\Framework\MockObject\MockObject;
 use Psr\Log\NullLogger;
@@ -44,6 +47,7 @@ final class RunEngineLoopTest extends KernelTestCase
     private EntityManagerInterface $em; // @phpstan-ignore property.uninitialized (assigned in setUp)
     private LlmClientInterface&MockObject $llm; // @phpstan-ignore property.uninitialized (assigned in setUp)
     private ToolExecutorInterface&MockObject $executor; // @phpstan-ignore property.uninitialized (assigned in setUp)
+    private int $chatCount = 0;
 
     #[\Override]
     protected function setUp(): void
@@ -123,6 +127,158 @@ final class RunEngineLoopTest extends KernelTestCase
         $second = $chats[1];
         self::assertSame('tool', $second[3]['role']);
         self::assertSame('sunny', $second[3]['content']);
+    }
+
+    /**
+     * The failure this guards: a local model repeating itself inside one
+     * turn. The first call runs; the repeats are dropped, so the tool is
+     * dispatched once and the run does not pay for the same answer twice.
+     */
+    public function testIdenticalCallsInOneTurnAreDispatchedOnce(): void
+    {
+        $this->catalogTool('get_transactions');
+        $task = $this->enabledTask(toolbox: ['get_transactions'], mode: ToolboxMode::Explicit);
+
+        $chats = [];
+        $this->llm->method('chat')->willReturnCallback(
+            function (array $messages) use (&$chats): LlmResponse {
+                $chats[] = $messages;
+
+                return 1 === \count($chats)
+                    ? $this->response(toolCalls: [
+                        ['id' => 'c1', 'name' => 'get_transactions', 'arguments' => ['day' => 'today']],
+                        ['id' => 'c2', 'name' => 'get_transactions', 'arguments' => ['day' => 'today']],
+                        ['id' => 'c3', 'name' => 'get_transactions', 'arguments' => ['day' => 'today']],
+                        ['id' => 'c4', 'name' => 'get_transactions', 'arguments' => ['day' => 'today']],
+                    ])
+                    : $this->response(content: 'No transactions.');
+            },
+        );
+
+        $this->executor->method('validate')->willReturn([]);
+        $this->executor->expects($this->once())->method('execute')
+            ->willReturn(['tool' => 'get_transactions', 'content' => '[]', 'isError' => false, 'durationMs' => 3]);
+
+        $run = $this->engine()->run($task);
+
+        self::assertSame(RunStatus::Succeeded, $run->getStatus());
+
+        // Exactly one dispatch reached the ledger for four requested calls.
+        self::assertSame(1, $this->countEvents($run, RunEventType::ToolCall));
+        self::assertSame(1, $this->countEvents($run, RunEventType::ToolResult));
+
+        // The raw ask is preserved: all four calls, of which three were dropped.
+        $response = $this->eventPayload($run, RunEventType::LlmResponse);
+        self::assertSame(['c1', 'c2', 'c3', 'c4'], array_column($response['toolCalls'], 'id'));
+        self::assertSame(['c2', 'c3', 'c4'], array_column($response['droppedDuplicates'], 'id'));
+
+        // The replayed assistant message matches the results sent back —
+        // one tool_call id, one tool result (the endpoint requires this).
+        self::assertSame(['c1'], $this->toolCallIdsIn($chats[1]));
+    }
+
+    /**
+     * The dedup is exact-match only. Two calls to the same tool with
+     * different arguments are different questions and both dispatch.
+     */
+    public function testCallsWithDifferentArgumentsAreNotDeduped(): void
+    {
+        $this->catalogTool('get_weather');
+        $task = $this->enabledTask(toolbox: ['get_weather'], mode: ToolboxMode::Explicit);
+
+        $this->llm->method('chat')->willReturnCallback(
+            fn (): LlmResponse => 1 === ++$this->chatCount
+                ? $this->response(toolCalls: [
+                    ['id' => 'c1', 'name' => 'get_weather', 'arguments' => ['location' => 'Reykjavik']],
+                    ['id' => 'c2', 'name' => 'get_weather', 'arguments' => ['location' => 'Berlin']],
+                ])
+                : $this->response(content: 'Both reported.'),
+        );
+        $this->chatCount = 0;
+
+        $this->executor->method('validate')->willReturn([]);
+        $this->executor->expects($this->exactly(2))->method('execute')
+            ->willReturn(['tool' => 'get_weather', 'content' => 'ok', 'isError' => false, 'durationMs' => 1]);
+
+        $run = $this->engine()->run($task);
+
+        self::assertSame(2, $this->countEvents($run, RunEventType::ToolCall), 'different arguments are different calls');
+    }
+
+    /**
+     * Two calls whose arguments differ only in key order are the same call
+     * as data — the same rule the digest uses, so the two agree.
+     */
+    public function testArgumentKeyOrderDoesNotDefeatDedup(): void
+    {
+        $this->catalogTool('fetch');
+        $task = $this->enabledTask(toolbox: ['fetch'], mode: ToolboxMode::Explicit);
+
+        $this->llm->method('chat')->willReturnCallback(
+            fn (): LlmResponse => 1 === ++$this->chatCount
+                ? $this->response(toolCalls: [
+                    ['id' => 'c1', 'name' => 'fetch', 'arguments' => ['a' => 1, 'b' => 2]],
+                    ['id' => 'c2', 'name' => 'fetch', 'arguments' => ['b' => 2, 'a' => 1]],
+                ])
+                : $this->response(content: 'Done.'),
+        );
+        $this->chatCount = 0;
+
+        $this->executor->method('validate')->willReturn([]);
+        $this->executor->expects($this->once())->method('execute')
+            ->willReturn(['tool' => 'fetch', 'content' => 'ok', 'isError' => false, 'durationMs' => 1]);
+
+        $run = $this->engine()->run($task);
+
+        $response = $this->eventPayload($run, RunEventType::LlmResponse);
+        self::assertSame(['c2'], array_column($response['droppedDuplicates'], 'id'));
+    }
+
+    /**
+     * The drop is announced, so a suppressed repeat is never silent — but
+     * the durable record (the ledger) is what outlives the log line.
+     */
+    public function testDuplicateDropIsLogged(): void
+    {
+        $this->catalogTool('get_transactions');
+        $task = $this->enabledTask(toolbox: ['get_transactions'], mode: ToolboxMode::Explicit);
+
+        $this->llm->method('chat')->willReturnCallback(
+            fn (): LlmResponse => 1 === ++$this->chatCount
+                ? $this->response(toolCalls: [
+                    ['id' => 'c1', 'name' => 'get_transactions', 'arguments' => ['day' => 'today']],
+                    ['id' => 'c2', 'name' => 'get_transactions', 'arguments' => ['day' => 'today']],
+                ])
+                : $this->response(content: 'Done.'),
+        );
+        $this->chatCount = 0;
+
+        $this->executor->method('validate')->willReturn([]);
+        $this->executor->method('execute')->willReturn(['tool' => 'get_transactions', 'content' => 'ok', 'isError' => false, 'durationMs' => 1]);
+
+        $handler = new TestHandler();
+        $logger = new Logger('test', [$handler]);
+
+        $container = static::getContainer();
+        $engine = new RunEngine(
+            $this->llm,
+            $container->get(PromptCompiler::class),
+            $container->get(ToolboxResolver::class),
+            $this->executor,
+            $container->get(ContextWindow::class),
+            $container->get(RunRepository::class),
+            $this->em,
+            $logger,
+            $container->get(RunGraph::class),
+            ['step_budget' => 50, 'tool_retries' => 2, 'circuit_breaker' => 3],
+        );
+
+        $engine->run($task);
+
+        self::assertTrue(
+            $handler->hasRecordThatContains('duplicate tool call', Level::Info),
+            'the dropped duplicate must be announced, not silently discarded',
+        );
     }
 
     public function testToolOutsideToolboxNeverDispatches(): void
@@ -306,6 +462,38 @@ final class RunEngineLoopTest extends KernelTestCase
         $this->em->flush();
 
         return $task;
+    }
+
+    private function countEvents(Run $run, RunEventType $type): int
+    {
+        $count = 0;
+        foreach ($run->getEvents() as $event) {
+            if ($event->getType() === $type) {
+                ++$count;
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * The tool_call ids in the assistant message of a request's message
+     * list — what the endpoint will demand a matching result for.
+     *
+     * @param list<array<string, mixed>> $messages
+     *
+     * @return list<string>
+     */
+    private function toolCallIdsIn(array $messages): array
+    {
+        $ids = [];
+        foreach ($messages as $message) {
+            if ('tool' === ($message['role'] ?? null)) {
+                $ids[] = (string) $message['tool_call_id'];
+            }
+        }
+
+        return $ids;
     }
 
     /** @return list<RunEventType> */
