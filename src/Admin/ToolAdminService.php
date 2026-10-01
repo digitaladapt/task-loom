@@ -31,7 +31,7 @@ final class ToolAdminService
      */
     public function listTools(): array
     {
-        return $this->tools->findBy([], ['name' => 'ASC']);
+        return $this->tools->findAllOrdered();
     }
 
     public function findTool(int $toolId): ?Tool
@@ -42,12 +42,15 @@ final class ToolAdminService
     /**
      * Every distinct tag in use, sorted — the tag picker's source of truth.
      *
+     * Tags stay alphabetical: they are a flat vocabulary, not a per-server
+     * grouping, so there is no server axis for them to sort on.
+     *
      * @return list<string>
      */
     public function listKnownTags(): array
     {
         $tags = [];
-        foreach ($this->tools->findAll() as $tool) {
+        foreach ($this->tools->findAllOrdered() as $tool) {
             foreach ($tool->getTags() as $tag) {
                 $tags[$tag] = true;
             }

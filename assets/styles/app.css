@@ -612,24 +612,206 @@ fieldset legend {
 }
 
 /*
- * The signed-in bar: a compact strip above the page header carrying the
- * sign-out control. Kept out of every template's own header so it appears
- * exactly once, on every signed-in page.
+ * A page's own contextual link — its parent page, not global navigation.
+ * Sits in the same column as the page content, right under the header.
  */
-.session-bar {
+.page-back {
+    max-width: 40rem;
+    margin: 0 auto 0.5rem;
+    padding: 0 1rem;
+    box-sizing: border-box;
+    font-size: 0.9rem;
+}
+
+/*
+ * The menu bar (SPEC §8): the one top-level navigation every signed-in page
+ * shares. Replaces the old per-template <nav> strips and the separate
+ * .session-bar — the sign-out control now lives in the same bar as the
+ * links, so there is a single place that answers "where can I go".
+ *
+ * Mobile first: the panel is a stacked list under a two-row header, and the
+ * toggle is a real button (44px min tap target, 16px label — the §3.3a
+ * rules). Without JavaScript the panel is simply always visible and the
+ * toggle is hidden, because `.menu-toggle` is only un-hidden by the
+ * `data-menu-collapsible` state the script sets. That keeps the bar usable
+ * when the script never runs (it is an enhancement, not a dependency).
+ */
+.site-header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--muted);
+    /* The bar spans the viewport; the content inside stays column-width. */
+    margin: 0 auto 0.75rem;
+}
+
+.site-header-inner {
     display: flex;
-    justify-content: flex-end;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.25rem 1rem;
+    gap: 0.25rem 0.75rem;
+    padding: 0.35rem 1rem;
     max-width: 40rem;
     margin: 0 auto;
+    box-sizing: border-box;
 }
 
-.session-bar form {
+.site-brand {
+    font-weight: 700;
+    text-decoration: none;
+    color: var(--text);
+    /* Comfortable tap target on the wordmark itself. */
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    margin-right: auto;
+}
+
+/* Hidden until the script claims the header; see the block comment above. */
+.menu-toggle {
+    display: none;
+    margin-left: auto;
+}
+
+[data-menu-collapsible] .menu-toggle {
+    display: inline-flex;
+    align-items: center;
+}
+
+/*
+ * The panel wraps the nav and the session strip. On small screens it is a
+ * full-width row: `flex-basis: 100%` forces it onto its own line beneath the
+ * brand + toggle row.
+ */
+.site-menu-panel {
+    flex-basis: 100%;
+    min-width: 0;
+}
+
+.site-menu-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.25rem;
+}
+
+.site-menu-list a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 0.6rem;
+    border-radius: 6px;
+    text-decoration: none;
+    color: var(--text);
+}
+
+.site-menu-list a:hover {
+    background: var(--bg);
+}
+
+.site-menu-list a[aria-current] {
+    color: var(--accent);
+    font-weight: 600;
+    background: var(--bg);
+}
+
+/*
+ * Under a collapsible header (script active, small screen) the panel is
+ * hidden until the toggle says otherwise, and the stacked list gets the
+ * full width so each item is a comfortable row rather than a wrapping
+ * cluster.
+ */
+[data-menu-collapsible] .site-menu-panel {
+    display: none;
+}
+
+[data-menu-collapsible][data-menu-open] .site-menu-panel {
+    display: block;
+}
+
+[data-menu-collapsible] .site-menu-list {
+    flex-direction: column;
+}
+
+[data-menu-collapsible] .site-menu-list a {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.site-session {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    padding: 0.35rem 0 0.15rem;
+    border-top: 1px solid var(--muted);
+    margin-top: 0.35rem;
+}
+
+.site-session form {
+    margin: 0;
+    margin-left: auto;
+}
+
+.site-session .muted {
     margin: 0;
 }
 
-.session-bar .muted {
-    margin: 0;
+/*
+ * Wider screens: no disclosure control and no cramming. The panel comes back
+ * inline and the nav items lay out horizontally; the session strip
+ * right-aligns and wraps onto its own line only when the bar genuinely runs
+ * out of room (the 40rem column is narrow enough that it usually does — the
+ * wrap is the layout working, not a failure). The selectors name both the
+ * plain and the script-claimed header, and the open state is repeated, so
+ * the wide layout wins over every collapsible rule by source order (equal
+ * specificity) rather than by accident. 40rem is the same content width the
+ * pages use, so the bar and the page below share edges.
+ */
+@media (min-width: 40rem) {
+    .menu-toggle,
+    [data-menu-collapsible] .menu-toggle {
+        display: none;
+    }
+
+    .site-menu-panel,
+    [data-menu-collapsible] .site-menu-panel,
+    [data-menu-collapsible][data-menu-open] .site-menu-panel {
+        display: flex;
+        align-items: center;
+        flex-basis: auto;
+        flex-wrap: wrap;
+        gap: 0.25rem 0.75rem;
+        min-width: 0;
+    }
+
+    .site-menu-list,
+    [data-menu-collapsible] .site-menu-list {
+        flex-direction: row;
+    }
+
+    .site-menu-list a,
+    [data-menu-collapsible] .site-menu-list a {
+        width: auto;
+    }
+
+    .site-session {
+        padding: 0;
+        border-top: 0;
+        margin: 0;
+        margin-left: auto;
+    }
+}
+
+/*
+ * Keep the session strip's own layout on narrow *non-collapsible* headers
+ * (the no-script case): it is a plain stacked block there too.
+ */
+.site-session .muted {
+    font-size: 0.875rem;
+}
+
+.site-session button {
+    /* Compact by padding, never by font-size (§3.3a). */
+    padding: 0.4rem 0.75rem;
 }

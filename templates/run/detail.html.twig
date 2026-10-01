@@ -5,10 +5,6 @@
 {% block body %}
 <header class="page-header">
     <h1>Run #{{ view.run.id }}</h1>
-    <nav>
-        <a href="{{ path('app_run_list') }}">← Runs</a>
-        <a href="{{ path('app_task_detail', {id: view.run.task.id}) }}">Task #{{ view.run.task.id }}</a>
-    </nav>
 </header>
 
 {% for label, messages in app.flashes %}
@@ -25,7 +21,7 @@
     </dd>
 
     <dt>Task</dt>
-    <dd>#{{ view.run.task.id }} — {{ view.run.task.title }}</dd>
+    <dd><a href="{{ path('app_task_detail', {id: view.run.task.id}) }}">#{{ view.run.task.id }} — {{ view.run.task.title }}</a></dd>
 
     <dt>Role</dt>
     <dd>{{ view.roleLabel }}</dd>

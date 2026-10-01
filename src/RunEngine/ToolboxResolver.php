@@ -105,8 +105,11 @@ final readonly class ToolboxResolver
         }
 
         // The catalog: enabled tools on enabled servers. We must resolve
-        // over ALL tools, then intersect with the declared tags.
-        $all = $this->tools->findBy([], ['name' => 'ASC']);
+        // over ALL tools, then intersect with the declared tags. The
+        // canonical order (server, then tool) is preserved into the frozen
+        // snapshot, so a run's toolbox reads the same way the catalog page
+        // and the editor's picker present it.
+        $all = $this->tools->findAllOrdered();
 
         $resolved = [];
         foreach ($all as $tool) {

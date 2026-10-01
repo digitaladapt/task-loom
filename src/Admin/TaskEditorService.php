@@ -224,12 +224,17 @@ final class TaskEditorService
      * tool with its server name, so the explicit list can be chosen by hand
      * instead of typed from memory.
      *
+     * Both pickers — the task's own and every step's — render this same
+     * list, in the catalog's canonical order (server, then tool), so a tool
+     * is where the operator last saw it. Tags are alphabetical: a flat
+     * vocabulary with no server axis.
+     *
      * @return array{tags: list<string>, tools: list<Tool>}
      */
     public function catalog(): array
     {
         $tags = [];
-        foreach ($this->tools->findBy([], ['name' => 'ASC']) as $tool) {
+        foreach ($this->tools->findAllOrdered() as $tool) {
             foreach ($tool->getTags() as $tag) {
                 $tags[$tag] = true;
             }
@@ -240,7 +245,7 @@ final class TaskEditorService
 
         return [
             'tags' => $tags,
-            'tools' => $this->tools->findBy([], ['name' => 'ASC']),
+            'tools' => $this->tools->findAllOrdered(),
         ];
     }
 

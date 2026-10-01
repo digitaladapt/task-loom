@@ -49,6 +49,45 @@ final class AdminToolCatalogTest extends WebTestCase
         self::assertStringContainsString('weather', $content);
     }
 
+    /**
+     * The catalog lists tools in the canonical order — by server, then by
+     * tool name — not in insertion order and not by name alone. One server's
+     * tools staying together is the point: a name-only sort interleaves
+     * every server's tools, so the operator reading the list to pick a tag
+     * cannot see which server any of them came from.
+     */
+    public function testListOrdersToolsByServerThenName(): void
+    {
+        // Inserted deliberately out of order, across two servers: a
+        // name-only sort would render alpha, get_forecast, zeta.
+        $this->makeTool('zeta', [], 'weather-srv');
+        $this->makeTool('get_forecast', [], 'calendar-srv');
+        $this->makeTool('alpha', [], 'weather-srv');
+
+        $this->client->request('GET', '/tools');
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+
+        $rendered = ['calendar-srv.get_forecast', 'weather-srv.alpha', 'weather-srv.zeta'];
+        $positions = [];
+        foreach ($rendered as $label) {
+            $position = strpos($content, $label);
+            self::assertNotFalse($position, \sprintf('%s renders', $label));
+            $positions[$label] = $position;
+        }
+
+        self::assertLessThan(
+            $positions['weather-srv.alpha'],
+            $positions['calendar-srv.get_forecast'],
+            'calendar-srv sorts before weather-srv, whatever the tool names',
+        );
+        self::assertLessThan(
+            $positions['weather-srv.zeta'],
+            $positions['weather-srv.alpha'],
+            'within one server, alpha sorts before zeta',
+        );
+    }
+
     public function testSetTagsUpdatesToolTags(): void
     {
         $tool = $this->makeTool('get_forecast', ['weather']);
@@ -88,10 +127,11 @@ final class AdminToolCatalogTest extends WebTestCase
     /**
      * @param list<string> $tags
      */
-    private function makeTool(string $name, array $tags): Tool
+    private function makeTool(string $name, array $tags, string $serverName = 'weather-srv'): Tool
     {
         $em = $this->em();
-        $server = new McpServer('weather-srv', 'https://weather.example/mcp', ServerProtocol::Mcp);
+        $server = $em->getRepository(McpServer::class)->findOneBy(['name' => $serverName])
+            ?? new McpServer($serverName, 'https://weather.example/mcp', ServerProtocol::Mcp);
         $em->persist($server);
 
         $tool = new Tool($server, $name, 'Get the forecast', ['type' => 'object'], $tags);
