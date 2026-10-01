@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Disable an enabled task — the pause (SPEC §4.4, §8).** An enabled task
+  now has a **Disable** action on its detail page. Disabling is a lifecycle
+  flag, not a content edit: it is the one mutation an enabled record is
+  allowed, and it is what "stop this for now" actually needed. The task
+  keeps its title, brief, toolbox, schedule, and run history; it simply
+  stops being runnable. Run now refuses it ("not enabled", SPEC §4.2) and
+  the scheduler tick skips it, because both read the same `enabled` flag
+  (`findRunnable()`). **Enable** brings it straight back, and the tick
+  re-arms it on its schedule like any fresh enable.
+
+  **It is a pause, not a discard.** Archiving a draft (the approval queue's
+  "Discard draft") is a dead record and stays that way; the disabled flag is
+  the reversible stop. The two are kept distinct in the UI: the detail
+  status reads `disabled` for a task that has run and been paused (never
+  `draft`, which would imply it was never live), and the "Discard draft"
+  button is not offered for a task with run history — a paused record is
+  worth keeping.
+
+  **One predicate, so the UI and the guards cannot disagree.**
+  `Task::isPendingReplacement()` is now the single question the approval
+  actions and the lifecycle guards ask ("is this a proposal still awaiting a
+  decision?"). An approved replacement keeps its `replacementFor` pointer
+  for the record's history and can now be disabled and re-enabled, so
+  `replacementFor !== null` alone is not "pending" — the predicate also
+  checks `enabled`, `archivedAt`, and whether the original was superseded.
+  `reject()` gained the matching superseded-original guard, so a stale
+  reject aimed at an approved-then-paused task is refused rather than
+  archiving a live record (SPEC §4.4).
+
 - **The run prompt is tunable, and the grounding block finally tells the
 truth about time, units and place (SPEC §4.1, §4.2).** Five deployment
 knobs and two real bugs.
@@ -62,7 +91,6 @@ knobs and two real bugs.
   holds required variables and optional ones to the standard each deserves,
   and skips Symfony's own plumbing (`SYMFONY_*`, `TEST_TOKEN`) rather than
   demanding it in compose.
-
 
 - **One menu bar on every page (SPEC §8).** Until now each template grew its
   own `<nav>` with whatever links that page happened to need: the tool

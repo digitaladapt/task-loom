@@ -282,6 +282,26 @@ class Task
         return null !== $this->supersededBy;
     }
 
+    /**
+     * A replacement draft still awaiting the human's decision (SPEC §4.4).
+     *
+     * A proposal is *decided* two ways, and each leaves its own mark: approving
+     * it supersedes the original, rejecting it archives the draft. An approved
+     * replacement keeps its replacementFor pointer for the record's history
+     * (and can be disabled and re-enabled later), so neither
+     * `replacementFor !== null` nor `enabled = false` is on its own "pending".
+     *
+     * The UI's approval actions, the enable guard, and reject() all ask this
+     * one question, so they cannot disagree about which moment a task is in.
+     */
+    public function isPendingReplacement(): bool
+    {
+        return null !== $this->replacementFor
+            && !$this->enabled
+            && !$this->isArchived()
+            && !$this->replacementFor->isSuperseded();
+    }
+
     /** An editable, not-yet-enabled, not-archived task. */
     public function isDraft(): bool
     {
@@ -376,6 +396,14 @@ class Task
         }
         if ($this->isArchived()) {
             throw new \LogicException('Cannot reject an archived replacement draft.');
+        }
+        // The proposal's moment has passed once its original was superseded —
+        // by this draft, or by a sibling. The `enabled` guard above catches an
+        // *approved* replacement while it runs; this one catches it after it
+        // has been disabled (SPEC §4.4: a paused task is still a live task,
+        // and a stale reject must not archive it).
+        if ($this->replacementFor->isSuperseded()) {
+            throw new \LogicException('Cannot reject a replacement whose original is already superseded — its moment has passed (SPEC §4.4).');
         }
 
         $this->archivedAt = new \DateTimeImmutable();
