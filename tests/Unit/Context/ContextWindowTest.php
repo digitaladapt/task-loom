@@ -108,6 +108,7 @@ final class ContextWindowTest extends TestCase
     public function testGroundingRenderShape(): void
     {
         $grounding = new Grounding(
+            timezone: 'UTC',
             location: 'Reykjavik',
             units: 'metric',
             now: new \DateTimeImmutable('2026-03-01 09:15:00', new \DateTimeZone('UTC')),

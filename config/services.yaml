@@ -105,6 +105,20 @@ services:
             $maxToolOutputPct: '%env(float:TASKLOOM_MAX_TOOL_OUTPUT_PCT)%'
             $windowTailExchanges: '%env(int:TASKLOOM_WINDOW_TAIL_EXCHANGES)%'
 
+    # The grounding block (SPEC §4.2 / §5.6). Same required deployment
+    # timezone as the scheduler: the block states the wall-clock time the
+    # runs and the schedules share, so a Chicago deployment reads
+    # "09:15 (America/Chicago)" rather than the container clock's UTC.
+    #
+    # Units are defaulted rather than required: unset means metric, which is
+    # what this knob has always been — no existing deployment changes
+    # behavior on upgrade, and only an explicit value moves it. A typo still
+    # fails closed (Units::fromConfig), naming the variable.
+    App\Context\Grounding:
+        arguments:
+            $timezone: '%env(TASKLOOM_TIMEZONE)%'
+            $units: '%env(default::TASKLOOM_UNITS)%'
+
     App\RunEngine\RunEngine:
         arguments:
             $budgets:
