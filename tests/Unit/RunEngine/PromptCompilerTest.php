@@ -115,7 +115,10 @@ final class PromptCompilerTest extends TestCase
 
     private function compiler(): PromptCompiler
     {
-        return new PromptCompiler(new Grounding(now: new \DateTimeImmutable('2026-09-26 09:00', new \DateTimeZone('UTC'))));
+        return new PromptCompiler(new Grounding(
+            timezone: 'UTC',
+            now: new \DateTimeImmutable('2026-09-26 09:00', new \DateTimeZone('UTC')),
+        ));
     }
 
     private function task(): Task

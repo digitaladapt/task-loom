@@ -38,6 +38,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reject aimed at an approved-then-paused task is refused rather than
   archiving a live record (SPEC §4.4).
 
+- **The run prompt is tunable, and the grounding block finally tells the
+truth about time, units and place (SPEC §4.1, §4.2).** Five deployment
+knobs and two real bugs.
+
+  **Grounding was reporting UTC to everyone, and metric to everyone.** The
+  block was autowired with no arguments, so it rendered
+  `new DateTimeImmutable('now')` in the *container's* zone: a deployment
+  whose `TASKLOOM_TIMEZONE` says `America/Chicago` still told every run it
+  was 09:15 (UTC). A model that reads "today" off the block stamps the
+  deliverable with a date the operator is not on — the quiet-wrongness the
+  scheduler's timezone rule exists to prevent, leaking back in through the
+  prompt. `Grounding` is now constructed with `TASKLOOM_TIMEZONE` and
+  reports that zone's wall clock; units come from `TASKLOOM_UNITS`
+  (`metric`/`imperial`, unset → metric); and `TASKLOOM_LOCATION` supplies
+  the block's `Location:` line (free text, unset omits it, blank counts as
+  unset so an empty forwarded variable adds nothing). A value spanning
+  lines is refused: the block's promise is a fixed shape, one fact per
+  line, and a newline would let one knob forge what read like additional
+  harness-authored lines. Every knob fails
+  closed and names its variable on a bad value. The clock fix is also
+  structural: the constructor takes its timezone as a required argument, so
+  the old no-argument autowiring cannot compile — there is no silent
+  default left to fall into.
+
+  **The prompt's shape is now explicit and mostly fixed.** Sections render
+  in a defined order — preamble → `## Task` → `## Inputs` → `## Toolbox` →
+  `## Completion` → `## Grounding` — with grounding **last**, nearest the
+  model's first reply, since most of what a run states back is stamped with
+  the date, time, zone and units. Three parts are configurable because
+  their wording depends on the deployment rather than on the engine:
+  `TASKLOOM_SYSTEM_PROMPT`/`_FILE` (the preamble),
+  `TASKLOOM_COMPLETION_PROMPT`/`_FILE` (the text under `## Completion`),
+  and `TASKLOOM_PROMPT_TOOLBOX_LIST` (whether the toolbox summary renders).
+
+  Each text knob takes an inline value **or** a file; setting both is
+  refused (two sources for one value is ambiguous), a missing file and an
+  empty file are refused by name, and unset means the built-in text — so no
+  deployment's prompt *wording* changes on upgrade unless it opts in. The
+  **order** does change for everyone, deliberately: grounding moves from
+  second to last, which is the whole point of putting it nearest the model's
+  reply. The completion *rule* is not configurable either: the engine still
+  refuses a contentless terminal message and still fails closed into
+  `incomplete` at the step budget. The toolbox toggle is prose-only: tool
+  definitions are sent on every request regardless.
+
+  The deployment contract test also got stricter while wiring this up: it
+  discovered only plainly-spelled `%env(NAME)%` variables, so a knob behind
+  a processor prefix (`default::`, `int:`…) could be added to config and
+  never be forwarded by the compose files — silently inert in a container,
+  where dotenv is disabled. It now discovers the name under any prefix,
+  holds required variables and optional ones to the standard each deserves,
+  and skips Symfony's own plumbing (`SYMFONY_*`, `TEST_TOKEN`) rather than
+  demanding it in compose.
+
 - **One menu bar on every page (SPEC §8).** Until now each template grew its
   own `<nav>` with whatever links that page happened to need: the tool
   catalog was reachable from exactly one page, the attention queue from two,
