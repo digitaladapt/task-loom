@@ -142,6 +142,14 @@ final class TaskAdminController extends AbstractController
         return $this->lifecycle('archive', $id);
     }
 
+    #[Route('/tasks/{id}/disable', name: 'app_task_disable', methods: ['POST'], requirements: ['id' => '\d+'])]
+    public function disable(Request $request, int $id): Response
+    {
+        $this->assertCsrf('task-disable', $request);
+
+        return $this->lifecycle('disable', $id);
+    }
+
     #[Route('/tasks/{id}/run', name: 'app_task_run', methods: ['POST'], requirements: ['id' => '\d+'])]
     public function run(Request $request, int $id): Response
     {
@@ -201,6 +209,7 @@ final class TaskAdminController extends AbstractController
                 'approve' => $this->admin->approveTask($id),
                 'reject' => $this->admin->rejectTask($id),
                 'archive' => $this->admin->archiveTask($id),
+                'disable' => $this->admin->disableTask($id),
                 default => throw new \InvalidArgumentException(\sprintf('Unknown action "%s".', $action)),
             };
         } catch (TaskLifecycleException $e) {

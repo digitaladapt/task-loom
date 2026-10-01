@@ -54,6 +54,56 @@ final class TaskLifecycleTest extends TestCase
         $task->setTitle('Sneaky mutation');
     }
 
+    /**
+     * Disable is the pause (SPEC §4.4): a lifecycle flag an enabled task is
+     * allowed to receive, and the one path back to a non-running task that
+     * keeps the task itself (content, schedule, history) intact.
+     */
+    public function testAnEnabledTaskCanBeDisabledAndReEnabled(): void
+    {
+        $task = $this->makeTask();
+        $task->setSchedule('0 8 * * *');
+        $task->enable();
+
+        $task->disable();
+        self::assertFalse($task->isEnabled());
+        self::assertTrue($task->isDraft(), 'a disabled task is editable again');
+        self::assertSame('0 8 * * *', $task->getSchedule(), 'the pause keeps the schedule');
+
+        // Content setter is allowed while disabled — the same rule as a draft.
+        $task->setTitle('Paused and edited');
+        self::assertSame('Paused and edited', $task->getTitle());
+
+        $task->enable();
+        self::assertTrue($task->isEnabled(), 're-enabling resumes the same task');
+    }
+
+    /**
+     * PendingReplacement is the approval moment (SPEC §4.4) — and an approved
+     * replacement is not in it, even after it has been paused. This is the
+     * predicate the UI's approve/reject buttons and reject() both read.
+     */
+    public function testPendingReplacementIsOnlyTheUndecidedDraft(): void
+    {
+        $original = $this->makeTask();
+        $original->enable();
+
+        $draft = $original->createReplacementDraft(TaskAuthor::Agent);
+        self::assertTrue($draft->isPendingReplacement(), 'undecided: awaiting approve or reject');
+
+        $draft->reject();
+        self::assertFalse($draft->isPendingReplacement(), 'a rejected draft is decided (archived)');
+
+        $approved = $original->createReplacementDraft(TaskAuthor::Agent);
+        $approved->approve();
+        self::assertFalse($approved->isPendingReplacement(), 'an approved replacement is the live task');
+
+        // …and pausing the live task does not reopen its approval moment.
+        $approved->disable();
+        self::assertFalse($approved->isPendingReplacement(), 'a paused task is decided, not pending');
+        self::assertFalse($original->isPendingReplacement(), 'a superseded original is not pending either');
+    }
+
     public function testEnableIsRejectedOnArchivedTask(): void
     {
         $task = $this->makeTask();
@@ -173,6 +223,31 @@ final class TaskLifecycleTest extends TestCase
 
         self::assertTrue($draft->isEnabled(), 'the live task stays enabled');
         self::assertFalse($draft->isArchived(), 'the live task is not archived by a stale reject');
+    }
+
+    /**
+     * The stale-reject guard, reached by disabling first. Disabling an
+     * approved replacement is now legal (it is the pause), so an approved-but-
+     * paused task no longer trips the `enabled` guard — the superseded-original
+     * guard is what must catch it, or a stale POST would archive a live
+     * (paused) task.
+     */
+    public function testRejectRejectedWhenTheApprovedReplacementWasDisabled(): void
+    {
+        $original = $this->makeTask();
+        $original->enable();
+        $draft = $original->createReplacementDraft(TaskAuthor::Agent);
+        $draft->approve();
+        $draft->disable();
+
+        try {
+            $draft->reject();
+            self::fail('Rejecting a paused, already-approved replacement must be refused.');
+        } catch (\LogicException $e) {
+            self::assertStringContainsString('already superseded', $e->getMessage());
+        }
+
+        self::assertFalse($draft->isArchived(), 'a stale reject must not archive a paused live task');
     }
 
     /**
