@@ -187,9 +187,10 @@ container's fleet runs a scheduler daemon. Schedules are wall-clock in
 UTC for a Chicago operator is not a thing this project does).
 
 The same clock is what the model is told: the run prompt's **grounding
-block** reports the current date, time and zone in `TASKLOOM_TIMEZONE`, and
-the units you configured in `TASKLOOM_UNITS` — so a briefing written at 08:00
-Chicago time says so, rather than stamping itself with the container's UTC.
+block** reports the current date, time and zone in `TASKLOOM_TIMEZONE`, the
+units you configured in `TASKLOOM_UNITS`, and — if you set it — where you are
+(`TASKLOOM_LOCATION`). So a briefing written at 08:00 Chicago time says so,
+rather than stamping itself with the container's UTC.
 
 How it works, in one breath: the **cursor** (`task.next_run_at`, epoch
 seconds) is the record of truth — an enabled scheduled task is *armed* on the
@@ -227,7 +228,9 @@ request for the whole run, never pruned.
 
 Grounding sits **last**, closest to the model's first reply: the date, time,
 zone and units are the freshest thing in the head, and most of what a run
-states back is stamped with them.
+states back is stamped with them. Its facts come from three deployment
+knobs — `TASKLOOM_TIMEZONE` (required), `TASKLOOM_UNITS`, and
+`TASKLOOM_LOCATION` — described under [Configuration](#configuration).
 
 Three parts are yours to tune, because they are the parts whose wording
 depends on your deployment rather than on the engine's mechanics. Unset
@@ -320,6 +323,7 @@ inline. Key knobs:
 | `TASKLOOM_TOOL_MAX_CONCURRENCY` | Concurrent tool-turn workers (default 2) |
 | `TASKLOOM_TIMEZONE` | Wall-clock timezone cron schedules are evaluated in — also what the editor's schedule preview shows, and the clock the grounding block reports to the model (required) |
 | `TASKLOOM_UNITS` | Units the grounding block announces — `metric` or `imperial` (default `metric`) |
+| `TASKLOOM_LOCATION` | Where the operator is, as free text (`Chicago`, `Reykjavik, Iceland`) — the grounding block's `Location:` line; unset omits it |
 | `TASKLOOM_SYSTEM_PROMPT` / `_FILE` | Replace the run prompt's opening preamble (inline, or a path to a file); unset keeps the built-in text |
 | `TASKLOOM_COMPLETION_PROMPT` / `_FILE` | Replace the text under the prompt's `## Completion` header; the engine still enforces completion structurally |
 | `TASKLOOM_PROMPT_TOOLBOX_LIST` | Render the prompt's human-readable toolbox list (`1`/`0`); the tool definitions are always sent |

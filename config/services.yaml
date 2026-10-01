@@ -110,13 +110,16 @@ services:
     # runs and the schedules share, so a Chicago deployment reads
     # "09:15 (America/Chicago)" rather than the container clock's UTC.
     #
-    # Units are defaulted rather than required: unset means metric, which is
-    # what this knob has always been — no existing deployment changes
-    # behavior on upgrade, and only an explicit value moves it. A typo still
-    # fails closed (Units::fromConfig), naming the variable.
+    # Units and location are defaulted rather than required: unset units mean
+    # metric, which is what this knob has always been, and unset location
+    # simply omits the line — no existing deployment changes behavior on
+    # upgrade, and only an explicit value moves it. A bad value still fails
+    # closed (Units::fromConfig, Grounding::resolveLocation), naming the
+    # variable.
     App\Context\Grounding:
         arguments:
             $timezone: '%env(TASKLOOM_TIMEZONE)%'
+            $location: '%env(default::TASKLOOM_LOCATION)%'
             $units: '%env(default::TASKLOOM_UNITS)%'
 
     # The configurable parts of the run prompt (SPEC §4.1). Every text knob

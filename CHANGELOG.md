@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **The run prompt is tunable, and the grounding block finally tells the
-truth about time and units (SPEC §4.1, §4.2).** Three deployment knobs and
-two real bugs.
+truth about time, units and place (SPEC §4.1, §4.2).** Five deployment
+knobs and two real bugs.
 
   **Grounding was reporting UTC to everyone, and metric to everyone.** The
   block was autowired with no arguments, so it rendered
@@ -22,10 +22,16 @@ two real bugs.
   scheduler's timezone rule exists to prevent, leaking back in through the
   prompt. `Grounding` is now constructed with `TASKLOOM_TIMEZONE` and
   reports that zone's wall clock; units come from `TASKLOOM_UNITS`
-  (`metric`/`imperial`, unset → metric). Both fail closed and name their
-  variable on a typo. The clock fix is also structural: the constructor
-  takes its timezone as a required argument, so the old no-argument
-  autowiring cannot compile — there is no silent default left to fall into.
+  (`metric`/`imperial`, unset → metric); and `TASKLOOM_LOCATION` supplies
+  the block's `Location:` line (free text, unset omits it, blank counts as
+  unset so an empty forwarded variable adds nothing). A value spanning
+  lines is refused: the block's promise is a fixed shape, one fact per
+  line, and a newline would let one knob forge what read like additional
+  harness-authored lines. Every knob fails
+  closed and names its variable on a bad value. The clock fix is also
+  structural: the constructor takes its timezone as a required argument, so
+  the old no-argument autowiring cannot compile — there is no silent
+  default left to fall into.
 
   **The prompt's shape is now explicit and mostly fixed.** Sections render
   in a defined order — preamble → `## Task` → `## Inputs` → `## Toolbox` →

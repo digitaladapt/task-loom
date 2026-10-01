@@ -143,10 +143,12 @@ except the process.
 - The grounding block is harness-authored and identical in shape every run (date, time,
   timezone, units, optional location). Global config, never per-task, never tool-influenced.
   It reports the deployment's clock: the wall-clock time and zone named in
-  `TASKLOOM_TIMEZONE`, and the units in `TASKLOOM_UNITS` (`metric` / `imperial`; unset →
-  metric). Both are validated at construction and fail loudly, naming the variable — a
+  `TASKLOOM_TIMEZONE`, the units in `TASKLOOM_UNITS` (`metric` / `imperial`; unset →
+  metric), and the place in `TASKLOOM_LOCATION` (free text, one line; unset omits the
+  line). Each is validated at construction and fails loudly, naming the variable — a
   deployment whose schedules fire at 08:00 Chicago time must not tell its runs it is
-  08:00 UTC.
+  08:00 UTC, and a value spanning lines is refused because the block's fixed shape is
+  one fact per line.
 - MCP server credentials are resolved from the harness environment at call time and are
   scrubbed from all logged traces and error messages.
 

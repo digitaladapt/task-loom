@@ -51,6 +51,10 @@ x-taskloom-env: &taskloom-env
   TASKLOOM_TIMEZONE: ${TASKLOOM_TIMEZONE:-UTC}
   # Units the grounding block announces to the model: metric or imperial.
   TASKLOOM_UNITS: ${TASKLOOM_UNITS:-metric}
+  # Where the operator is (free text, one line) — omitted from the block
+  # when empty. Forwarded so the knob is actually settable: the image runs
+  # with dotenv disabled, so an unforwarded variable is silently inert.
+  TASKLOOM_LOCATION: ${TASKLOOM_LOCATION:-}
   # The run prompt's configurable parts (SPEC §4.1). Empty by default: the
   # built-in text is used. Set the *_FILE forms for multi-line prose (a path
   # INSIDE the container — mount it), never both forms of one knob.

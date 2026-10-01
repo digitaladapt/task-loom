@@ -5,6 +5,10 @@ declare(strict_types=1);
 namespace App\Tests\Functional\Context;
 
 use App\Context\Grounding;
+use App\Entity\Task;
+use App\Entity\TaskAuthor;
+use App\Entity\TaskKind;
+use App\Entity\ToolboxMode;
 use App\RunEngine\PromptCompiler;
 use App\RunEngine\PromptTemplate;
 use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
@@ -76,6 +80,54 @@ final class GroundingWiringTest extends KernelTestCase
         self::assertStringContainsString('You are an autonomous task executor.', $template->preamble());
         self::assertStringContainsString('NO tool calls', $template->completion());
         self::assertTrue($template->listsTools());
+    }
+
+    /**
+     * TASKLOOM_LOCATION reaches the block through the container, as its own
+     * line, in the same once-per-run block as the clock and units.
+     *
+     * The test env pins a location (`.env.test`) for exactly this reason: a
+     * default:: knob that is never wired, or wired into the wrong argument,
+     * resolves to null and says nothing — the failure looks identical to
+     * "the operator did not configure it".
+     */
+    public function testTheContainerWiresTheDeploymentLocationIntoGrounding(): void
+    {
+        self::assertSame('Chicago', $_SERVER['TASKLOOM_LOCATION'] ?? null, 'the test env must pin a location for this test to mean anything');
+
+        $rendered = $this->grounding()->render();
+
+        self::assertStringContainsString('Location: Chicago', $rendered);
+        self::assertStringEndsWith('Location: Chicago', rtrim($rendered), 'location is the last line of the block');
+    }
+
+    /**
+     * ...and it keeps its place when the block is assembled into a prompt:
+     * the whole point of the knob is that the model reads it once, in the
+     * grounding section, not detached somewhere else in the head.
+     */
+    public function testTheLocationReachesTheCompiledPrompt(): void
+    {
+        $compiler = static::getContainer()->get(PromptCompiler::class);
+        self::assertInstanceOf(PromptCompiler::class, $compiler);
+
+        $task = new Task(
+            'Morning Briefing',
+            'Compose the full briefing.',
+            TaskKind::Run,
+            ToolboxMode::Explicit,
+            [],
+            TaskAuthor::User,
+        );
+
+        $system = $compiler->compile($task, [])['system'];
+
+        $groundingAt = strpos($system, '## Grounding');
+        self::assertNotFalse($groundingAt, 'grounding renders');
+
+        $locationAt = strpos($system, 'Location: Chicago');
+        self::assertNotFalse($locationAt, 'the configured location reaches the prompt');
+        self::assertGreaterThan($groundingAt, $locationAt, 'the location line lives inside the grounding block, not elsewhere in the head');
     }
 
     /**

@@ -136,4 +136,87 @@ final class GroundingTest extends TestCase
         self::assertSame(Units::Imperial, Units::fromConfig('imperial'));
         self::assertSame(Units::Metric, Units::fromConfig(null));
     }
+
+    /**
+     * The location line, when configured.
+     *
+     * Free text, so this is about what reaches the model: the place it is
+     * told to treat as "here", in the same once-per-run block as the clock
+     * and the units.
+     */
+    #[DataProvider('locations')]
+    public function testLocationIsRenderedWhenConfigured(?string $configured, ?string $expected): void
+    {
+        $rendered = (new Grounding(timezone: 'UTC', location: $configured))->render();
+
+        if (null === $expected) {
+            self::assertStringNotContainsString('Location:', $rendered, 'an unset or blank location must omit the line, not render it empty');
+
+            return;
+        }
+
+        self::assertStringContainsString('Location: '.$expected, $rendered);
+    }
+
+    /**
+     * @return iterable<string, array{?string, ?string}>
+     */
+    public static function locations(): iterable
+    {
+        yield 'a city' => ['Chicago', 'Chicago'];
+        yield 'city and country' => ['Reykjavik, Iceland', 'Reykjavik, Iceland'];
+        yield 'unset' => [null, null];
+        yield 'empty string is unset' => ['', null];
+        yield 'whitespace-only is unset' => ['   ', null];
+        yield 'surrounding whitespace is trimmed' => ['  Chicago  ', 'Chicago'];
+        // A file or shell export usually carries a trailing newline. Trimming
+        // first means it never counts as a second line — refusing it would
+        // fail the most ordinary way of setting the variable.
+        yield 'trailing newline is trimmed, not treated as a second line' => ["Chicago\n", 'Chicago'];
+    }
+
+    /**
+     * Blank means unset: no "Location:" line at all.
+     *
+     * A container deployment forwards TASKLOOM_LOCATION as an empty string
+     * when the operator has not set it (`${TASKLOOM_LOCATION:-}`), so the
+     * empty case is the *normal* one, not an edge — an empty line would put
+     * a lie-shaped blank into every run's prompt on those deployments.
+     */
+    public function testBlankLocationIsIndistinguishableFromUnset(): void
+    {
+        $unset = (new Grounding(timezone: 'UTC'))->render();
+        $blank = (new Grounding(timezone: 'UTC', location: '   '))->render();
+
+        self::assertSame($unset, $blank);
+    }
+
+    /**
+     * The block is one fact per line, so a location that spans lines is
+     * refused.
+     *
+     * Without this, a single knob could forge what read like additional
+     * harness-authored lines — "Location: Nowhere\nUnits: imperial" would
+     * render as two lines that both look like the harness said them. It is
+     * operator config rather than untrusted input, so this is about keeping
+     * the shape guarantee honest, not about an attack.
+     */
+    #[DataProvider('multiLineLocations')]
+    public function testAMultiLineLocationIsRefused(string $configured): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches('/TASKLOOM_LOCATION.*single line/s');
+
+        new Grounding(timezone: 'UTC', location: $configured);
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function multiLineLocations(): iterable
+    {
+        yield 'newline' => ["Nowhere\nUnits: imperial"];
+        yield 'carriage return' => ["Nowhere\rLocation: Somewhere"];
+        yield 'CRLF' => ["Nowhere\r\nLocation: Somewhere"];
+    }
 }
