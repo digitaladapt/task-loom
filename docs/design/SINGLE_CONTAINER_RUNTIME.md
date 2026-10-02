@@ -11,7 +11,7 @@
 
 | Process | Count | Why |
 |---|---:|---|
-| `frankenphp run …` | 1 | The admin UI **and** the MCP server role (`POST /mcp`) — one process, one port. The SDK's HTTP transport is a PSR-7 handler, not a web server, so there is no second listener to run. |
+| `frankenphp run …` | 1 | The admin UI **and** the MCP server role (`POST /mcp`) — one process, one port. The SDK's HTTP transport is a PSR-7 handler, not a web server, so there is no second listener to run. Omitted by `serve --no-web`. |
 | `messenger:consume llm` | `TASKLOOM_LLM_MAX_CONCURRENCY` | One worker holds at most one LLM request on the wire. **N workers are the concurrency semaphore** (SPEC §6) — the variable stopped being a suggestion to scale a service and became the count the supervisor starts. |
 | `messenger:consume tools` | `TASKLOOM_TOOL_MAX_CONCURRENCY` | Tool turns mostly wait on external servers; several run at once without competing for the model. A slow tool never blocks the `llm` lane. |
 | `app:schedule:run` | `TASKLOOM_SCHEDULER_ENABLED` (0 or 1) | The scheduler daemon (SPEC §14): ticks on `TASKLOOM_SCHEDULE_INTERVAL` and launches due scheduled tasks through the `llm` lane. One process; it holds no message and shuts down gracefully on SIGTERM (the current tick finishes). |
@@ -20,6 +20,30 @@ There is no separate worker service, no orchestrator process, and no
 sidecar. The entrypoint *is* the process supervision — ~200 lines of bash with
 tests, replacing what used to be "remember to run two more containers and to
 scale one of them correctly".
+
+### `serve --no-web`
+
+`serve` takes exactly one flag. `--no-web` starts the worker fleet and the
+scheduler, and not the web process — for a host that is only here for the
+model. It is the same fleet, the same supervisor, and the same shutdown path;
+the only differences are the missing `web` child, and that the container no
+longer ends when the web process does, so SIGTERM is what stops it.
+
+Two rules keep the mode honest rather than a footgun:
+
+- It **still owns the fleet**, so it is entitled to run the boot sweep (§6.2).
+  That entitlement is the entrypoint's to grant, because the entrypoint is what
+  knows whether it started workers — which is also why the flag is *not* part of
+  the compose env contract: services share an environment anchor, so a
+  compose-supplied `TASKLOOM_FLEET_OWNER` would be handed to the one-shot
+  `migrate` service too, the exact process the gate exists to exclude.
+- It **refuses to supervise nothing**: `--no-web` with no llm workers, no tool
+  workers and no scheduler exits with an error rather than holding a container
+  open that looks healthy and does nothing.
+
+Anything else after `serve` is refused by name, not ignored — a typo that
+silently drops the web process, or silently keeps it, is the quiet wrongness
+the rest of this script refuses.
 
 ## Why the entrypoint, and not a supervisor daemon
 
@@ -52,9 +76,20 @@ warm cache          cache:warmup            (prod only — needs injected secret
 env contract        lint:container --resolve-env-vars
 migrate (optional)  TASKLOOM_MIGRATE_ON_BOOT=1
 schema gate         doctrine:migrations:up-to-date   → refuses to start the fleet
+boot recovery       app:run:requeue --startup (fleet-owner only; see §6.2)
 catalog sync        app:catalog:sync        (non-fatal — a down server never blocks boot)
 fleet               web + N llm + M tools + scheduler (unless TASKLOOM_SCHEDULER_ENABLED=0)
 ```
+
+**The boot recovery step has one ordering requirement, and it is not
+negotiable: it runs before any worker starts.** Both of its halves depend on
+it. The reap is only sound while no worker exists — once one is consuming, a
+claim it takes is indistinguishable from a claim a corpse left, and only the
+staleness window separates them. And the requeue must precede the spawn,
+because a run sitting owed on a lane no consumer has reached yet is precisely
+the state it is repairing. A clean stop needs neither half (workers finish
+their message and release), so on the ordinary path it reports zero and moves
+on.
 
 Two of those deserve their reasoning written down:
 
@@ -96,15 +131,34 @@ manually — the schema gate tells you exactly which.
 `docker stop` → tini forwards SIGTERM → the entrypoint stops the fleet:
 
 1. SIGTERM to every child. A Messenger worker finishes the message it is
-   processing, then exits — a run is never abandoned mid-turn.
+   processing, then exits — see the arithmetic warning below.
 2. If children are still alive after `TASKLOOM_SHUTDOWN_TIMEOUT` (default
    30s), SIGKILL, and the container reports the escalation.
+
+**The arithmetic is the thing to get right.** A Messenger worker's SIGTERM
+handler only sets a flag; the worker loop checks it *after* `handleMessage()`
+returns. So "finish the message it is processing" means up to one whole turn —
+and a turn is one blocking LLM request bounded by `TASKLOOM_LLM_TIMEOUT`
+(default 300s), not by the shutdown window. With the defaults, a stop during a
+model call escalates to SIGKILL, which kills the socket mid-request, which the
+engine reads as a transport failure and commits as a *terminal* run failure.
+
+Stopping is therefore safe for the state machine — but it is not free, and the
+fix (abort the turn instead of killing it) is designed in
+`docs/design/GRACEFUL_RESTART.md`. Until that lands, the practical guidance is
+the relation itself: keep `TASKLOOM_SHUTDOWN_TIMEOUT` and compose's
+`stop_grace_period` above the turns you expect, and prefer stopping when the
+queue is quiet. Nothing is corrupted either way — a failure is recorded and the
+run is recoverable from its page — but a healthy task can end up in the
+attention queue because you restarted a container.
 
 `stop_grace_period` in the compose files is set **above** that window (60s),
 or Docker would SIGKILL the fleet before the graceful path ever ran. A second
 SIGTERM skips the wait. A worker stopped this way leaves a claim behind, which
 the engine's staleness window (`CLAIM_STALE_SECONDS`) and `app:run:requeue`
-already handle — stopping is safe at any point in a run.
+already handle — stopping is safe at any point in a run. When the stop was a
+*restart*, the boot sweep (§6.2) does not have to wait out that window: the
+fleet being restarted is the reason the claim is known dead.
 
 ## What this deliberately is not
 

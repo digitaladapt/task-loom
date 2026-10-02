@@ -76,6 +76,31 @@ changes stay an explicit step, they are simply wired for you). `TASKLOOM_LLM_MAX
 is the number of llm workers the container runs, so there is nothing to scale
 by hand. See [docs/design/SINGLE_CONTAINER_RUNTIME.md](docs/design/SINGLE_CONTAINER_RUNTIME.md).
 
+`serve --no-web` runs the worker fleet and the scheduler without the web
+process, for a host that is only there for the model.
+
+### Restarts
+
+A clean stop (`docker stop`) is safe: workers finish the message they are
+processing and release their claims. The one thing to know is the arithmetic —
+a worker's SIGTERM handler only sets a flag, so "finish the message" means up to
+one whole turn, bounded by `TASKLOOM_LLM_TIMEOUT` (default 300s) rather than by
+the shutdown window. Stop during a model call with the defaults and the
+container escalates to SIGKILL; the run is recorded as failed and shows up in
+the attention queue, but nothing is corrupted and it is recoverable from its
+page. Keep `TASKLOOM_SHUTDOWN_TIMEOUT` and compose's `stop_grace_period` above
+the turns you expect, and prefer stopping when the queue is quiet. (Aborting
+the turn instead of killing it is designed in
+[docs/design/GRACEFUL_RESTART.md](docs/design/GRACEFUL_RESTART.md).)
+
+Starting up is where recovery is automatic. A fleet that was *killed* rather
+than stopped leaves execution claims behind; the entrypoint clears the
+abandoned ones at boot and re-dispatches what those runs are owed, so a restart
+does not cost the one-hour staleness window (SPEC §6.2). Only the process that
+starts the workers is allowed to do it — `TASKLOOM_FLEET_OWNER`, set by the
+entrypoint itself and deliberately not a compose knob, because compose services
+share an environment and the one-shot `migrate` service must never inherit it.
+
 ## Authoring tasks
 
 Tasks are authored in the admin UI: **New task** from the task list, or **Edit

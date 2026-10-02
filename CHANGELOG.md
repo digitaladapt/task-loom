@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Boot recovery: a restart no longer costs an hour of recovery latency**
+  (SPEC §6.2). A fleet that is *killed* rather than *stopped* — SIGKILL, OOM,
+  power loss, or the shutdown-window escalation described in
+  `SINGLE_CONTAINER_RUNTIME.md` — leaves execution claims behind that no
+  process will ever release. The engine's answer was the staleness window
+  (`CLAIM_STALE_SECONDS`, one hour): always safe, and an hour of a run sitting
+  idle. At boot there is a better answer, because the process that holds the
+  claim is *known* to be gone — the fleet that ran it is the fleet being
+  restarted.
+
+  `app:run:requeue --startup` clears the abandoned claims and then re-derives
+  and dispatches what those runs are owed. The container's `serve` path runs it
+  after the schema gate and **before any worker starts**, and the ordering is
+  load-bearing in both directions: the reap is only sound while no worker
+  exists (once one is consuming, its claim is indistinguishable from a
+  corpse's), and the requeue must precede the spawn (a run owed on a lane no
+  consumer has reached is the state being repaired). On the ordinary path — a
+  clean stop, where workers finish their message and release — it reports zero
+  and moves on.
+
+  **The authority is granted, not inferred.** "We are booting, so nobody can be
+  working" is a statement about a process group, not about the run table, and
+  this repo already ships a process that would be wrong about it: the one-shot
+  `migrate` service. So the reap happens only when the entrypoint's `serve`
+  path sets `TASKLOOM_FLEET_OWNER=1`; everyone else — the migrate service, an
+  ad-hoc console command, a UI-only deployment sharing a database with a host
+  still running workers — does nothing and says so. An unrecognized value fails
+  closed *and is reported*, because a deployment must not be able to believe a
+  sweep is armed when a typo disarmed it.
+
+  The reap deliberately adopts the engine's own definition of abandoned (the
+  same `CLAIM_STALE_SECONDS` window) rather than a second one, so a live
+  worker's fresh claim is as safe from the boot sweep as from an ordinary
+  takeover. Idempotent by construction — every dispatch is work committed state
+  already implies — so it runs on every start.
+
+- **`serve --no-web`** — the worker fleet and the scheduler without the web
+  process, for a host that is only there for the model. Same fleet, same
+  supervisor, same shutdown path; it still owns the fleet (so it may run the
+  boot sweep) and it refuses to start if that would leave it supervising
+  nothing. Any other argument after `serve` is refused by name rather than
+  ignored. See `docs/design/SINGLE_CONTAINER_RUNTIME.md`.
+
 ### Fixed
 
 - **A tool call the model repeats inside one turn is dispatched once**
