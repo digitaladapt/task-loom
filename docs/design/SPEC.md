@@ -304,8 +304,8 @@ the recovery latency.
 
 One situation justifies shortcutting that window: the process that owns the
 claim is *known* to be gone, because the process group that ran it is being
-restarted. `app:run:requeue --startup` clears claims older than the staleness
-window and then re-derives and dispatches what those runs are owed.
+restarted. `app:run:requeue --startup` clears those claims and then re-derives
+and dispatches what those runs are owed.
 
 **The authority is granted, not inferred.** "We are booting, so no worker can
 be alive" is a statement about a process group, not about the run table, and
@@ -317,20 +317,47 @@ starts workers — sets `TASKLOOM_FLEET_OWNER=1`. An unrecognized value fails
 closed and is reported; a process that is not the owner does nothing and says
 so.
 
-Two properties make this safe rather than merely convenient:
+**The decision is made on identity, not on age** — and this is a correction to
+this section's first version, which is worth keeping because the mistake was
+subtle and the field found it within a day.
 
-- **It reaps only what the engine already calls abandoned** — the same
-  `CLAIM_STALE_SECONDS` window, not a second definition. A live worker's claim
-  is as safe from the boot sweep as from an ordinary takeover.
-- **It is idempotent.** Every dispatch is work committed state already
-  implies, and the claim plus state checks make a duplicate a no-op, so the
-  sweep can run on every start.
+That version inferred abandonment from claim age, reusing
+`CLAIM_STALE_SECONDS`, which is *safe* but is not the rule this situation
+needs: a container `down`'d and `up`'d inside a minute leaves claims seconds
+old. The sweep cleared nothing (`0 cleared, 2 left held`), the requeue beside
+it re-derived the owed turns correctly and dispatched them, and every one of
+those messages was dropped on arrival — `claim()` requires the same hour to
+take over, so the re-dispatched work bounced off a lock nobody would release
+for another 59 minutes. Recovery that looked like recovery and did nothing.
 
-The follow-up this deliberately does not build: a *worker heartbeat*, which is
-the honest mechanism for claims held by a fleet that is still running
-elsewhere — a claim is reapable when its claimant is not alive **and** the
-claim is not fresh. The design note (`docs/design/GRACEFUL_RESTART.md`) records
-it; nothing in v1.x depends on it.
+What was missing was never recency. It was **identity**: the dead owner and the
+living one were indistinguishable because nothing recorded *whose* claim it
+was. So `run.claim_fleet` records it, and the entrypoint issues a fresh
+`TASKLOOM_FLEET_ID` on every container start. A claim stamped with the previous
+start's id is provably a dead predecessor's, and can be cleared the instant the
+container returns — seconds later, or on another host. Three counts are now
+reported separately because they call for different actions:
+
+| Claim's recorded owner | Meaning | Action |
+|---|---|---|
+| this fleet's id | my dead predecessor | **cleared** |
+| another fleet's id | usually a live fleet elsewhere (a workers-only host beside a UI) | left to the lease |
+| none (legacy row, or a claim by a process with no fleet — a one-shot `app:run:now`) | nothing is proven | left to the lease |
+
+"When in doubt, do nothing" is the safety argument: every uncertainty resolves
+to the lease, and the lease cannot be wrong. Clearing a live fleet's claim
+would hand one run to two workers; declining a dead one costs time.
+
+Two further properties: the sweep is **idempotent** (every dispatch is work
+committed state already implies, so it can run on every start), and the flag
+and the identity are deliberately **not** part of the compose env contract —
+services share an environment anchor, so a compose-supplied owner flag would be
+handed to the one-shot `migrate` service, and a compose-supplied identity would
+be the *same* for every restart, which is precisely what must differ.
+
+The follow-up this still does not build: a *worker heartbeat*, the honest
+mechanism for a claim held by a fleet that is genuinely alive elsewhere. The
+lease covers that case safely today. See `docs/design/GRACEFUL_RESTART.md`.
 
 ---
 

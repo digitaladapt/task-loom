@@ -7,33 +7,57 @@ namespace App\RunEngine;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
- * Clears execution claims whose owner is known to be gone (SPEC §6.2).
+ * Clears execution claims held by the fleet this process is replacing
+ * (SPEC §6.2).
  *
- * The engine's claim is a lease, not a lock: a claim abandoned by a dead
- * worker is taken over after RunEngine::CLAIM_STALE_SECONDS. That lease is
- * the right *general* answer — it needs no coordination, and it cannot be
- * wrong. It is the wrong answer in exactly one situation: when the process
- * that owns the claim is provably gone, waiting an hour to notice is an hour
- * of work that is already committable.
+ * ## What the first cut got wrong
  *
- * Boot is that situation, and only when the booting process group owns the
- * fleet — see FleetOwnership for why "I am running" is not sufficient, and
- * why the authority is granted rather than assumed.
+ * It inferred "abandoned" from claim age, reusing the engine's
+ * CLAIM_STALE_SECONDS lease. That is the conservative rule and it is always
+ * *safe* — but it is not the rule this situation needs, and the field proved it
+ * within a day: a container `down`'d and `up`'d inside a minute leaves claims
+ * seconds old. The sweep reported "cleared 0, 2 left held (still fresh)",
+ * requeue then correctly re-dispatched the owed turns, and every one of those
+ * messages was dropped on arrival — because taking over a claim requires the
+ * same hour, so the re-dispatched work hit a lock nobody would release for
+ * another 59 minutes. Recovery that looked like recovery and did nothing.
  *
- * **What this does and does not do.** It clears `claimed_at`, which is the
- * whole of the claim's liveness; it does not touch `status`, `step_count`,
- * the checkpoint, or anything else the interrupted turn committed — because
- * a turn commits nothing until it returns, so the committed state is already
- * the state the work should resume from. Reaping is the *enabling* half;
- * re-deriving and re-dispatching the owed work is `app:run:requeue`'s job
- * (RunRequeueCommand), and the two are meant to run in that order.
+ * The missing fact was never age. It was **identity**: the dead owner and the
+ * living one were indistinguishable because nobody had asked *whose* claim it
+ * was.
  *
- * `lock_version` is incremented rather than left alone, for the same reason
- * the engine's own takeover increments it: it is the ownership token. A
- * worker that held the claim before the restart must not be able to clear a
- * successor's claim with a token that still matches. (It cannot: a dead
- * worker does not write again. The increment is defence in depth, and it
- * keeps "a claim changed hands" visible in the one column that records it.)
+ * ## The rule now
+ *
+ * A claim is cleared when its recorded owner is the fleet id this process was
+ * started with — see FleetId, and the entrypoint that issues one per container
+ * start. "My predecessor's claim" is a fact about identity, so it does not
+ * depend on the clock at all: it holds whether the fleet died ten seconds or
+ * ten hours ago, and whether the container came back on the same host or a
+ * different one.
+ *
+ * ## What it still refuses to touch
+ *
+ * - **A claim from another fleet.** That fleet may be running this very second
+ *   (a workers-only host beside a UI, sharing one database). Not abandoned,
+ *   however old it looks. It keeps the lease.
+ * - **A claim with no fleet recorded** — a legacy row, or a turn taken by a
+ *   process that has no fleet identity at all (a one-shot `app:run:now` in a
+ *   terminal). Nothing is proven about it, so nothing is done to it: the lease
+ *   handles it, slowly and safely. This is the case that makes `claim_fleet`
+ *   nullable rather than defaulted.
+ *
+ * "When in doubt, do nothing" is the whole safety argument. Every uncertainty
+ * resolves to the lease, and the lease cannot be wrong.
+ *
+ * ## What it does not do
+ *
+ * It clears `claimed_at` and the fleet stamp, and bumps `lock_version` (the
+ * ownership token — a predecessor that somehow came back must not be able to
+ * clear a successor's claim). It does not touch `status`, `step_count`, the
+ * checkpoint, or anything else the interrupted turn committed, because a turn
+ * commits nothing until it returns: the committed state is already where the
+ * work resumes from. Enabling the re-delivery is this class's job; deriving and
+ * dispatching the owed work is `app:run:requeue`'s.
  */
 final readonly class ClaimReaper
 {
@@ -42,49 +66,67 @@ final readonly class ClaimReaper
     }
 
     /**
-     * Clear every claim older than the staleness window — i.e. adopt the
-     * engine's own definition of "abandoned" instead of inventing a second
-     * one.
-     *
-     * A fresh claim is deliberately left alone. Boot normally means no worker
-     * is alive, but the same command is reachable from an operator, and the
-     * transition is not instantaneous: a run-now in flight, or a worker
-     * recycling on its --time-limit, can hold a claim while a sweep runs. The
-     * lease makes that case safe by construction rather than by luck.
+     * Clear every claim this fleet's predecessor left behind.
      *
      * @return int the number of claims cleared
      */
     public function reap(): int
     {
+        $fleet = FleetId::current();
+
+        if (null === $fleet) {
+            // Not a fleet: nothing is provably abandoned, so nothing is
+            // cleared. Refusing here rather than at the caller keeps the
+            // guarantee in one place — reap() can never clear a claim it
+            // cannot attribute.
+            return 0;
+        }
+
         return $this->em->getConnection()->executeStatement(
-            'UPDATE run SET lock_version = lock_version + 1, claimed_at = NULL WHERE claimed_at IS NOT NULL AND claimed_at <= :staleBefore',
-            ['staleBefore' => time() - RunEngine::CLAIM_STALE_SECONDS],
+            'UPDATE run SET lock_version = lock_version + 1, claimed_at = NULL, claim_fleet = NULL WHERE claimed_at IS NOT NULL AND claim_fleet = :fleet',
+            ['fleet' => $fleet],
         );
     }
 
     /**
-     * What reap() would clear, for --dry-run and for reporting.
+     * What reap() would clear, and what it deliberately will not.
      *
-     * @return array{reapable: int, held: int} reapable = past the window, held = claimed but still fresh
+     * The three counts are separated because they mean different things to the
+     * operator reading the boot log: `stale` is work waiting on the engine's
+     * lease (a foreign fleet, or a claim with no recorded owner), while
+     * `foreign` is *usually* a live fleet elsewhere — no action, but silently
+     * lumping it in with "stale" is how you spend an afternoon wondering why
+     * the sweep keeps declining to act.
+     *
+     * @return array{mine: int, foreign: int, unowned: int}
      */
     public function survey(): array
     {
         $connection = $this->em->getConnection();
-        $staleBefore = time() - RunEngine::CLAIM_STALE_SECONDS;
+        $fleet = FleetId::current();
 
-        $reapable = $connection->fetchOne(
-            'SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claimed_at <= :staleBefore',
-            ['staleBefore' => $staleBefore],
-        );
-
-        $held = $connection->fetchOne(
-            'SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claimed_at > :staleBefore',
-            ['staleBefore' => $staleBefore],
+        $mine = null === $fleet ? 0 : $connection->fetchOne(
+            'SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claim_fleet = :fleet',
+            ['fleet' => $fleet],
         );
 
         return [
-            'reapable' => \is_numeric($reapable) ? (int) $reapable : 0,
-            'held' => \is_numeric($held) ? (int) $held : 0,
+            'mine' => \is_numeric($mine) ? (int) $mine : 0,
+            'foreign' => $this->count(
+                'SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claim_fleet IS NOT NULL AND claim_fleet != :fleet',
+                ['fleet' => $fleet ?? ''],
+            ),
+            'unowned' => $this->count('SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claim_fleet IS NULL'),
         ];
+    }
+
+    /**
+     * @param array<string, mixed> $params
+     */
+    private function count(string $sql, array $params = []): int
+    {
+        $value = $this->em->getConnection()->fetchOne($sql, $params);
+
+        return \is_numeric($value) ? (int) $value : 0;
     }
 }

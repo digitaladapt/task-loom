@@ -8,6 +8,7 @@ use App\Entity\Run;
 use App\Entity\RunRole;
 use App\Repository\RunRepository;
 use App\RunEngine\ClaimReaper;
+use App\RunEngine\FleetId;
 use App\RunEngine\FleetOwnership;
 use App\RunEngine\RunEngine;
 use App\RunEngine\RunGraph;
@@ -168,26 +169,48 @@ final class RunRequeueCommand extends Command
             return false;
         }
 
+        $mine = FleetId::current();
+
+        if (null === $mine) {
+            // A fleet owner with no fleet id: nothing can be attributed, so
+            // nothing can be cleared. Refusing loudly is the point — silently
+            // sweeping zero is exactly how the first cut of this feature looked
+            // like it worked.
+            $output->writeln(\sprintf(
+                '<comment>Fleet owner with no %s set — no claim can be attributed to this fleet, so none is swept.</comment>',
+                FleetId::ENV,
+            ));
+        }
+
         $survey = $this->reaper->survey();
         $reaped = $dryRun ? 0 : $this->reaper->reap();
 
         if (!$dryRun) {
-            $this->logger->info('Boot sweep cleared {reaped} abandoned execution claim(s); {held} left held.', [
+            $this->logger->info('Boot sweep cleared {reaped} claim(s) left by this fleet; {foreign} held by another fleet, {unowned} with no owner recorded.', [
                 'reaped' => $reaped,
-                'held' => $survey['held'],
+                'fleet' => $mine,
+                'foreign' => $survey['foreign'],
+                'unowned' => $survey['unowned'],
             ]);
         }
 
+        // The three counts are reported separately because they need different
+        // actions, and lumping them together is how a boot log reads as "all
+        // clear" while a run sits stuck. Cleared = repaired. Foreign = almost
+        // always a live fleet elsewhere; no action. Unowned = declines by
+        // design, and waits on the engine's staleness window.
         $output->writeln($dryRun
             ? \sprintf(
-                'Claims: %d would be cleared as abandoned, %d left held (still fresh).',
-                $survey['reapable'],
-                $survey['held'],
+                'Claims: %d would be cleared (left by this fleet), %d held by another fleet, %d with no owner recorded.',
+                $survey['mine'],
+                $survey['foreign'],
+                $survey['unowned'],
             )
             : \sprintf(
-                'Claims: cleared %d abandoned, %d left held (still fresh).',
+                'Claims: cleared %d (left by this fleet), %d held by another fleet, %d with no owner recorded.',
                 $reaped,
-                $survey['held'],
+                $survey['foreign'],
+                $survey['unowned'],
             ));
 
         return true;

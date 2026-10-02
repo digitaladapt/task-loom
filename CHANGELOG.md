@@ -39,11 +39,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closed *and is reported*, because a deployment must not be able to believe a
   sweep is armed when a typo disarmed it.
 
-  The reap deliberately adopts the engine's own definition of abandoned (the
-  same `CLAIM_STALE_SECONDS` window) rather than a second one, so a live
-  worker's fresh claim is as safe from the boot sweep as from an ordinary
-  takeover. Idempotent by construction — every dispatch is work committed state
-  already implies — so it runs on every start.
+  **The sweep decides on identity, not on age.** The first cut inferred
+  "abandoned" from claim age, reusing the engine's `CLAIM_STALE_SECONDS` lease.
+  That is safe, but it is not the rule this situation needs, and a restart
+  inside the hour proved it: the sweep cleared nothing (`0 cleared, 2 left
+  held`), the requeue beside it correctly re-derived and dispatched the owed
+  turns, and every one of those messages was then dropped on arrival — taking
+  over a claim requires the same hour, so the re-dispatched work bounced off a
+  lock nobody would release for another 59 minutes. Recovery that looked like
+  recovery and did nothing.
+
+  What was missing was never recency — it was *identity*. The dead owner and
+  the living one were indistinguishable because nothing recorded whose claim it
+  was, so `run.claim_fleet` now records it and the entrypoint issues a fresh
+  `TASKLOOM_FLEET_ID` on every container start. A claim stamped with the
+  previous start's id is provably a dead predecessor's and is cleared the
+  moment the container comes back — seconds later, or on another host. The boot
+  log now reports three counts separately, because they call for different
+  actions: *cleared* (my predecessor), *held by another fleet* (usually a live
+  fleet elsewhere — a workers-only host beside a UI), and *no owner recorded*
+  (a legacy row, or a claim by a process with no fleet identity, such as a
+  one-shot `app:run:now`). The latter two are left to the engine's lease: when
+  in doubt, do nothing, and the lease cannot be wrong.
+
+  Idempotent by construction — every dispatch is work committed state already
+  implies — so it runs on every start. The `serve` path also stops being silent
+  about the case it cannot act on: a fleet owner with no fleet identity now
+  says so rather than sweeping zero quietly.
+
+  A dropped delivery that *loses a live claim race* is now logged at `warning`
+  rather than `debug`. Under prod's `fingers_crossed` buffering
+  (`action_level: error`) a debug line is discarded, so the boot log could read
+  "3 run(s) requeued" while all three were, in fact, stuck.
 
 - **`serve --no-web`** — the worker fleet and the scheduler without the web
   process, for a host that is only there for the model. Same fleet, same

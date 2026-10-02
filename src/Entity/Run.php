@@ -121,6 +121,19 @@ class Run
     #[ORM\Column(nullable: true)]
     private ?int $claimedAt = null; // @phpstan-ignore property.unusedType (Doctrine hydrates the raw-SQL-written value)
 
+    /**
+     * Which fleet took the claim (SPEC §6.2), or null when the claimant had no
+     * fleet identity. Written via raw SQL alongside claimed_at, and never
+     * flushed, for the same reason lock_version and claimed_at are.
+     *
+     * Its whole purpose is to let boot recovery distinguish "my dead
+     * predecessor's claim" — clear it now — from "another fleet's claim" and
+     * "a claim nobody can account for" — leave them to the lease. Recency
+     * cannot make that distinction; identity can.
+     */
+    #[ORM\Column(length: 32, nullable: true)]
+    private ?string $claimFleet = null; // @phpstan-ignore property.unusedType (Doctrine hydrates the raw-SQL-written value)
+
     /** Terminal error class, when the run failed (SPEC §5.3). */
     #[ORM\Column(length: 32, nullable: true, enumType: ErrorClass::class)]
     private ?ErrorClass $errorClass = null;
@@ -275,6 +288,17 @@ class Run
     public function getLockVersion(): int
     {
         return $this->lockVersion;
+    }
+
+    /**
+     * Which fleet holds this run's claim, or null when the claimant had no
+     * fleet identity (or the run is unclaimed). Read by the admin surface and
+     * by tests; the value itself is written only via raw SQL, like
+     * claimed_at.
+     */
+    public function getClaimFleet(): ?string
+    {
+        return $this->claimFleet;
     }
 
     public function getClaimedAt(): ?int

@@ -94,12 +94,32 @@ the turn instead of killing it is designed in
 [docs/design/GRACEFUL_RESTART.md](docs/design/GRACEFUL_RESTART.md).)
 
 Starting up is where recovery is automatic. A fleet that was *killed* rather
-than stopped leaves execution claims behind; the entrypoint clears the
-abandoned ones at boot and re-dispatches what those runs are owed, so a restart
-does not cost the one-hour staleness window (SPEC §6.2). Only the process that
-starts the workers is allowed to do it — `TASKLOOM_FLEET_OWNER`, set by the
-entrypoint itself and deliberately not a compose knob, because compose services
-share an environment and the one-shot `migrate` service must never inherit it.
+than stopped leaves execution claims behind; the entrypoint clears the ones its
+predecessor left and re-dispatches what those runs are owed, so a restart does
+not cost the one-hour staleness window (SPEC §6.2). The boot log tells you which
+is which:
+
+```
+Claims: cleared 2 (left by this fleet), 0 held by another fleet, 0 with no owner recorded.
+```
+
+- **cleared** — this fleet's own dead predecessor. Repaired now, at any age.
+- **held by another fleet** — usually a live fleet elsewhere (a workers-only host
+  beside a UI, sharing the database). Left alone deliberately: not abandoned,
+  however old it looks.
+- **no owner recorded** — a claim from before this existed, or one taken by a
+  process with no fleet identity (a one-shot `app:run:now` in a terminal).
+  Nothing is proven about it, so nothing is done to it; the engine's lease picks
+  it up after `CLAIM_STALE_SECONDS`.
+
+Only the process that starts the workers may do any of this — `TASKLOOM_FLEET_OWNER`,
+set by the entrypoint itself and deliberately not a compose knob, because compose
+services share an environment and the one-shot `migrate` service must never
+inherit it. For the same reason the fleet's identity (`TASKLOOM_FLEET_ID`) is
+generated per container start rather than configured: a fixed value would be the
+same for every restart, and telling this start's claims from the last one's is
+the whole mechanism. If a start has the owner flag but no identity, it says so
+instead of pretending to sweep.
 
 ## Authoring tasks
 

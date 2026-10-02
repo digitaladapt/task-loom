@@ -304,7 +304,13 @@ final class RunEngine
         // stale by the time the claim is won.
         $token = $this->claim($run);
         if (null === $token) {
-            $this->logger->debug('Run {run}: LlmTurnMessage step {step} lost the claim race; dropping.', ['run' => $runId, 'step' => $step]);
+            // Warning, not debug: a dropped delivery with a *live* claim means
+            // recovery re-dispatched work that could not be taken — the run is
+            // still stuck and the dispatch above was cosmetic. That deserves to
+            // survive fingers_crossed (action_level: error buffers and discards
+            // debug/info), because "requeued" in the boot log otherwise reads
+            // as "fixed".
+            $this->logger->warning('Run {run}: LlmTurnMessage step {step} lost the claim race; dropping. If the claim is not being worked, it is being held by another fleet or awaits the staleness window.', ['run' => $runId, 'step' => $step]);
 
             return RunTurnResult::Stale;
         }
@@ -376,7 +382,7 @@ final class RunEngine
 
         $token = $this->claim($run);
         if (null === $token) {
-            $this->logger->debug('Run {run}: ToolTurnMessage step {step} lost the claim race; dropping.', ['run' => $runId, 'step' => $step]);
+            $this->logger->warning('Run {run}: ToolTurnMessage step {step} lost the claim race; dropping. If the claim is not being worked, it is being held by another fleet or awaits the staleness window.', ['run' => $runId, 'step' => $step]);
 
             return RunTurnResult::Stale;
         }
@@ -978,10 +984,16 @@ final class RunEngine
 
         $now = time();
 
+        // The fleet id is stamped on the claim so boot recovery can ask the
+        // question recency cannot answer: *whose* claim is this? (SPEC §6.2,
+        // App\RunEngine\FleetId). Null for a process with no fleet identity —
+        // a one-shot app:run:now, say — which is why the column is nullable
+        // and why the reaper treats null as "proven nothing, so do nothing".
         $updated = $this->em->getConnection()->executeStatement(
-            'UPDATE run SET lock_version = lock_version + 1, claimed_at = :now WHERE id = :id AND (claimed_at IS NULL OR claimed_at <= :staleBefore)',
+            'UPDATE run SET lock_version = lock_version + 1, claimed_at = :now, claim_fleet = :fleet WHERE id = :id AND (claimed_at IS NULL OR claimed_at <= :staleBefore)',
             [
                 'now' => $now,
+                'fleet' => FleetId::current(),
                 'id' => $id,
                 'staleBefore' => $now - self::CLAIM_STALE_SECONDS,
             ],
@@ -1008,7 +1020,7 @@ final class RunEngine
         }
 
         $this->em->getConnection()->executeStatement(
-            'UPDATE run SET claimed_at = NULL WHERE id = :id AND lock_version = :token',
+            'UPDATE run SET claimed_at = NULL, claim_fleet = NULL WHERE id = :id AND lock_version = :token',
             ['id' => $id, 'token' => $token],
         );
     }
