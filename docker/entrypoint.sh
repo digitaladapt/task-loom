@@ -479,6 +479,21 @@ if [ "$command" = "serve" ]; then
     # as well, which is the exact process this gate exists to exclude.
     export TASKLOOM_FLEET_OWNER=1
 
+    # ...and this is *which* fleet it is. A fresh identity per container start
+    # is what makes the boot sweep work: a claim stamped with the previous
+    # start's id is provably a dead predecessor's, so it can be cleared the
+    # moment the container comes back — seconds later, or on another host —
+    # instead of waiting out CLAIM_STALE_SECONDS. Recency could never decide
+    # that; identity can. The value must therefore never be a fixed
+    # compose-supplied string (every restart would look like the same fleet),
+    # which is another reason it is not in the env contract.
+    #
+    # $RANDOM is fine here: this is an identity, not a secret. Nothing is
+    # authorized by knowing it.
+    # shellcheck disable=SC2155 # a fresh value in one statement; there is no
+    # failing command whose status could be masked (date/$$/$RANDOM cannot fail).
+    export TASKLOOM_FLEET_ID="$(date +%s)-$$-$RANDOM"
+
     WEB_ENABLED=1
     if [ "$SERVE_NO_WEB" = "1" ]; then
         WEB_ENABLED=0

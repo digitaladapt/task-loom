@@ -143,6 +143,84 @@ final class EntrypointSupervisorTest extends TestCase
         self::assertStringContainsString('app:run:requeue --startup --no-interaction [fleet-owner=1]', $this->readPhpLog());
     }
 
+    public function testTheFleetGetsAFreshIdentityOnEveryStart(): void
+    {
+        // This is what makes the boot sweep work rather than merely look like
+        // it does. A claim stamped with the *previous* start's id is provably a
+        // dead predecessor's, so it is cleared the moment the container comes
+        // back — seconds later, or on another host — instead of waiting out
+        // CLAIM_STALE_SECONDS. A stable id (which a compose-supplied value
+        // would be) would make every restart look like the same fleet, and
+        // recency would be all there was to go on again — the bug this fixes.
+        $first = $this->readFleetIdFromServe();
+        $second = $this->readFleetIdFromServe();
+
+        self::assertNotNull($first, 'a fleet-owning process must identify itself');
+        self::assertNotNull($second);
+        self::assertNotSame(
+            $first,
+            $second,
+            'two container starts must be two different fleets, or a restart can never be distinguished from a peer',
+        );
+    }
+
+    public function testAOneShotContainerHasNoFleetIdentity(): void
+    {
+        // No identity means no claim can be attributed to this process, so
+        // nothing is ever swept on its say-so. The belt to the owner gate's
+        // braces.
+        $process = $this->runScript(
+            ['php', 'bin/console', 'app:run:requeue', '--startup'],
+            [],
+            wait: true,
+        );
+
+        self::assertSame(0, $process->getExitCode());
+        self::assertStringContainsString('[fleet-id=unset]', $this->readPhpLog());
+    }
+
+    /**
+     * Start a real `serve`, read the identity it exported, then stop it.
+     *
+     * The wait is on *new* output, and it has to be. These tests share one
+     * sandbox, so the previous start's lines are still in php.log: a
+     * count-based wait ("is there an LLM WORKER up yet?") is satisfied
+     * instantly by the corpse of the last run, and the new process is stopped
+     * before it has done anything at all. That is a bug in the helper, not in
+     * the entrypoint — the same trap the production code avoids by keying on
+     * identity rather than an absolute condition.
+     */
+    private function readFleetIdFromServe(): ?string
+    {
+        $path = $this->sandbox.'/php.log';
+        $before = is_file($path) ? (string) file_get_contents($path) : '';
+        $beforeLength = \strlen($before);
+
+        $process = $this->runScript(['serve'], ['TASKLOOM_LLM_MAX_CONCURRENCY' => '1']);
+
+        try {
+            $this->waitFor(fn (): bool => null !== $this->fleetIdAfter($path, $beforeLength), 15.0);
+        } finally {
+            $this->stopServe($process);
+        }
+
+        return $this->fleetIdAfter($path, $beforeLength);
+    }
+
+    /**
+     * The fleet id in php.log beyond $offset, or null while there is none yet.
+     */
+    private function fleetIdAfter(string $path, int $offset): ?string
+    {
+        if (!is_file($path)) {
+            return null;
+        }
+
+        $added = substr((string) file_get_contents($path), $offset);
+
+        return 1 === preg_match('/fleet-id=([^\]\s]+)/', $added, $matches) ? $matches[1] : null;
+    }
+
     public function testAOneShotContainerIsNotMarkedAsTheFleetOwner(): void
     {
         // The compose `migrate` service, or any console command. It starts no
@@ -155,7 +233,7 @@ final class EntrypointSupervisorTest extends TestCase
         );
 
         self::assertSame(0, $process->getExitCode());
-        self::assertStringContainsString('[fleet-owner=unset]', $this->readPhpLog());
+        self::assertStringContainsString('[fleet-owner=unset] [fleet-id=unset]', $this->readPhpLog());
         self::assertSame(0, $this->countLines('LLM WORKER up'), 'a one-shot container starts no workers');
     }
 
@@ -474,7 +552,7 @@ final class EntrypointSupervisorTest extends TestCase
             # The fleet-owner flag is recorded on every invocation: whether a
             # process is entitled to reap claims is part of the entrypoint's
             # contract, and the only place it is observable is the child env.
-            echo "PHP: $* [fleet-owner=${TASKLOOM_FLEET_OWNER:-unset}]" >> "$SANDBOX/php.log"
+            echo "PHP: $* [fleet-owner=${TASKLOOM_FLEET_OWNER:-unset}] [fleet-id=${TASKLOOM_FLEET_ID:-unset}]" >> "$SANDBOX/php.log"
 
             case "$*" in
                 *"cache:warmup"*) echo "warmed"; exit 0 ;;
