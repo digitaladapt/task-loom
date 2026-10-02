@@ -62,6 +62,15 @@ services:
                 mcp: '@App\Toolbox\McpServerReader'
                 openapi: '@App\Toolbox\OpenApiServerReader'
 
+    # Boot recovery (SPEC §6.2): clears execution claims a fleet that was
+    # killed rather than stopped left behind. Only ever invoked behind the
+    # fleet-owner gate in app:run:requeue --startup — see
+    # App\RunEngine\FleetOwnership for why the authority is granted rather
+    # than assumed.
+    App\RunEngine\ClaimReaper:
+        arguments:
+            $em: '@doctrine.orm.entity_manager'
+
     # Run engine (SPEC §3, §5): loop, prompt compiler, budgets.
     App\Llm\LlmClient:
         arguments:

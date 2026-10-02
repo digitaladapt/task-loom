@@ -69,6 +69,11 @@ PROJECT_DIR="${TASKLOOM_PROJECT_DIR:-/app}"
 
 LLM_WORKERS="${TASKLOOM_LLM_MAX_CONCURRENCY:-1}"
 TOOL_WORKERS="${TASKLOOM_TOOL_MAX_CONCURRENCY:-2}"
+# Whether this fleet includes the web process: decided by the `serve --no-web`
+# argument alone (see the entry gate below), never by a variable — two ways to
+# say one thing is the ambiguity this script avoids elsewhere. 1 is the
+# ordinary single-container shape, where web + workers share one lifecycle.
+WEB_ENABLED=1
 SCHEDULER_ENABLED="${TASKLOOM_SCHEDULER_ENABLED:-1}"
 SCHEDULE_INTERVAL="${TASKLOOM_SCHEDULE_INTERVAL:-60}"
 WORKER_TIME_LIMIT="${TASKLOOM_WORKER_TIME_LIMIT:-3600}"
@@ -312,7 +317,18 @@ spawn() { # label cmd…
 }
 
 spawn_fleet() {
-    spawn web "${WEB_CMD[@]}"
+    # `serve --no-web`: the worker fleet and nothing else. The web process is
+    # what the operator's UI is, and there is no reason a host that is only
+    # here for the model has to run one — but the fleet's shape, the
+    # supervisor, and the shutdown path are identical either way. This mode
+    # still owns the fleet (TASKLOOM_FLEET_OWNER), which is exactly what
+    # makes it allowed to run the boot sweep. See
+    # docs/design/SINGLE_CONTAINER_RUNTIME.md.
+    if [ "$WEB_ENABLED" = "1" ]; then
+        spawn web "${WEB_CMD[@]}"
+    else
+        log "web process disabled (serve --no-web); admin UI and MCP endpoint will not be served"
+    fi
 
     if [ "$LLM_WORKERS" -gt 0 ]; then
         local i
@@ -435,10 +451,40 @@ supervise() {
 cd "$PROJECT_DIR" || die "project directory not found: $PROJECT_DIR"
 
 command="${1:-serve}"
+shift || true
 
 if [ "$command" = "serve" ]; then
-    if [ "$#" -gt 1 ]; then
-        die "serve takes no arguments (got: '$*')"
+    # `serve` takes one optional flag, --no-web: the worker fleet without the
+    # web process, for a host that runs only workers. Anything else is
+    # refused rather than ignored — a typo that silently drops the web
+    # process, or silently keeps it, is the kind of quiet wrongness this
+    # project refuses elsewhere.
+    SERVE_NO_WEB=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --no-web) SERVE_NO_WEB=1 ;;
+            *) die "serve takes no arguments but --no-web (got: '$1')" ;;
+        esac
+        shift
+    done
+
+    # This process group is about to start the worker fleet, which is what
+    # entitles it to clear execution claims a previous fleet left behind
+    # (SPEC §6.2). Exported here and not at the top of the file: the one-shot
+    # path at the bottom must NOT carry it, because a process that starts no
+    # workers has no authority over claims
+    # (App\RunEngine\FleetOwnership). It is deliberately not in the compose
+    # env contract either — services share an environment anchor, so a
+    # compose-supplied flag would be handed to the one-shot `migrate` service
+    # as well, which is the exact process this gate exists to exclude.
+    export TASKLOOM_FLEET_OWNER=1
+
+    WEB_ENABLED=1
+    if [ "$SERVE_NO_WEB" = "1" ]; then
+        WEB_ENABLED=0
+        if [ "$LLM_WORKERS" -eq 0 ] && [ "$TOOL_WORKERS" -eq 0 ] && [ "$SCHEDULER_ENABLED" != "1" ]; then
+            die "serve --no-web with no llm workers, no tool workers and no scheduler would supervise nothing; refusing to start"
+        fi
     fi
 
     warm_cache
@@ -455,6 +501,21 @@ if [ "$command" = "serve" ]; then
     check_schema
     bail_if_stopping
 
+    # Boot recovery (SPEC §6.2), in this order and for a reason: reap what a
+    # fleet that was killed left claimed, then re-dispatch what those runs are
+    # owed. A clean stop needs neither (workers finish their message and
+    # release), so on the ordinary path this reports zero and moves on.
+    #
+    # Both halves must run BEFORE any worker starts. The reap is only sound
+    # while no worker exists — once one is consuming, a claim it takes is
+    # indistinguishable from one a corpse left, and only the staleness window
+    # separates them. The requeue must precede the spawn for the same reason
+    # the fence exists at all: a run sitting owed on a lane no consumer has
+    # reached yet is exactly the state being repaired.
+    php bin/console app:run:requeue --startup --no-interaction \
+        || log "warning: boot sweep reported failures; the fleet is starting anyway"
+    bail_if_stopping
+
     sync_catalog
     bail_if_stopping
 
@@ -468,13 +529,20 @@ if [ "$command" = "serve" ]; then
         stop_children
     fi
 
-    log "running: web + ${LLM_WORKERS} llm worker(s) + ${TOOL_WORKERS} tools worker(s); send TERM to stop"
+    if [ "$WEB_ENABLED" = "1" ]; then
+        log "running: web + ${LLM_WORKERS} llm worker(s) + ${TOOL_WORKERS} tools worker(s); send TERM to stop"
+    else
+        log "running: ${LLM_WORKERS} llm worker(s) + ${TOOL_WORKERS} tools worker(s), no web; send TERM to stop"
+    fi
     supervise
     exit $?
 fi
 
 # Anything else: a one-shot command (migrate, console, …). Warm the cache
-# exactly as before, then hand over — no fleet, no supervision.
+# exactly as before, then hand over — no fleet, no supervision. The command
+# name was shifted off the argument list to parse the serve flags, so it is
+# put back here: this path must hand the process its argv verbatim, including
+# the fact that it starts no workers and therefore owns no fleet.
 warm_cache
-log "exec: $*"
-exec "$@"
+log "exec: $command $*"
+exec "$command" "$@"

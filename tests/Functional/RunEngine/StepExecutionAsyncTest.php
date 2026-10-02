@@ -26,6 +26,7 @@ use App\Message\LlmTurnMessage;
 use App\Repository\RunRepository;
 use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
+use App\RunEngine\ClaimReaper;
 use App\RunEngine\PromptCompiler;
 use App\RunEngine\RunEngine;
 use App\RunEngine\RunGraph;
@@ -299,6 +300,8 @@ final class StepExecutionAsyncTest extends KernelTestCase
             $this->engine,
             $this->bus(),
             static::getContainer()->get(RunGraph::class),
+            static::getContainer()->get(ClaimReaper::class),
+            new NullLogger(),
         ));
         $tester->execute([]);
 
@@ -627,6 +630,8 @@ final class StepExecutionAsyncTest extends KernelTestCase
             $this->engine,
             $this->bus(),
             static::getContainer()->get(RunGraph::class),
+            static::getContainer()->get(ClaimReaper::class),
+            new NullLogger(),
         ));
 
         // Dry run: reports the owed step; creates nothing.

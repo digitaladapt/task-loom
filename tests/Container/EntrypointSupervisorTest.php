@@ -69,6 +69,96 @@ final class EntrypointSupervisorTest extends TestCase
         self::assertSame(1, $this->countLines('WEB up', 'web.log'), 'the web process runs alongside the workers');
     }
 
+    public function testServeNoWebRunsTheFleetWithoutTheWebProcess(): void
+    {
+        $process = $this->runScript(['serve', '--no-web'], [
+            'TASKLOOM_LLM_MAX_CONCURRENCY' => '2',
+            'TASKLOOM_TOOL_MAX_CONCURRENCY' => '1',
+        ]);
+
+        try {
+            $this->waitFor(fn (): bool => 2 === $this->countLines('LLM WORKER up'));
+            usleep(300_000);
+        } finally {
+            $this->stopServe($process);
+        }
+
+        self::assertSame(0, $this->countLines('WEB up', 'web.log'), '--no-web must not start the web process');
+        self::assertSame(2, $this->countLines('LLM WORKER up'), 'the workers are the point of this mode');
+        self::assertSame(1, $this->countLines('TOOLS WORKER up'));
+        self::assertStringContainsString('no web', $process->getErrorOutput());
+    }
+
+    public function testServeNoWebRefusesToSuperviseNothing(): void
+    {
+        // The mode exists to run workers. With no workers and no scheduler it
+        // would hold the container open doing exactly nothing, which is the
+        // kind of quiet no-op that looks like success from the outside.
+        $process = $this->runServeToCompletion([
+            'TASKLOOM_LLM_MAX_CONCURRENCY' => '0',
+            'TASKLOOM_TOOL_MAX_CONCURRENCY' => '0',
+            'TASKLOOM_SCHEDULER_ENABLED' => '0',
+        ], ['serve', '--no-web']);
+
+        self::assertSame(2, $process->getExitCode());
+        self::assertStringContainsString('would supervise nothing', $process->getErrorOutput());
+        self::assertSame(0, $this->countLines('WEB up', 'web.log'));
+    }
+
+    public function testBootSweepRunsBeforeAnyWorkerStarts(): void
+    {
+        // Order is the whole correctness argument (SPEC §6.2): the reap is only
+        // sound while no worker exists, and the requeue must precede the spawn
+        // or it dispatches onto a lane nobody has reached yet.
+        $process = $this->startServe(['TASKLOOM_LLM_MAX_CONCURRENCY' => '1']);
+
+        try {
+            $this->waitFor(fn (): bool => 1 === $this->countLines('LLM WORKER up'));
+        } finally {
+            $this->stopServe($process);
+        }
+
+        $log = $this->readPhpLog();
+        self::assertStringContainsString('app:run:requeue --startup', $log);
+
+        $sweep = strpos($log, 'app:run:requeue --startup');
+        $firstWorker = strpos($log, 'messenger:consume llm');
+        self::assertNotFalse($sweep);
+        self::assertNotFalse($firstWorker, 'the fleet must start at all');
+        self::assertLessThan($firstWorker, $sweep, 'the boot sweep must complete before the first worker consumes');
+    }
+
+    public function testTheFleetOwningProcessGroupIsMarkedAsSuch(): void
+    {
+        // This is the authority the sweep is gated on: set for the process
+        // that starts workers, and handed to the children too.
+        $process = $this->startServe(['TASKLOOM_LLM_MAX_CONCURRENCY' => '1']);
+
+        try {
+            $this->waitFor(fn (): bool => 1 === $this->countLines('LLM WORKER up'));
+        } finally {
+            $this->stopServe($process);
+        }
+
+        self::assertStringContainsString('app:run:requeue --startup --no-interaction [fleet-owner=1]', $this->readPhpLog());
+    }
+
+    public function testAOneShotContainerIsNotMarkedAsTheFleetOwner(): void
+    {
+        // The compose `migrate` service, or any console command. It starts no
+        // workers, so it has no authority over another process's claims — and
+        // the flag must be absent from its environment, not merely unused.
+        $process = $this->runScript(
+            ['php', 'bin/console', 'app:run:requeue', '--startup'],
+            [],
+            wait: true,
+        );
+
+        self::assertSame(0, $process->getExitCode());
+        self::assertStringContainsString('[fleet-owner=unset]', $this->readPhpLog());
+        self::assertSame(0, $this->countLines('LLM WORKER up'), 'a one-shot container starts no workers');
+    }
+
     public function testSchedulerDaemonIsDisabledByTheKnob(): void
     {
         $process = $this->startServe([
@@ -281,10 +371,14 @@ final class EntrypointSupervisorTest extends TestCase
 
     public function testUnknownServeArgumentIsRefused(): void
     {
+        // A typo in a flag must not be ignored: silently keeping the web
+        // process, or silently dropping it, is the quiet wrongness the rest of
+        // this script refuses.
         $process = $this->runScript(['serve', 'something'], [], wait: true);
 
         self::assertSame(2, $process->getExitCode());
-        self::assertStringContainsString('serve takes no arguments', $process->getErrorOutput());
+        self::assertStringContainsString('serve takes no arguments but --no-web', $process->getErrorOutput());
+        self::assertSame(0, $this->countLines('LLM WORKER up'), 'nothing starts on a refused argument');
     }
 
     public function testAnyOtherCommandIsExecutedAsAOneShot(): void
@@ -318,9 +412,13 @@ final class EntrypointSupervisorTest extends TestCase
      *
      * @param array<string, string> $env
      */
-    private function runServeToCompletion(array $env): Process
+    /**
+     * @param array<string, string> $env
+     * @param list<string>          $arguments
+     */
+    private function runServeToCompletion(array $env, array $arguments = ['serve']): Process
     {
-        $process = $this->runScript(['serve'], $env);
+        $process = $this->runScript($arguments, $env);
         $process->wait();
 
         return $process;
@@ -373,7 +471,10 @@ final class EntrypointSupervisorTest extends TestCase
     {
         $this->write($this->bin.'/php', <<<'SH'
             #!/usr/bin/env bash
-            echo "PHP: $*" >> "$SANDBOX/php.log"
+            # The fleet-owner flag is recorded on every invocation: whether a
+            # process is entitled to reap claims is part of the entrypoint's
+            # contract, and the only place it is observable is the child env.
+            echo "PHP: $* [fleet-owner=${TASKLOOM_FLEET_OWNER:-unset}]" >> "$SANDBOX/php.log"
 
             case "$*" in
                 *"cache:warmup"*) echo "warmed"; exit 0 ;;
@@ -390,6 +491,7 @@ final class EntrypointSupervisorTest extends TestCase
                     exit "${STUB_SCHEMA_RC:-0}" ;;
                 *"migrations:migrate"*) echo "migrated"; exit 0 ;;
                 *"catalog:sync"*) echo "synced"; exit 0 ;;
+                *"app:run:requeue"*) echo "requeued"; exit 0 ;;
                 *"messenger:consume llm"*)
                     echo "LLM WORKER up" >> "$SANDBOX/worker.log"
                     trap 'echo "LLM WORKER got TERM" >> "$SANDBOX/worker.log"; exit 0' TERM

@@ -23,6 +23,7 @@ use App\Message\LlmTurnMessage;
 use App\Message\ToolTurnMessage;
 use App\Repository\RunRepository;
 use App\Repository\TaskRepository;
+use App\RunEngine\ClaimReaper;
 use App\RunEngine\PromptCompiler;
 use App\RunEngine\RunEngine;
 use App\RunEngine\RunGraph;
@@ -278,6 +279,8 @@ final class RunEngineAsyncFlowTest extends KernelTestCase
             $this->engine,
             $this->bus(),
             static::getContainer()->get(RunGraph::class),
+            static::getContainer()->get(ClaimReaper::class),
+            new NullLogger(),
         ));
 
         // Dry run first: reports, dispatches nothing.

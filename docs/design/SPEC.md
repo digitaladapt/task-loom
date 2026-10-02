@@ -292,6 +292,46 @@ the full, honest record — only what's sent to the model is trimmed.
   run engine) is what makes duplicate deliveries and dying workers safe
   regardless of how many workers exist.
 
+### 6.1 The claim is a lease, not a lock
+
+The execution claim (`run.lock_version` / `run.claimed_at`) is a lease with a
+staleness window (`CLAIM_STALE_SECONDS`). A claim abandoned by a worker that
+died is taken over after that window — no coordination needed, and it cannot
+be wrong, because waiting is always safe. The cost is that the window is also
+the recovery latency.
+
+### 6.2 Boot recovery — the reap, and who may do it
+
+One situation justifies shortcutting that window: the process that owns the
+claim is *known* to be gone, because the process group that ran it is being
+restarted. `app:run:requeue --startup` clears claims older than the staleness
+window and then re-derives and dispatches what those runs are owed.
+
+**The authority is granted, not inferred.** "We are booting, so no worker can
+be alive" is a statement about a process group, not about the run table, and
+this repo already ships two ways to be wrong about it: the one-shot `migrate`
+service, which never touches the run table, and any deployment whose workers
+and web interface are separate process groups sharing one database. So the
+reap happens only when the entrypoint's `serve` path — the only path that
+starts workers — sets `TASKLOOM_FLEET_OWNER=1`. An unrecognized value fails
+closed and is reported; a process that is not the owner does nothing and says
+so.
+
+Two properties make this safe rather than merely convenient:
+
+- **It reaps only what the engine already calls abandoned** — the same
+  `CLAIM_STALE_SECONDS` window, not a second definition. A live worker's claim
+  is as safe from the boot sweep as from an ordinary takeover.
+- **It is idempotent.** Every dispatch is work committed state already
+  implies, and the claim plus state checks make a duplicate a no-op, so the
+  sweep can run on every start.
+
+The follow-up this deliberately does not build: a *worker heartbeat*, which is
+the honest mechanism for claims held by a fleet that is still running
+elsewhere — a claim is reapable when its claimant is not alive **and** the
+claim is not fresh. The design note (`docs/design/GRACEFUL_RESTART.md`) records
+it; nothing in v1.x depends on it.
+
 ---
 
 ## 7. Data model (v1)

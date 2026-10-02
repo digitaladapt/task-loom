@@ -1,7 +1,15 @@
 # Graceful restart and preemption — design note
 
-**Status:** proposed · **Scope:** SPEC §6, §6.1, §13.3 · the turn model, the
-claim protocol, and the container's stop path
+**Status:** proposed · **Build order 1 shipped** (`app:run:requeue --startup`,
+SPEC §6.2) · **Scope:** SPEC §6, §6.1, §13.3 · the turn model, the claim
+protocol, and the container's stop path
+
+> **Where this stands.** Step 1 of the build order below is implemented: the
+> fleet-owner gate, the claim reap, and the boot wiring — see SPEC §6.2 and
+> `SINGLE_CONTAINER_RUNTIME.md`. Steps 2–5 (the stop flag, the request abort,
+> the `Preempted` turn result, the boot pre-flight) are not built. Per the
+> project's rule that the doc lands before the code, the design below is
+> unchanged from the proposal; only this header tracks what is real.
 
 **Companion to:** `SINGLE_CONTAINER_RUNTIME.md` (this document revises its
 "Shutdown" section) · `SPEC.md` §6 (this document adds §6.2)
@@ -399,8 +407,17 @@ test.
 
 ## Build order
 
-1. **S4 scoping, standalone.** `app:run:requeue --startup`, fleet-owner gated,
-   tested both ways. Correct without any of the rest.
+1. ~~**S4 scoping, standalone.** `app:run:requeue --startup`, fleet-owner gated,
+   tested both ways. Correct without any of the rest.~~ **Shipped.**
+   `App\RunEngine\ClaimReaper`, `App\RunEngine\FleetOwnership`,
+   `RunRequeueCommand::--startup`, and the entrypoint's `serve` path setting
+   `TASKLOOM_FLEET_OWNER=1` before it spawns anything. Two decisions made
+   during the build, both recorded in SPEC §6.2: the flag is **not** part of
+   the compose env contract (services share an environment anchor, so compose
+   would hand it to the one-shot `migrate` service — the exact process the
+   gate exists to exclude), and the reap adopts the engine's own
+   `CLAIM_STALE_SECONDS` window rather than inventing a second definition of
+   "abandoned".
 2. **S1.** The signal listener and the stop port. No behaviour change yet.
 3. **S2 + S3.** The preemption exception, the callback, the new
    `RunTurnResult`, and the two catch sites.
