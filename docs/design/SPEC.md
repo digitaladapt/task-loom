@@ -317,47 +317,74 @@ starts workers — sets `TASKLOOM_FLEET_OWNER=1`. An unrecognized value fails
 closed and is reported; a process that is not the owner does nothing and says
 so.
 
-**The decision is made on identity, not on age** — and this is a correction to
-this section's first version, which is worth keeping because the mistake was
-subtle and the field found it within a day.
+**The decision is made on what could still be in flight** — and this is the
+second correction to this section, which is worth recording because both wrong
+versions were plausible and the field killed each within a day.
 
-That version inferred abandonment from claim age, reusing
-`CLAIM_STALE_SECONDS`, which is *safe* but is not the rule this situation
-needs: a container `down`'d and `up`'d inside a minute leaves claims seconds
-old. The sweep cleared nothing (`0 cleared, 2 left held`), the requeue beside
-it re-derived the owed turns correctly and dispatched them, and every one of
-those messages was dropped on arrival — `claim()` requires the same hour to
-take over, so the re-dispatched work bounced off a lock nobody would release
-for another 59 minutes. Recovery that looked like recovery and did nothing.
+**First it inferred abandonment from claim age**, reusing
+`CLAIM_STALE_SECONDS`. Safe, and useless: a container `down`'d and `up`'d
+inside a minute leaves claims seconds old. The sweep cleared nothing (`0
+cleared, 2 left held`), the requeue beside it re-derived the owed turns
+correctly and dispatched them, and every one of those messages was dropped on
+arrival — `claim()` requires the same hour to take over, so the re-dispatched
+work bounced off a lock nobody would release for another 59 minutes. Recovery
+that looked like recovery and did nothing.
 
-What was missing was never recency. It was **identity**: the dead owner and the
-living one were indistinguishable because nothing recorded *whose* claim it
-was. So `run.claim_fleet` records it, and the entrypoint issues a fresh
-`TASKLOOM_FLEET_ID` on every container start. A claim stamped with the previous
-start's id is provably a dead predecessor's, and can be cleared the instant the
-container returns — seconds later, or on another host. Three counts are now
-reported separately because they call for different actions:
+**Then it tried per-start identity**: record which fleet took each claim
+(`run.claim_fleet`) and clear the ones stamped with the previous start's id, on
+the theory that a restart has a new identity and so a leftover claim is a dead
+predecessor's. This cannot work, and one boot line showed why:
 
-| Claim's recorded owner | Meaning | Action |
-|---|---|---|
-| this fleet's id | my dead predecessor | **cleared** |
-| another fleet's id | usually a live fleet elsewhere (a workers-only host beside a UI) | left to the lease |
-| none (legacy row, or a claim by a process with no fleet — a one-shot `app:run:now`) | nothing is proven | left to the lease |
+```
+Claims: cleared 0 (left by this fleet), 2 held by another fleet, ...
+```
 
-"When in doubt, do nothing" is the safety argument: every uncertainty resolves
-to the lease, and the lease cannot be wrong. Clearing a live fleet's claim
-would hand one run to two workers; declining a dead one costs time.
+Every restart is a new identity, so **every** leftover claim from the previous
+run is "another fleet", and the sweep declines all of them by construction. The
+bug was even visible in the test written to prove the mechanism, which passed
+the same id on both sides — a situation that never occurs in production. An
+identity can say "not me"; it can never say "me, from last time".
 
-Two further properties: the sweep is **idempotent** (every dispatch is work
-committed state already implies, so it can run on every start), and the flag
-and the identity are deliberately **not** part of the compose env contract —
-services share an environment anchor, so a compose-supplied owner flag would be
-handed to the one-shot `migrate` service, and a compose-supplied identity would
-be the *same* for every restart, which is precisely what must differ.
+**The rule that works asks a different question: could anyone still be holding
+this?** At the moment the sweep runs, no worker in this container exists — the
+entrypoint runs it before spawning anything, which is the only window where the
+question has a clean answer. And a claim is held for exactly one message: one
+LLM request, or one set of tool calls. Nothing legitimately holds one longer,
+and the request cannot outlive its own timeout. So a claim older than
+`TASKLOOM_FLEET_GRAB_AFTER` is a claim whose owner is gone — whether it died ten
+seconds or ten hours ago, on this host or another.
 
-The follow-up this still does not build: a *worker heartbeat*, the honest
-mechanism for a claim held by a fleet that is genuinely alive elsewhere. The
-lease covers that case safely today. See `docs/design/GRACEFUL_RESTART.md`.
+The default is **0** (any age), which is correct for the deployment in §6 — one
+container, so every claim present at boot is the previous run's. The one
+topology where that is wrong is **more than one fleet against the same
+database** (a workers-only host beside a UI, or two replicas): then a claim
+found at boot may belong to a peer working right now, and only age can prove
+otherwise. Setting the bound above the longest a turn can run (safely
+`TASKLOOM_LLM_TIMEOUT + 60`) restores the proof. It is opt-in because it is the
+rarer shape, and the boot line always prints the bound in force:
+
+```
+Claims: cleared 2 (any age), 0 left to the lease, 0 of those without an owner label.
+```
+
+The label is kept even though it no longer decides anything, because it is what
+makes a leftover claim *legible* afterwards — `claim_fleet` on the row, and
+the count of cleared claims that had none, answer "who held this, and is the
+label covering what I think it covers?".
+
+Three further properties: the sweep is **idempotent** (every dispatch is work
+committed state already implies, so it can run on every start); the owner flag
+and the identity are deliberately **not** part of the compose env contract
+(compose services share an environment anchor, so a compose-supplied owner flag
+would be handed to the one-shot `migrate` service, and a compose-supplied
+identity would be identical across restarts — the one thing a label must never
+be); and a dropped delivery that loses a race to a **live** claim logs at
+warning, not debug, so the case this bug hid behind cannot hide again.
+
+What this still does not build is the **worker heartbeat** — the honest
+mechanism for a claim held by a fleet that is genuinely alive elsewhere, which
+is the case the opt-in bound handles by inference. See
+`docs/design/GRACEFUL_RESTART.md`.
 
 ---
 

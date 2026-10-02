@@ -304,13 +304,7 @@ final class RunEngine
         // stale by the time the claim is won.
         $token = $this->claim($run);
         if (null === $token) {
-            // Warning, not debug: a dropped delivery with a *live* claim means
-            // recovery re-dispatched work that could not be taken — the run is
-            // still stuck and the dispatch above was cosmetic. That deserves to
-            // survive fingers_crossed (action_level: error buffers and discards
-            // debug/info), because "requeued" in the boot log otherwise reads
-            // as "fixed".
-            $this->logger->warning('Run {run}: LlmTurnMessage step {step} lost the claim race; dropping. If the claim is not being worked, it is being held by another fleet or awaits the staleness window.', ['run' => $runId, 'step' => $step]);
+            $this->logLostClaim($run, $runId, $step, 'LlmTurnMessage');
 
             return RunTurnResult::Stale;
         }
@@ -363,6 +357,49 @@ final class RunEngine
     }
 
     /**
+     * A delivery that lost the claim race, at a level that matches what it
+     * means.
+     *
+     * A *fresh* claim is the case worth shouting about, and it is the one this
+     * bug hid behind: the boot sweep declined to clear a claim, the requeue
+     * dispatched the turn it could see was owed, and the delivery bounced off a
+     * lock nobody would release for another hour. Every line the operator got
+     * said "requeued"; the run was stuck. So a fresh claim logs at warning,
+     * which survives prod's fingers_crossed buffering (action_level: error
+     * discards debug/info) instead of being swallowed.
+     *
+     * A claim past the staleness window is a different, benign story — a
+     * duplicate delivery after a takeover — and stays at debug, because a
+     * healthy system produces those.
+     */
+    private function logLostClaim(Run $run, int $runId, int $step, string $message): void
+    {
+        $claimedAt = $run->getClaimedAt();
+        $age = null === $claimedAt ? null : time() - $claimedAt;
+        $live = null !== $age && $age < self::CLAIM_STALE_SECONDS;
+
+        if ($live) {
+            $this->logger->warning('Run {run}: {message} step {step} lost the claim race to a LIVE claim (held {age}s by {holder}); dropping. If this run is not progressing, its claim is stuck and no delivery will be accepted until it is cleared.', [
+                'run' => $runId,
+                'message' => $message,
+                'step' => $step,
+                'age' => $age,
+                // The label is the only thing that can say who to go and look
+                // at; a claim taken before the label existed reads as null.
+                'holder' => $run->getClaimFleet() ?? 'an unlabelled claimant',
+            ]);
+
+            return;
+        }
+
+        $this->logger->debug('Run {run}: {message} step {step} lost the claim race (claim stale); dropping.', [
+            'run' => $runId,
+            'message' => $message,
+            'step' => $step,
+        ]);
+    }
+
+    /**
      * One tool turn of a run, from a queue delivery: executes the calls the
      * model requested (resuming at the persisted position if a previous
      * worker died mid-turn) and commits the exchange together with the next
@@ -382,7 +419,7 @@ final class RunEngine
 
         $token = $this->claim($run);
         if (null === $token) {
-            $this->logger->warning('Run {run}: ToolTurnMessage step {step} lost the claim race; dropping. If the claim is not being worked, it is being held by another fleet or awaits the staleness window.', ['run' => $runId, 'step' => $step]);
+            $this->logLostClaim($run, $runId, $step, 'ToolTurnMessage');
 
             return RunTurnResult::Stale;
         }

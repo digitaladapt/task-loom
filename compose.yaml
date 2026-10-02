@@ -32,6 +32,29 @@ x-taskloom-env: &taskloom-env
   TASKLOOM_DEBUG_RAW_LLM: ${TASKLOOM_DEBUG_RAW_LLM:-0}
   # Concurrency: llm workers to run (each holds one request on the wire).
   TASKLOOM_LLM_MAX_CONCURRENCY: ${TASKLOOM_LLM_MAX_CONCURRENCY:-1}
+  # ── Shutdown ──────────────────────────────────────────────────────────
+  # How long the entrypoint waits for the workers to finish their current
+  # message before it SIGKILLs them. A worker finishes a message, not a run.
+  #
+  # These three were documented in .env.example but NOT forwarded here, which
+  # made them silently inert: the image runs with dotenv disabled, so an
+  # unforwarded variable cannot be set by the operator at all. Setting
+  # TASKLOOM_SHUTDOWN_TIMEOUT=120 in .env changed nothing, and a stop always
+  # used the entrypoint's 30s fallback — long enough to hit a `docker stop`
+  # grace period that was itself the default, and leave claims behind.
+  # (DeploymentContractTest now pins this: every variable the entrypoint reads
+  # must be forwarded.)
+  TASKLOOM_SHUTDOWN_TIMEOUT: ${TASKLOOM_SHUTDOWN_TIMEOUT:-30}
+  TASKLOOM_WORKER_TIME_LIMIT: ${TASKLOOM_WORKER_TIME_LIMIT:-3600}
+  TASKLOOM_WORKER_MEMORY_LIMIT: ${TASKLOOM_WORKER_MEMORY_LIMIT:-256M}
+  # Take a leftover claim of any age at boot. Correct for this file's single-
+  # container shape; raise it (to TASKLOOM_LLM_TIMEOUT + 60) only if you add a
+  # second fleet against the same database — see App\RunEngine\ClaimReaper.
+  TASKLOOM_FLEET_GRAB_AFTER: ${TASKLOOM_FLEET_GRAB_AFTER:-0}
+  # Run migrations at container boot. Leave 0: the `migrate` service above owns
+  # schema changes (§8.6), and a container that migrates at boot cannot be
+  # scaled past one replica.
+  TASKLOOM_MIGRATE_ON_BOOT: ${TASKLOOM_MIGRATE_ON_BOOT:-0}
   # Tool turns mostly wait on external servers: a few personas at once is safe.
   TASKLOOM_TOOL_MAX_CONCURRENCY: ${TASKLOOM_TOOL_MAX_CONCURRENCY:-2}
   # Wall-clock timezone schedules are evaluated in (SPEC §14). Required.
@@ -97,8 +120,12 @@ services:
     ports:
       - "8080:80"
     # Must exceed TASKLOOM_SHUTDOWN_TIMEOUT, or Docker will SIGKILL the fleet
-    # before the entrypoint has finished stopping the workers gracefully.
-    stop_grace_period: 60s
+    # before the entrypoint has finished stopping the workers gracefully. This
+    # is the outer bound and the entrypoint's window is the inner one; if you
+    # raise TASKLOOM_SHUTDOWN_TIMEOUT past this, a stop that is still winding
+    # down gets SIGKILLed from the outside, which is how a claim ends up
+    # orphaned with no chance to release it. Keep this the larger of the two.
+    stop_grace_period: 90s
 
 volumes:
   taskloom-data:

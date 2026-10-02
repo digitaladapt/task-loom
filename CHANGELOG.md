@@ -39,38 +39,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closed *and is reported*, because a deployment must not be able to believe a
   sweep is armed when a typo disarmed it.
 
-  **The sweep decides on identity, not on age.** The first cut inferred
-  "abandoned" from claim age, reusing the engine's `CLAIM_STALE_SECONDS` lease.
-  That is safe, but it is not the rule this situation needs, and a restart
-  inside the hour proved it: the sweep cleared nothing (`0 cleared, 2 left
-  held`), the requeue beside it correctly re-derived and dispatched the owed
-  turns, and every one of those messages was then dropped on arrival — taking
-  over a claim requires the same hour, so the re-dispatched work bounced off a
-  lock nobody would release for another 59 minutes. Recovery that looked like
-  recovery and did nothing.
+  **The sweep decides on what could still be in flight** — after two wrong
+  answers, both of which the field killed within a day. (That history is kept
+  because each version was plausible and the reason each failed is the useful
+  part.)
 
-  What was missing was never recency — it was *identity*. The dead owner and
-  the living one were indistinguishable because nothing recorded whose claim it
-  was, so `run.claim_fleet` now records it and the entrypoint issues a fresh
-  `TASKLOOM_FLEET_ID` on every container start. A claim stamped with the
-  previous start's id is provably a dead predecessor's and is cleared the
-  moment the container comes back — seconds later, or on another host. The boot
-  log now reports three counts separately, because they call for different
-  actions: *cleared* (my predecessor), *held by another fleet* (usually a live
-  fleet elsewhere — a workers-only host beside a UI), and *no owner recorded*
-  (a legacy row, or a claim by a process with no fleet identity, such as a
-  one-shot `app:run:now`). The latter two are left to the engine's lease: when
-  in doubt, do nothing, and the lease cannot be wrong.
+  *First* it inferred abandonment from claim age, reusing the engine's
+  `CLAIM_STALE_SECONDS` lease. Safe, and useless: a container `down`'d and `up`'d
+  inside a minute leaves claims seconds old, so the sweep cleared nothing while
+  the requeue beside it dispatched the owed turns — and every delivery was then
+  dropped on arrival, because taking over a claim requires the same hour.
 
-  Idempotent by construction — every dispatch is work committed state already
-  implies — so it runs on every start. The `serve` path also stops being silent
-  about the case it cannot act on: a fleet owner with no fleet identity now
-  says so rather than sweeping zero quietly.
+  *Second* it tried per-start identity: record which fleet took each claim
+  (`run.claim_fleet`) and clear the ones stamped with the previous start's id.
+  That cannot work. Every restart is a new identity, so **every** leftover claim
+  is "another fleet" and the sweep declines all of them by construction — the
+  boot line said exactly that (`0 cleared …, 2 held by another fleet`). The bug
+  was visible in the test written to prove the mechanism, which passed the same
+  id on both sides, a situation that never occurs in production.
 
-  A dropped delivery that *loses a live claim race* is now logged at `warning`
-  rather than `debug`. Under prod's `fingers_crossed` buffering
-  (`action_level: error`) a debug line is discarded, so the boot log could read
-  "3 run(s) requeued" while all three were, in fact, stuck.
+  *Now* it asks **could anyone still be holding this?** The sweep runs before
+  any worker starts — the one moment the question has a clean answer — and a
+  claim is held for exactly one message, so nothing legitimately holds one for
+  long. A claim older than `TASKLOOM_FLEET_GRAB_AFTER` is therefore one whose
+  owner is gone. The default is `0` (any age), correct for the single container
+  in SPEC §6. Raise it to `TASKLOOM_LLM_TIMEOUT + 60` only if more than one
+  fleet shares the database, where a claim found at boot may belong to a peer
+  working right now. The boot line always prints the bound in force, so a slow
+  recovery can be told from a broken one:
+
+  ```
+  Claims: cleared 2 (any age), 0 left to the lease, 0 of those without an owner label.
+  ```
+
+  `run.claim_fleet` is kept as a *label* (and the count of cleared claims that
+  had none is reported), because it makes a leftover claim legible after the
+  fact even though it no longer decides anything.
+
+  **Bugs this turned up on the way, all of which made the feature look like it
+  worked while it did not:** `TASKLOOM_SHUTDOWN_TIMEOUT`,
+  `TASKLOOM_WORKER_TIME_LIMIT` and `TASKLOOM_WORKER_MEMORY_LIMIT` were
+  documented in `.env.example` but never forwarded by a compose file, so setting
+  them was silently inert and a stop always used the 30s fallback (a test now
+  pins every variable the entrypoint reads against the compose files);
+  `stop_grace_period` is now 90s, so the outer Docker bound cannot undercut the
+  entrypoint's inner window and SIGKILL a fleet that is still winding down; and
+  a dropped delivery that loses a race to a **live** claim now logs at `warning`
+  rather than `debug`, which prod's `fingers_crossed` buffering was discarding —
+  the boot log could read "3 run(s) requeued" while all three were stuck.
+
+  And the data-directory derivation had the placeholder bug it was written to
+  avoid: `DATABASE_URL` carries `%kernel.project_dir%` **literally** (the
+  application resolves it at runtime, not the environment), so treating it as
+  ordinary path text created a directory actually named
+  `%kernel.project_dir%` and published the fleet identity into it. Caught by
+  the test that asserts the file is written *where it is supposed to be* — a
+  best-effort write needs a test that the effort succeeded, or "best-effort"
+  becomes "never".
+
+  **Measured while diagnosing the above, and now recorded in the design note
+  because it changes what S2 needs:** a `pcntl` signal handler on the worker
+  runs promptly *inside* a blocking `chat()` call, and if it **throws**, the
+  exception unwinds out of the HTTP client and aborts the transfer (30s stall →
+  2.00s, twice). A handler that merely sets a flag does **not** — the signal is
+  delivered and PHP returns to the socket and waits out the full timeout. So an
+  interruptible turn does not need the `on_progress` callback or a file-based
+  control plane that `GRACEFUL_RESTART.md` assumed; the signal is enough. The
+  remaining work is to *use* it (see the design note), which is deliberately not
+  in this change — at present a stop that lands during an LLM call still ends in
+  SIGKILL once the shutdown window expires, and the claim is then cleared on the
+  next start by the sweep above.
 
 - **`serve --no-web`** — the worker fleet and the scheduler without the web
   process, for a host that is only there for the model. Same fleet, same

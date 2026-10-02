@@ -25,6 +25,30 @@ final class DeploymentContractTest extends TestCase
     private const string ROOT = __DIR__.'/../..';
 
     /**
+     * Supervisor variables that deliberately do NOT belong in a compose file,
+     * and why — kept together so the exception list is explicit rather than an
+     * unexplained skip inside the loop.
+     *
+     *  - FLEET_OWNER / FLEET_ID are *set by* the entrypoint, not handed to it:
+     *    the owner flag must not reach the one-shot `migrate` service, and the
+     *    identity must differ on every start (a compose value would be
+     *    identical across restarts, which is the one thing it must never be).
+     *  - PROJECT_DIR defaults to /app, which is where the image is built to
+     *    live; overriding it is a debugging move, not a deployment knob.
+     *  - DATA_DIR is derived from DATABASE_URL, so it follows the database
+     *    without a second place to keep in sync.
+     *  - SYNC_ON_BOOT is set per-service (the migrate service passes 0); the
+     *    in-image default of 1 is what the app container wants.
+     */
+    private const array SUPERVISOR_VARS_NOT_IN_COMPOSE = [
+        'TASKLOOM_FLEET_OWNER',
+        'TASKLOOM_FLEET_ID',
+        'TASKLOOM_PROJECT_DIR',
+        'TASKLOOM_DATA_DIR',
+        'TASKLOOM_SYNC_ON_BOOT',
+    ];
+
+    /**
      * Every variable the application resolves via %env(...)%, discovered from
      * config/ rather than hand-listed, so a new one cannot be forgotten in
      * the deployment files.
@@ -212,6 +236,44 @@ final class DeploymentContractTest extends TestCase
                 $seconds,
                 "$file: stop_grace_period ($grace) must exceed the entrypoint's default TASKLOOM_SHUTDOWN_TIMEOUT (30s), or Docker SIGKILLs the fleet mid-turn",
             );
+        }
+    }
+
+    public function testEveryVariableTheSupervisorReadsIsForwardedToIt(): void
+    {
+        // THE BUG THIS CATCHES. `TASKLOOM_SHUTDOWN_TIMEOUT=120` set in .env did
+        // nothing, because compose.yaml never forwarded it: the image runs with
+        // dotenv disabled, so an unforwarded variable cannot reach the operator
+        // at all. The stop window was always the entrypoint's 30s fallback, and
+        // .env.example documented a knob that could not be turned.
+        //
+        // testBothComposeFilesProvideTheFullEnvContract() only covers what the
+        // *application* resolves through %env()%. The entrypoint reads its own
+        // variables straight from the process environment, so they were outside
+        // that net — which is exactly why three of them (shutdown window, worker
+        // time limit, worker memory limit) had drifted out of the deployment
+        // files unnoticed.
+        $entrypoint = (string) file_get_contents(self::ROOT.'/docker/entrypoint.sh');
+
+        $found = preg_match_all('/TASKLOOM_[A-Z_]+/', $entrypoint, $matches);
+        self::assertGreaterThan(1, $found, 'the discovery must actually be reading the entrypoint');
+        $read = array_values(array_unique($matches[0]));
+        self::assertContains('TASKLOOM_SHUTDOWN_TIMEOUT', $read, 'the discovery must actually be reading the entrypoint');
+
+        foreach (['/compose.yaml', '/docs/examples/compose.yaml'] as $file) {
+            $compose = (string) file_get_contents(self::ROOT.$file);
+
+            foreach ($read as $variable) {
+                if (\in_array($variable, self::SUPERVISOR_VARS_NOT_IN_COMPOSE, true)) {
+                    continue;
+                }
+
+                self::assertStringContainsString(
+                    $variable.':',
+                    $compose,
+                    "$file does not forward $variable, so setting it in .env is silently inert — the image disables dotenv",
+                );
+            }
         }
     }
 

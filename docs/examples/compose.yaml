@@ -70,6 +70,23 @@ x-taskloom-env: &taskloom-env
   # The scheduler daemon: enabled; tick interval in seconds.
   TASKLOOM_SCHEDULER_ENABLED: ${TASKLOOM_SCHEDULER_ENABLED:-1}
   TASKLOOM_SCHEDULE_INTERVAL: ${TASKLOOM_SCHEDULE_INTERVAL:-60}
+  # ── Shutdown and the worker fleet ─────────────────────────────────────
+  # These are read by the entrypoint, not by the app, so they are easy to
+  # forget — and forgetting one is silent, because the image runs with dotenv
+  # disabled: the operator sets it in .env and nothing happens. The in-image
+  # fallback (30s) then applies, which is longer than a Docker stop's default
+  # grace period, so the fleet gets SIGKILLed mid-turn and leaves claims behind
+  # that only boot recovery can clear. DeploymentContractTest pins this list
+  # against the entrypoint, so a new knob cannot drift out again.
+  TASKLOOM_SHUTDOWN_TIMEOUT: ${TASKLOOM_SHUTDOWN_TIMEOUT:-30}
+  TASKLOOM_WORKER_TIME_LIMIT: ${TASKLOOM_WORKER_TIME_LIMIT:-3600}
+  TASKLOOM_WORKER_MEMORY_LIMIT: ${TASKLOOM_WORKER_MEMORY_LIMIT:-256M}
+  # Run migrations at container boot (0: the `migrate` service owns them, §8.6).
+  TASKLOOM_MIGRATE_ON_BOOT: ${TASKLOOM_MIGRATE_ON_BOOT:-0}
+  # Boot recovery takes a leftover claim of any age (0). Correct while one
+  # container owns the database; raise to TASKLOOM_LLM_TIMEOUT + 60 if you ever
+  # add a second fleet against it — see App\RunEngine\ClaimReaper.
+  TASKLOOM_FLEET_GRAB_AFTER: ${TASKLOOM_FLEET_GRAB_AFTER:-0}
   # Run-engine budgets (fail-closed).
   TASKLOOM_STEP_BUDGET: ${TASKLOOM_STEP_BUDGET:-50}
   TASKLOOM_TOOL_RETRIES: ${TASKLOOM_TOOL_RETRIES:-2}
@@ -115,8 +132,11 @@ services:
     ports:
       - "8080:80"
     # Longer than TASKLOOM_SHUTDOWN_TIMEOUT (default 30s), so the entrypoint
-    # can stop the workers gracefully before Docker escalates to SIGKILL.
-    stop_grace_period: 60s
+    # can stop the workers gracefully before Docker escalates to SIGKILL. The
+    # entrypoint's window is the inner bound, this is the outer one: keep this
+    # the larger, or a stop that is still winding down is SIGKILLed from
+    # outside and the turn's claim is orphaned with no chance to be released.
+    stop_grace_period: 90s
 
 volumes:
   taskloom-data:
