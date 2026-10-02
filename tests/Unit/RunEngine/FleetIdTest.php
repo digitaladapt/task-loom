@@ -5,25 +5,25 @@ declare(strict_types=1);
 namespace App\Tests\Unit\RunEngine;
 
 use App\RunEngine\FleetId;
-use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The fleet identity (SPEC §6.2) — and, more importantly, the cases where it
- * refuses to answer.
+ * The fleet label (SPEC §6.2).
  *
- * mayClearClaimFrom() is the "am I allowed to clear this claim?" decision
- * itself, and it is deliberately not symmetric: exactly one input combination
- * authorizes, and every other combination declines. The asymmetry is the
- * design, not an oversight. Clearing a claim that a live fleet is holding
- * would hand the same run to two workers; declining a claim that was actually
- * dead merely costs time, because the engine's lease picks it up later. When
- * the cost of being wrong is that lopsided, refuse.
+ * This class is deliberately small, because after one false start it no longer
+ * holds any decision. A first version exposed `mayClearClaimFrom()`, which read
+ * like a permission check and was used as one — and that was the bug: on a
+ * restart, *every* leftover claim carries the previous start's id, so "not
+ * mine" is true of all of them and the sweep declined everything it was
+ * supposed to fix. The decision moved to ClaimReaper (which asks what could
+ * still be in flight, a question with a real answer); what remains here is a
+ * label and a reader for it.
  *
- * This is also a direct regression guard on the bug that shipped in the first
- * cut of boot recovery: "10 seconds old" and "dead" were conflated because
- * nothing recorded *who* held the claim. The tests below are about identity,
- * not the clock — no assertion here cares how old a claim is.
+ * The tests below are therefore about *reading an environment variable
+ * honestly*: unset is normal, empty is not an identity, and nothing here
+ * authorizes anything. The regression test that matters is not here — it is
+ * `testASecondsOldClaimFromThisFleetIsStillReaped` in RunStartupRequeueTest,
+ * where the two sides use *different* ids, as production does.
  */
 final class FleetIdTest extends TestCase
 {
@@ -50,15 +50,15 @@ final class FleetIdTest extends TestCase
 
     public function testCurrentIsNullWhenUnset(): void
     {
-        self::assertNull(FleetId::current(), 'a process that is not a fleet has no identity');
+        // The ordinary case: most processes that run a turn are not a fleet.
+        self::assertNull(FleetId::current(), 'a process that is not a fleet has no label');
     }
 
     public function testCurrentIsNullWhenEmptyOrWhitespace(): void
     {
-        // The entrypoint could plausibly hand over an empty variable (a
-        // template that failed to interpolate); an empty identity is not an
-        // identity, and treating "" as one would make every such process
-        // "the same fleet" as every other.
+        // A template that failed to interpolate must not produce an identity:
+        // treating "" as one would make every such process "the same fleet" as
+        // every other.
         putenv(FleetId::ENV.'=');
         self::assertNull(FleetId::current());
 
@@ -72,53 +72,33 @@ final class FleetIdTest extends TestCase
         self::assertSame('2026-10-02-42-1234', FleetId::current());
     }
 
-    /**
-     * The one authorization, and everything that must not be one.
-     *
-     * @return iterable<string, array{?string, ?string, bool}>
-     */
-    public static function clearability(): iterable
+    public function testIsOursOnlyMatchesAPositiveIdentity(): void
     {
-        yield 'my own fleet: a dead predecessor, whatever the age' => ['fleet-a', 'fleet-a', true];
+        putenv(FleetId::ENV.'=start-2');
 
-        yield 'another fleet: not abandoned, however old' => ['fleet-a', 'fleet-b', false];
-        yield 'no identity: cannot attribute, so declines' => [null, 'fleet-a', false];
-        yield 'claim with no owner: nothing proven, so declines' => ['fleet-a', null, false];
-        yield 'neither side has an identity' => [null, null, false];
+        self::assertTrue(FleetId::isOurs('start-2'));
+        self::assertFalse(FleetId::isOurs('start-1'), 'the previous start is a different fleet');
+        self::assertFalse(FleetId::isOurs(null), 'an unlabelled claim is nobody\'s');
 
-        // An empty string is "no identity" on either side, never a match:
-        // otherwise two unrelated processes with unset-and-templated-to-empty
-        // ids would consider each other the same fleet.
-        yield 'empty identity is not an identity' => ['', 'fleet-a', false];
-        yield 'an empty-stamped claim is not mine' => ['fleet-a', '', false];
+        putenv(FleetId::ENV);
+        self::assertFalse(FleetId::isOurs('start-2'), 'a process with no label owns nothing');
     }
 
-    #[DataProvider('clearability')]
-    public function testMayClearClaimFrom(?string $mine, ?string $owner, bool $expected): void
+    public function testTwoStartsOfOneDeploymentAreDifferentFleets(): void
     {
-        if (null === $mine) {
-            putenv(FleetId::ENV);
-        } else {
-            putenv(FleetId::ENV.'='.$mine);
-        }
-
-        self::assertSame($expected, FleetId::mayClearClaimFrom($owner));
-    }
-
-    public function testIdentityDistinguishesTwoStartsOfTheSameDeployment(): void
-    {
-        // The property the whole mechanism rests on: two consecutive starts of
-        // one deployment are different fleets, so the second may clear what the
-        // first left behind. If the id were stable across restarts (as a
-        // compose-supplied value would be), boot recovery could never tell a
-        // dead predecessor from a live peer, and this design would collapse
-        // back into the recency heuristic it replaced.
+        // The property that makes the label useful for *explaining* a leftover
+        // claim ("the previous run of this container held it") — and, read the
+        // other way round, the property that made it useless for deciding:
+        // start-2 cannot recognise start-1's claims as its own, which is
+        // exactly the situation a restart creates.
         putenv(FleetId::ENV.'=start-1');
-        self::assertTrue(FleetId::mayClearClaimFrom('start-1'));
-        self::assertFalse(FleetId::mayClearClaimFrom('start-2'), 'a later start is a different fleet and must not adopt an earlier one\'s claim');
+        $first = FleetId::current();
 
         putenv(FleetId::ENV.'=start-2');
-        self::assertTrue(FleetId::mayClearClaimFrom('start-2'), 'the next start may clear the previous one');
-        self::assertFalse(FleetId::mayClearClaimFrom('start-1'));
+        $second = FleetId::current();
+
+        self::assertNotNull($first);
+        self::assertNotSame($first, $second, 'a restart is a new fleet; if these were equal, "my predecessor" would be unknowable');
+        self::assertFalse(FleetId::isOurs($first), 'and so the successor cannot claim the predecessor\'s label as its own');
     }
 }

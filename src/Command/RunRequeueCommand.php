@@ -172,44 +172,52 @@ final class RunRequeueCommand extends Command
         $mine = FleetId::current();
 
         if (null === $mine) {
-            // A fleet owner with no fleet id: nothing can be attributed, so
-            // nothing can be cleared. Refusing loudly is the point — silently
-            // sweeping zero is exactly how the first cut of this feature looked
-            // like it worked.
+            // Not fatal any more — the sweep decides on age, not on who held
+            // the claim — but the owner label is what makes a leftover claim
+            // legible after the fact, so a fleet that is not stamping one is
+            // worth saying out loud. (Set only by the entrypoint's serve path;
+            // a manual `app:run:requeue` from a terminal legitimately has none.)
             $output->writeln(\sprintf(
-                '<comment>Fleet owner with no %s set — no claim can be attributed to this fleet, so none is swept.</comment>',
+                '<comment>No %s set — claims from this process will carry no owner label.</comment>',
                 FleetId::ENV,
             ));
         }
 
+        $grabAfter = $this->reaper->grabAfterSeconds();
         $survey = $this->reaper->survey();
         $reaped = $dryRun ? 0 : $this->reaper->reap();
 
         if (!$dryRun) {
-            $this->logger->info('Boot sweep cleared {reaped} claim(s) left by this fleet; {foreign} held by another fleet, {unowned} with no owner recorded.', [
+            $this->logger->info('Boot sweep cleared {reaped} claim(s); {leased} left to the lease (fresher than the {grabAfter}s bound); {unowned} of the cleared had no owner label.', [
                 'reaped' => $reaped,
                 'fleet' => $mine,
-                'foreign' => $survey['foreign'],
+                'grabAfter' => $grabAfter,
+                'leased' => $survey['leased'],
                 'unowned' => $survey['unowned'],
             ]);
         }
 
-        // The three counts are reported separately because they need different
-        // actions, and lumping them together is how a boot log reads as "all
-        // clear" while a run sits stuck. Cleared = repaired. Foreign = almost
-        // always a live fleet elsewhere; no action. Unowned = declines by
-        // design, and waits on the engine's staleness window.
+        // The bound is *always* printed, cleared or not: whether a leftover
+        // claim is repaired at boot or waits out the engine's staleness window
+        // is entirely a function of it, and an operator who cannot see the
+        // number in force cannot tell a slow recovery from a broken one.
+        $bound = 0 === $grabAfter
+            ? 'any age'
+            : \sprintf('older than %ds', $grabAfter);
+
         $output->writeln($dryRun
             ? \sprintf(
-                'Claims: %d would be cleared (left by this fleet), %d held by another fleet, %d with no owner recorded.',
-                $survey['mine'],
-                $survey['foreign'],
+                'Claims: %d would be cleared (%s), %d left to the lease, %d of those without an owner label.',
+                $survey['clearable'],
+                $bound,
+                $survey['leased'],
                 $survey['unowned'],
             )
             : \sprintf(
-                'Claims: cleared %d (left by this fleet), %d held by another fleet, %d with no owner recorded.',
+                'Claims: cleared %d (%s), %d left to the lease, %d of those without an owner label.',
                 $reaped,
-                $survey['foreign'],
+                $bound,
+                $survey['leased'],
                 $survey['unowned'],
             ));
 

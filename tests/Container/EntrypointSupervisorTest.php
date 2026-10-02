@@ -207,6 +207,67 @@ final class EntrypointSupervisorTest extends TestCase
         return $this->fleetIdAfter($path, $beforeLength);
     }
 
+    public function testTheFleetIdentityIsWrittenWhereAForeignProcessCanReadIt(): void
+    {
+        // The web UI shares the container's process tree but NOT its
+        // environment (the entrypoint exports the id before spawning children,
+        // and the UI is a child — but a request is not the fleet, and in a
+        // split deployment there is no shared environment at all). So the
+        // identity is published to a file in the data directory, which is the
+        // only thing a non-child can reliably read.
+        //
+        // This test also pins an ORDERING bug that produced a working-looking
+        // feature: the file is written inside the serve path's fleet block,
+        // which runs BEFORE the boot phases — so deriving the data directory
+        // alongside them left DATA_DIR empty at the moment of the write, the
+        // `<if [ -n "$DATA_DIR" ]>` guard silently skipped it, and nothing was
+        // ever published. Best-effort writes need a test that asserts the
+        // effort actually succeeded, or "best-effort" becomes "never".
+        $dataDir = $this->sandbox.'/data';
+        $logOffset = is_file($this->sandbox.'/php.log') ? \strlen((string) file_get_contents($this->sandbox.'/php.log')) : 0;
+
+        // A fresh container start must publish a *fresh* identity, so an older
+        // file from a previous test would hide a regression. (This is the same
+        // trap that made readFleetIdFromServe() lie: a condition already
+        // satisfied by the previous run's corpse.)
+        if (is_file($dataDir.'/fleet-id')) {
+            unlink($dataDir.'/fleet-id');
+        }
+
+        // No TASKLOOM_DATA_DIR: the point is that it is DERIVED, and derived
+        // correctly. DATABASE_URL deliberately carries the Symfony placeholder
+        // literally — that is what the deployment files contain — so this also
+        // pins the bug where the placeholder was treated as ordinary path text
+        // and produced a literal `%kernel.project_dir%` directory instead of
+        // the data volume.
+        $process = $this->runScript(['serve'], [
+            'TASKLOOM_LLM_MAX_CONCURRENCY' => '1',
+            'DATABASE_URL' => 'sqlite:///%kernel.project_dir%/data/taskloom.db',
+        ]);
+
+        try {
+            $this->waitFor(fn (): bool => is_file($dataDir.'/fleet-id'));
+        } finally {
+            $this->stopServe($process);
+        }
+
+        self::assertFileExists($dataDir.'/fleet-id', 'the fleet identity must be published for processes that did not inherit the environment');
+        self::assertDirectoryDoesNotExist(
+            $this->sandbox.'/%kernel.project_dir%',
+            'the project-dir placeholder must be resolved, not used as a literal path',
+        );
+
+        $written = (string) file_get_contents($dataDir.'/fleet-id');
+        self::assertNotSame('', $written);
+        self::assertSame(1, preg_match('/^\d+-\d+-\d+$/', $written), "unexpected identity shape: '$written'");
+
+        // And it matches what the children were given — the published identity
+        // is the fleet's, not a second one invented for the file's benefit.
+        $fromLog = $this->fleetIdAfter($this->sandbox.'/php.log', $logOffset);
+        self::assertNotNull($fromLog, 'the children should carry the identity too');
+        self::assertSame($fromLog, $written);
+    }
+
     /**
      * The fleet id in php.log beyond $offset, or null while there is none yet.
      */

@@ -81,6 +81,11 @@ WORKER_MEMORY_LIMIT="${TASKLOOM_WORKER_MEMORY_LIMIT:-256M}"
 MIGRATE_ON_BOOT="${TASKLOOM_MIGRATE_ON_BOOT:-0}"
 SYNC_ON_BOOT="${TASKLOOM_SYNC_ON_BOOT:-1}"
 SHUTDOWN_TIMEOUT="${TASKLOOM_SHUTDOWN_TIMEOUT:-30}"
+# Where a process that does not inherit this one's environment — the web UI,
+# most importantly — can read which fleet this is. Derived from DATABASE_URL,
+# because that is where the deployment's durable state already lives; see the
+# serve path below.
+DATA_DIR="${TASKLOOM_DATA_DIR:-}"
 
 # A worker that exits within this many seconds is treated as crashing (rather
 # than recycling after a healthy run) and restarted with backoff.
@@ -243,6 +248,35 @@ warm_cache() {
 # --resolve-env-vars` compiles the container with every referenced variable
 # resolved, so an incomplete environment fails here, naming the variable,
 # before anything is started.
+check_data_dir() {
+    # Where the fleet publishes its identity for processes that do not inherit
+    # this environment. Derived from DATABASE_URL when not set explicitly: in
+    # the documented deployment that is the data volume, so the file lands on
+    # the same durable mount as the database itself.
+    [ -n "$DATA_DIR" ] && return 0
+
+    local url="${DATABASE_URL:-}"
+
+    # `%kernel.project_dir%` is resolved by the application at runtime, NOT in
+    # the environment — so the raw value here still contains the placeholder,
+    # and treating it as ordinary path text silently produces a literal
+    # directory named `%kernel.project_dir%`. Substitute it the way the
+    # application will.
+    url="${url//\%kernel.project_dir\%/$PROJECT_DIR}"
+
+    case "$url" in
+        sqlite:///*) DATA_DIR="$(dirname "${url#sqlite:///}")" ;;
+        *) DATA_DIR="$PROJECT_DIR/data" ;;
+    esac
+
+    # A relative sqlite path is relative to the project directory, not to
+    # wherever this script happens to have been started from.
+    case "$DATA_DIR" in
+        /*) ;;
+        *) DATA_DIR="$PROJECT_DIR/$DATA_DIR" ;;
+    esac
+}
+
 check_env_contract() {
     local output
 
@@ -479,20 +513,41 @@ if [ "$command" = "serve" ]; then
     # as well, which is the exact process this gate exists to exclude.
     export TASKLOOM_FLEET_OWNER=1
 
-    # ...and this is *which* fleet it is. A fresh identity per container start
-    # is what makes the boot sweep work: a claim stamped with the previous
-    # start's id is provably a dead predecessor's, so it can be cleared the
-    # moment the container comes back — seconds later, or on another host —
-    # instead of waiting out CLAIM_STALE_SECONDS. Recency could never decide
-    # that; identity can. The value must therefore never be a fixed
-    # compose-supplied string (every restart would look like the same fleet),
-    # which is another reason it is not in the env contract.
+    # ...and this is *which* fleet it is. A fresh identity per container start,
+    # so a leftover claim can be *attributed* to a particular run of the
+    # container — useful in the log and on the admin surface.
     #
-    # $RANDOM is fine here: this is an identity, not a secret. Nothing is
+    # Note what the value deliberately is NOT used for: deciding what to sweep.
+    # A first attempt did that ("clear claims stamped with some other id, since
+    # a restart has a new one"), and it cannot work. Every restart is a new
+    # identity, so every leftover claim from the previous run is "another
+    # fleet", and the sweep declines all of them by construction. The bug was
+    # visible in the very test written to prove the mechanism, which passed the
+    # same id on both sides — a situation that never occurs in production. A
+    # per-start value can say "not me"; it can never say "me, from last time".
+    # The sweep decides on what could still be in flight instead; see
+    # App\RunEngine\ClaimReaper.
+    #
+    # $RANDOM is fine here: this is a label, not a secret. Nothing is
     # authorized by knowing it.
     # shellcheck disable=SC2155 # a fresh value in one statement; there is no
     # failing command whose status could be masked (date/$$/$RANDOM cannot fail).
     export TASKLOOM_FLEET_ID="$(date +%s)-$$-$RANDOM"
+
+    # Written into the data volume so a process that did NOT inherit this
+    # environment can still recognise a claim as this container's — the web UI
+    # shares the process tree but not these variables. Best-effort on purpose:
+    # a missing file costs attribution, never correctness.
+    #
+    # The directory is derived here rather than at the top of the serve path,
+    # because the identity it holds is only known at this point.
+    if [ -z "$DATA_DIR" ]; then
+        check_data_dir
+    fi
+    if [ -n "$DATA_DIR" ]; then
+        mkdir -p "$DATA_DIR" 2>/dev/null || true
+        printf '%s' "$TASKLOOM_FLEET_ID" >"$DATA_DIR/fleet-id" 2>/dev/null || true
+    fi
 
     WEB_ENABLED=1
     if [ "$SERVE_NO_WEB" = "1" ]; then

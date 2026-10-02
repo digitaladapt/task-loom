@@ -7,51 +7,67 @@ namespace App\RunEngine;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
- * Clears execution claims held by the fleet this process is replacing
+ * Clears execution claims that a booting fleet can prove are nobody's
  * (SPEC §6.2).
  *
- * ## What the first cut got wrong
+ * ## The two wrong answers this replaced
  *
- * It inferred "abandoned" from claim age, reusing the engine's
- * CLAIM_STALE_SECONDS lease. That is the conservative rule and it is always
- * *safe* — but it is not the rule this situation needs, and the field proved it
- * within a day: a container `down`'d and `up`'d inside a minute leaves claims
- * seconds old. The sweep reported "cleared 0, 2 left held (still fresh)",
- * requeue then correctly re-dispatched the owed turns, and every one of those
- * messages was dropped on arrival — because taking over a claim requires the
- * same hour, so the re-dispatched work hit a lock nobody would release for
- * another 59 minutes. Recovery that looked like recovery and did nothing.
+ * **First: claim age, reusing the engine's hour-long lease.** Safe, and
+ * useless. A container `down`'d and `up`'d inside a minute leaves claims
+ * seconds old, so the sweep cleared nothing — while the requeue beside it
+ * re-derived the owed turns and dispatched them, and every delivery was then
+ * dropped on arrival, because taking over a claim requires the same hour. Zero
+ * repaired, three messages "requeued".
  *
- * The missing fact was never age. It was **identity**: the dead owner and the
- * living one were indistinguishable because nobody had asked *whose* claim it
- * was.
+ * **Second: per-start identity.** The theory was that a restart has a new
+ * identity, so a claim stamped with the old one is a dead predecessor's and can
+ * be cleared at any age. It cannot work, and the field showed it in one line:
  *
- * ## The rule now
+ *     Claims: cleared 0 (left by this fleet), 2 held by another fleet, ...
  *
- * A claim is cleared when its recorded owner is the fleet id this process was
- * started with — see FleetId, and the entrypoint that issues one per container
- * start. "My predecessor's claim" is a fact about identity, so it does not
- * depend on the clock at all: it holds whether the fleet died ten seconds or
- * ten hours ago, and whether the container came back on the same host or a
- * different one.
+ * Every restart is a new identity, so *every* leftover claim from the previous
+ * run is "another fleet", and the sweep declined all of them — by construction,
+ * not by accident. The bug was even visible in my own regression test, which
+ * passed the *same* id on both sides, a situation that never occurs in
+ * production. An identity can say "not me"; it can never say "me, from last
+ * time". That is what the word "again" means, and a per-start value cannot
+ * express it.
  *
- * ## What it still refuses to touch
+ * ## The rule now: what can still be in flight
  *
- * - **A claim from another fleet.** That fleet may be running this very second
- *   (a workers-only host beside a UI, sharing one database). Not abandoned,
- *   however old it looks. It keeps the lease.
- * - **A claim with no fleet recorded** — a legacy row, or a turn taken by a
- *   process that has no fleet identity at all (a one-shot `app:run:now` in a
- *   terminal). Nothing is proven about it, so nothing is done to it: the lease
- *   handles it, slowly and safely. This is the case that makes `claim_fleet`
- *   nullable rather than defaulted.
+ * At the moment the boot sweep runs, **no worker in this container exists** —
+ * the entrypoint runs the sweep before it spawns anything, which is the only
+ * window in which the question has a clean answer. So the right question is not
+ * "whose claim is this?" but "could anyone still be holding it?" And that has a
+ * knowable answer, because a claim is held for exactly one message: one LLM
+ * request, or one set of tool calls. Nothing legitimately holds a claim for
+ * longer than that, and the request cannot outlive its own timeout.
  *
- * "When in doubt, do nothing" is the whole safety argument. Every uncertainty
- * resolves to the lease, and the lease cannot be wrong.
+ * So a claim older than the grace bound is a claim whose owner is gone —
+ * whether it died ten seconds or ten hours ago, on this host or another, and
+ * whether the process is coming back. `TASKLOOM_FLEET_GRAB_AFTER` is that
+ * bound, and it defaults to 0 because at boot there is exactly one fleet in the
+ * documented deployment (SPEC §6: one container) and every claim in the table
+ * is therefore the previous run's.
+ *
+ * ## The one deployment where the default is wrong
+ *
+ * If you run **more than one fleet against the same database** — a workers-only
+ * host beside a UI, or two replicas — then a claim you find at boot may belong
+ * to a peer that is working right now, and the default would hand that run to a
+ * second worker. Set `TASKLOOM_FLEET_GRAB_AFTER` above the longest a turn can
+ * run (safely `TASKLOOM_LLM_TIMEOUT + 60`) and the sweep will only take what is
+ * provably dead. That is slower and always safe, and it is opt-in because it is
+ * the rarer topology. The boot line always reports the bound in force, so which
+ * rule you are running is never a mystery.
+ *
+ * The honest general fix for that case is still a worker heartbeat, which can
+ * distinguish a live peer from a dead one directly rather than by inference.
+ * See docs/design/GRACEFUL_RESTART.md; nothing here depends on it.
  *
  * ## What it does not do
  *
- * It clears `claimed_at` and the fleet stamp, and bumps `lock_version` (the
+ * It clears `claimed_at` and the owner label, and bumps `lock_version` (the
  * ownership token — a predecessor that somehow came back must not be able to
  * clear a successor's claim). It does not touch `status`, `step_count`, the
  * checkpoint, or anything else the interrupted turn committed, because a turn
@@ -61,62 +77,91 @@ use Doctrine\ORM\EntityManagerInterface;
  */
 final readonly class ClaimReaper
 {
+    /**
+     * How many seconds old a claim must be before the boot sweep will clear it.
+     *
+     * 0 is correct for the documented single-container deployment, where any
+     * claim present at boot belongs to a process that no longer exists. Raise
+     * it (to `TASKLOOM_LLM_TIMEOUT + 60`) only when more than one fleet shares
+     * the database — see the class docblock.
+     */
+    public const string GRAB_AFTER_ENV = 'TASKLOOM_FLEET_GRAB_AFTER';
+
+    public const int DEFAULT_GRAB_AFTER_SECONDS = 0;
+
     public function __construct(private EntityManagerInterface $em)
     {
     }
 
     /**
-     * Clear every claim this fleet's predecessor left behind.
+     * The grace bound in force, read from the environment with a safe default.
+     *
+     * Not wired through `%env()%`, deliberately: this is a supervisor-level
+     * knob that the entrypoint owns and the console command only reads, and a
+     * missing value must mean "the documented default" rather than a boot
+     * failure.
+     */
+    public function grabAfterSeconds(): int
+    {
+        $value = getenv(self::GRAB_AFTER_ENV);
+
+        if (false === $value || '' === trim($value)) {
+            return self::DEFAULT_GRAB_AFTER_SECONDS;
+        }
+
+        return max(0, (int) trim($value));
+    }
+
+    /**
+     * Clear every claim the booting fleet can prove is nobody's.
      *
      * @return int the number of claims cleared
      */
     public function reap(): int
     {
-        $fleet = FleetId::current();
-
-        if (null === $fleet) {
-            // Not a fleet: nothing is provably abandoned, so nothing is
-            // cleared. Refusing here rather than at the caller keeps the
-            // guarantee in one place — reap() can never clear a claim it
-            // cannot attribute.
-            return 0;
-        }
-
         return $this->em->getConnection()->executeStatement(
-            'UPDATE run SET lock_version = lock_version + 1, claimed_at = NULL, claim_fleet = NULL WHERE claimed_at IS NOT NULL AND claim_fleet = :fleet',
-            ['fleet' => $fleet],
+            'UPDATE run SET lock_version = lock_version + 1, claimed_at = NULL, claim_fleet = NULL WHERE claimed_at IS NOT NULL AND claimed_at <= :cutoff',
+            ['cutoff' => time() - $this->grabAfterSeconds()],
         );
     }
 
     /**
-     * What reap() would clear, and what it deliberately will not.
+     * What reap() would clear, and what it would leave — for `--dry-run` and
+     * for the boot line.
      *
-     * The three counts are separated because they mean different things to the
-     * operator reading the boot log: `stale` is work waiting on the engine's
-     * lease (a foreign fleet, or a claim with no recorded owner), while
-     * `foreign` is *usually* a live fleet elsewhere — no action, but silently
-     * lumping it in with "stale" is how you spend an afternoon wondering why
-     * the sweep keeps declining to act.
+     * `leased` is a claim *fresher* than the bound, which only happens when the
+     * bound has been raised for a multi-fleet deployment: it is left for the
+     * engine's ordinary staleness window rather than taken at boot. Reporting
+     * it separately matters, because "cleared 0" means two opposite things —
+     * "there was nothing to do" and "I declined everything I found" — and an
+     * operator staring at a stuck run needs to be told which.
      *
-     * @return array{mine: int, foreign: int, unowned: int}
+     * `unowned` counts cleared claims with no fleet label: rows written before
+     * the label existed, or by a process that is not part of a supervised fleet
+     * (a one-shot `app:run:now`). It is a diagnostic only — the decision is made
+     * on age, not on the label — but it tells you whether the label is doing
+     * anything and where the remaining unattributable rows are.
+     *
+     * @return array{clearable: int, leased: int, unowned: int}
      */
     public function survey(): array
     {
         $connection = $this->em->getConnection();
-        $fleet = FleetId::current();
-
-        $mine = null === $fleet ? 0 : $connection->fetchOne(
-            'SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claim_fleet = :fleet',
-            ['fleet' => $fleet],
-        );
+        $cutoff = time() - $this->grabAfterSeconds();
 
         return [
-            'mine' => \is_numeric($mine) ? (int) $mine : 0,
-            'foreign' => $this->count(
-                'SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claim_fleet IS NOT NULL AND claim_fleet != :fleet',
-                ['fleet' => $fleet ?? ''],
+            'clearable' => $this->count(
+                'SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claimed_at <= :cutoff',
+                ['cutoff' => $cutoff],
             ),
-            'unowned' => $this->count('SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claim_fleet IS NULL'),
+            'leased' => $this->count(
+                'SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claimed_at > :cutoff',
+                ['cutoff' => $cutoff],
+            ),
+            'unowned' => $this->count(
+                'SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claimed_at <= :cutoff AND claim_fleet IS NULL',
+                ['cutoff' => $cutoff],
+            ),
         ];
     }
 

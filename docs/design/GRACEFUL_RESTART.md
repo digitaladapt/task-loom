@@ -69,11 +69,36 @@ successor. The flag means **"no new deliveries may start"** — it never means
 
 ### S2 — the in-flight request aborts in ~1s, not 300
 
-`symfony/http-client` supports an `on_progress` option, and the contract is
-explicit: *"throwing any exceptions MUST abort the request; it MUST be called
-on connection, on headers and on completion; it SHOULD be called on
-upload/download of data and **at least 1/s**."* Under curl it is
-`CURLOPT_PROGRESSFUNCTION`; a non-zero return aborts the transfer.
+**Measured, 2026-10-02, before building this.** Two facts that decide which
+mechanism is needed, both of which this section previously assumed wrongly:
+
+1. **`pcntl_async_signals(true)` delivers the signal but does not abort the
+   request.** A handler that merely sets a flag runs promptly (2.00s into a
+   request to a 30s-stalling server) and PHP then returns to the blocking
+   socket read and waits out the full 30s. So a handler that records "stop
+   requested" is not, on its own, an abort.
+2. **A handler that *throws* does abort it — cleanly, in 2.00s.** The
+   exception unwinds out of `CurlResponse`, the transfer is torn down, and the
+   engine's `finally` runs normally and releases the claim. Measured the same
+   way: 30s baseline, 2.00s on both probes.
+
+Fact 2 matters more than it looks. It means preemption does not need
+`on_progress` to detect the stop, and does not need a file-based control plane
+(the option this section used to rank second). The signal *is* the signal, and
+it can abort the transfer directly — which also collapses the two paths below
+into one.
+
+The cost is a decision this section can now make explicitly. A throwing
+handler is only safe because the turn model commits nothing until it returns
+(S3), so aborting is equivalent to any other way a turn can fail to finish —
+with the claim released in the `finally` (now verified: it is, because the
+unwind is an ordinary exception), the run re-owed by committed state, and no
+half-written turn.
+
+If `on_progress` is used anyway (it remains the documented route, and is
+guaranteed to fire ~1/s whether or not bytes move): *"throwing any exceptions
+MUST abort the request"*, and under curl it is `CURLOPT_PROGRESSFUNCTION`,
+where a non-zero return aborts the transfer.
 
 `LlmClient::chat()` gains:
 
@@ -311,19 +336,19 @@ and the web-is-critical rule, (b) marks itself as a fleet owner so it may run
 the startup sweep, and (c) is covered by `EntrypointSupervisorTest` like the
 rest of the fleet contract.
 
-### 3. Restart-time preemption needs a separate control channel, and may not
+### 3. Restart-time preemption — the signal is enough (revised)
 
-S2's hook is `on_progress`, which only exists for the duration of a request.
-Preempting an in-flight turn at container shutdown therefore needs two paths:
-the *pre-stop* is "stop admitting, then wait for turns to end on their own
-grace", and the *preempt* is for the case where that wait is too long.
+This section used to argue that the entrypoint's SIGTERM reaches the worker but
+not curl, so the abort could only fire on the next `on_progress` tick. That is
+wrong, and the probe above shows why: on SIGTERM the worker's *own* handler runs
+**inside** the blocking `chat()` call, and if it throws, the exception unwinds
+straight out of the HTTP client and aborts the transfer in ~2s. Nothing needs to
+poll anything; the gap this section was reasoning about does not exist.
 
-The gap is that the entrypoint's SIGTERM goes to the worker, not into curl. The
-worker's own SIGTERM handler sets `shouldStop`, which (S1) sets the stop flag
-the next time anything reads it — and the only thing that reads it during a
-request is S2's callback, which is what we are trying to trigger. So the abort
-fires no sooner than the next callback tick, which is fine in practice (1/s)
-*provided the flag is what the callback reads*, and useless if it is not.
+So the two paths collapse into one. At shutdown the worker still stops admitting
+work (S1), and a turn already on the wire is preempted by the same signal that
+stops admission — one mechanism, not two. `on_progress` is then optional
+polish, not the backstop the design depended on.
 
 Options, in order of how much I would recommend them:
 

@@ -55,9 +55,10 @@ final class RunStartupRequeueTest extends KernelTestCase
     private ToolExecutorInterface&MockObject $executor; // @phpstan-ignore property.uninitialized (assigned in setUp)
     private RunEngine $engine; // @phpstan-ignore property.uninitialized (assigned in setUp)
 
-    /** The env as it was before a test set it; see setUpFleetEnv()/tearDown(). */
+    /** The env as it was before a test set it; see commandAsFleetOwner()/tearDown(). */
     private string|false $restoreOwner = false;
     private string|false $restoreFleetId = false;
+    private string|false $restoreGrabAfter = false;
 
     #[\Override]
     protected function setUp(): void
@@ -113,6 +114,12 @@ final class RunStartupRequeueTest extends KernelTestCase
             putenv(FleetId::ENV.'='.$this->restoreFleetId);
         }
 
+        if (false === $this->restoreGrabAfter) {
+            putenv(ClaimReaper::GRAB_AFTER_ENV);
+        } else {
+            putenv(ClaimReaper::GRAB_AFTER_ENV.'='.$this->restoreGrabAfter);
+        }
+
         parent::tearDown();
     }
 
@@ -125,13 +132,13 @@ final class RunStartupRequeueTest extends KernelTestCase
         // Dry run reports without changing anything: the claim is still held
         // and nothing has been dispatched.
         $tester->execute(['--startup' => true, '--dry-run' => true]);
-        self::assertStringContainsString('would be cleared (left by this fleet)', $tester->getDisplay());
+        self::assertStringContainsString('would be cleared (any age)', $tester->getDisplay());
         self::assertNotNull($this->claimedAt($run), 'a dry run must not clear the claim');
         self::assertSame([], iterator_to_array($this->transport('llm')->get()), 'a dry run must not dispatch');
 
         $tester->execute(['--startup' => true]);
 
-        self::assertStringContainsString('cleared 1 (left by this fleet)', $tester->getDisplay());
+        self::assertStringContainsString('cleared 1 (any age)', $tester->getDisplay());
         self::assertNull($this->claimedAt($run), 'the abandoned claim is cleared, so the run is immediately carryable');
 
         // The reap only *enabled* the recovery; the requeue is what fed the run.
@@ -196,7 +203,7 @@ final class RunStartupRequeueTest extends KernelTestCase
         $tester = $this->commandAsFleetOwner('1');
         $tester->execute(['--startup' => true]);
 
-        self::assertStringContainsString('cleared 1 (left by this fleet)', $tester->getDisplay());
+        self::assertStringContainsString('cleared 1 (any age)', $tester->getDisplay());
         self::assertNull($this->claimedAt($run), 'a dead predecessor\'s claim is clearable at any age');
 
         // And the run is now genuinely carryable: the delivery is *taken* and
@@ -213,50 +220,74 @@ final class RunStartupRequeueTest extends KernelTestCase
         self::assertSame(RunTurnResult::Done, $result, 'the fixture\'s second answer completes the run');
     }
 
-    public function testAnotherFleetsClaimIsLeftToTheLease(): void
+    public function testAFreshClaimSurvivesWhenTheGraceBoundIsRaised(): void
     {
-        // A workers-only host beside a UI, sharing one database: the other
-        // fleet may be running this very second. Its claim is not abandoned,
-        // however old it looks, and the sweep must not touch it.
-        $run = $this->runAwaitingItsSecondTurn(claimAgeSeconds: 7200, claimFleet: 'some-other-fleet');
+        // THE MULTI-FLEET CASE, and the only situation in which the sweep may
+        // decline a claim it can see. With more than one fleet against one
+        // database, a claim found at boot may belong to a peer that is working
+        // right now: "I saw it at boot" no longer proves "its owner is gone".
+        // Raising the bound to longer than a turn can run restores the proof.
+        //
+        // Note what this test replaced. A previous version gave the claim an
+        // id different from the fleet's and asserted it survived *for that
+        // reason*. It passed — and it was worthless, because it passed for the
+        // wrong reason and encoded the very bug that made the feature a no-op:
+        // in production the two ids differ on every single restart.
+        $run = $this->runAwaitingItsSecondTurn(claimAgeSeconds: 5);
 
-        $tester = $this->commandAsFleetOwner('1');
+        $tester = $this->commandAsFleetOwner('1', grabAfter: 3600);
         $tester->execute(['--startup' => true]);
 
-        self::assertStringContainsString('0 (left by this fleet), 1 held by another fleet', $tester->getDisplay());
-        self::assertNotNull($this->claimedAt($run), 'another fleet\'s claim must survive the boot sweep');
+        self::assertStringContainsString('cleared 0 (older than 3600s)', $tester->getDisplay());
+        self::assertStringContainsString('1 left to the lease', $tester->getDisplay());
+        self::assertNotNull($this->claimedAt($run), 'a claim fresher than the bound may be a live peer\'s, and must survive');
     }
 
-    public function testAClaimWithNoRecordedOwnerIsLeftToTheLease(): void
+    public function testTheGraceBoundStillClearsWhatIsOldEnough(): void
     {
-        // A legacy row, or a turn taken by a process with no fleet identity —
-        // a one-shot app:run:now in a terminal, which is very much alive.
-        // Nothing is proven about it, so nothing is done to it: it waits on
-        // CLAIM_STALE_SECONDS, slowly and safely. This is why claim_fleet is
-        // nullable rather than defaulted.
+        // The other half of the bound: it delays, it does not disable. A claim
+        // past the bound is one no turn could still be holding.
+        $run = $this->runAwaitingItsSecondTurn(claimAgeSeconds: 7200);
+
+        $tester = $this->commandAsFleetOwner('1', grabAfter: 3600);
+        $tester->execute(['--startup' => true]);
+
+        self::assertStringContainsString('cleared 1 (older than 3600s)', $tester->getDisplay());
+        self::assertNull($this->claimedAt($run));
+    }
+
+    public function testAClaimWithNoOwnerLabelIsStillClearedAndReported(): void
+    {
+        // A row written before the label existed, or by a process that is not
+        // part of a supervised fleet — a one-shot `app:run:now` in a terminal.
+        // The label is a diagnostic, not the decision: the claim is cleared on
+        // age like any other, and its lack of a label is reported separately so
+        // the operator can see what the label is and is not covering.
         $run = $this->runAwaitingItsSecondTurn(claimAgeSeconds: 5, claimFleet: null);
 
         $tester = $this->commandAsFleetOwner('1');
         $tester->execute(['--startup' => true]);
 
-        self::assertStringContainsString('0 (left by this fleet), 0 held by another fleet, 1 with no owner recorded', $tester->getDisplay());
-        self::assertNotNull($this->claimedAt($run), 'an unattributable claim must survive the boot sweep');
+        self::assertStringContainsString('cleared 1 (any age)', $tester->getDisplay());
+        self::assertStringContainsString('1 of those without an owner label', $tester->getDisplay());
+        self::assertNull($this->claimedAt($run), 'the label is diagnostic; age is the decision');
     }
 
-    public function testAFleetOwnerWithNoFleetIdRefusesToSweep(): void
+    public function testASweepWithNoFleetLabelStillWorksAndSaysSo(): void
     {
-        // The belt to the gate's braces: even a process that *says* it owns
-        // the fleet cannot sweep if it has no identity to attribute claims to.
-        // Sweeping zero silently is exactly how the first cut looked like it
-        // worked, so this says so out loud.
+        // A manual `app:run:requeue --startup` from a terminal is a fleet owner
+        // with no identity. It must still repair what it finds — that was the
+        // whole complaint that led here — and it says out loud that the claims
+        // it leaves behind will be unlabelled.
         $run = $this->runAwaitingItsSecondTurn(claimAgeSeconds: 5);
 
         $tester = $this->commandAsFleetOwner('1', fleetId: null);
         $tester->execute(['--startup' => true]);
 
         self::assertStringContainsString(FleetId::ENV, $tester->getDisplay());
-        self::assertStringContainsString('no claim can be attributed', $tester->getDisplay());
-        self::assertNotNull($this->claimedAt($run), 'no fleet id means no attribution, and so no clearing');
+        self::assertStringContainsString('will carry no owner label', $tester->getDisplay());
+        self::assertStringContainsString('cleared 1 (any age)', $tester->getDisplay());
+        self::assertNull($this->claimedAt($run), 'a fleet with no identity still sweeps — it just cannot label');
     }
 
     public function testStartupCannotBeScopedToOneRun(): void
@@ -302,10 +333,11 @@ final class RunStartupRequeueTest extends KernelTestCase
      * completion with no tool calls ends the run, and a terminal run owes
      * nothing — the fixture would be asserting against the wrong state.
      *
-     * $claimFleet is what makes the claim attributable. The default is the
-     * fleet these tests run as, i.e. a claim this fleet left behind — the
-     * "killed and restarted" case. Pass another id for a claim held by a
-     * different fleet, or null for one nobody can account for.
+     * $claimFleet is only a label — it makes a leftover claim legible in the
+     * log and on the admin surface, and it is deliberately NOT what the sweep
+     * decides on (see ClaimReaper for why an identity cannot express "me, from
+     * last time"). The default stands for "claimed by the previous run of this
+     * container", which is the case these tests are about.
      */
     private function runAwaitingItsSecondTurn(int $claimAgeSeconds = 7200, ?string $claimFleet = 'fleet-under-test'): Run
     {
@@ -336,8 +368,9 @@ final class RunStartupRequeueTest extends KernelTestCase
         $this->deliverOne('tools');
         $this->transport('llm')->reset();
 
-        // The claim the dead worker never released — stamped with the fleet
-        // that held it, which is the fact the sweep acts on.
+        // The claim the dead worker never released. Its age is what the sweep
+        // decides on ("could this still be in flight?"); the fleet label is
+        // kept because it is what makes the leftover legible afterwards.
         $this->em->getConnection()->executeStatement(
             'UPDATE run SET lock_version = lock_version + 1, claimed_at = :at, claim_fleet = :fleet WHERE id = :id',
             ['at' => time() - $claimAgeSeconds, 'fleet' => $claimFleet, 'id' => $runId],
@@ -358,10 +391,11 @@ final class RunStartupRequeueTest extends KernelTestCase
      * test-only injection point. The value is restored afterwards so a leaked
      * TASKLOOM_FLEET_OWNER cannot silently grant authority to a later test.
      */
-    private function commandAsFleetOwner(?string $value, ?string $fleetId = 'fleet-under-test'): CommandTester
+    private function commandAsFleetOwner(?string $value, ?string $fleetId = 'fleet-under-test', ?int $grabAfter = null): CommandTester
     {
         $this->restoreOwner = getenv(FleetOwnership::ENV);
         $this->restoreFleetId = getenv(FleetId::ENV);
+        $this->restoreGrabAfter = getenv(ClaimReaper::GRAB_AFTER_ENV);
 
         if (null === $value) {
             putenv(FleetOwnership::ENV);
@@ -373,6 +407,15 @@ final class RunStartupRequeueTest extends KernelTestCase
             putenv(FleetId::ENV);
         } else {
             putenv(FleetId::ENV.'='.$fleetId);
+        }
+
+        // The grace bound: unset means the documented default (0 — take
+        // anything, because at boot nothing can be in flight). Tests that model
+        // a multi-fleet deployment set it explicitly.
+        if (null === $grabAfter) {
+            putenv(ClaimReaper::GRAB_AFTER_ENV);
+        } else {
+            putenv(ClaimReaper::GRAB_AFTER_ENV.'='.$grabAfter);
         }
 
         $container = static::getContainer();
