@@ -372,6 +372,37 @@ makes a leftover claim *legible* afterwards — `claim_fleet` on the row, and
 the count of cleared claims that had none, answer "who held this, and is the
 label covering what I think it covers?".
 
+**The reap's premise is per lane, and the owner flag is coarser than it.**
+"At boot nothing in this process group can be in flight" is not a fact about
+the process group; it is a fact about the lanes that process group *consumes*. A
+claim is held for one LLM request **or** one set of tool calls, so a `serve`
+with `TASKLOOM_LLM_MAX_CONCURRENCY=0` — the worker-fleet-with-no-model
+
+shape, for a host whose model lives in another container — is a fleet owner by
+the flag (it does start workers) while the llm lane belongs to a peer it cannot
+see. At the default bound it would clear that peer's claims, re-dispatch its
+runs, and reset `lock_version`, after which the peer's committed turn is
+discarded as `Stale` and the work is done twice — live side effects and all.
+Tool claims are the same case on the other lane, and worse in consequence.
+
+So the boot sweep runs only when the fleet consumes **every** lane the claim
+protocol spans; a `serve` that sets either `TASKLOOM_LLM_MAX_CONCURRENCY` or
+`TASKLOOM_TOOL_MAX_CONCURRENCY` to `0` skips it and says so. The rule is stated
+on the fleet's shape rather than on the claims, because the reap itself is a
+blanket `UPDATE run ... WHERE claimed_at IS NOT NULL` with no notion of which
+lane a claim belongs to — so "do I own everything I am about to clear?" is not
+a question the sweep can answer per row, and a co-located tools worker beside a
+peer-owned llm lane is declined even though it is the only consumer of every
+llm claim present. This costs the
+documented path nothing: the single container's stop-time failure — a turn that
+outlived its shutdown window — is repaired by its *successor*, which runs the
+full fleet and does sweep. An operator who wants the sweep on a partial fleet
+says so with `TASKLOOM_FLEET_GRAB_AFTER`, the same knob-and-judgement answer the
+multi-replica topology gets. (The alternative considered was to insist on the
+bound whenever fewer than two lanes are consumed; the entrypoint cannot
+validate an opt-in operator did not set, so the safe primitive — decline, and
+report it — is what shipped.)
+
 Three further properties: the sweep is **idempotent** (every dispatch is work
 committed state already implies, so it can run on every start); the owner flag
 and the identity are deliberately **not** part of the compose env contract

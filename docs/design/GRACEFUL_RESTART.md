@@ -10,6 +10,16 @@ protocol, and the container's stop path
 > the `Preempted` turn result, the boot pre-flight) are not built. Per the
 > project's rule that the doc lands before the code, the design below is
 > unchanged from the proposal; only this header tracks what is real.
+>
+> **One correction to shipped step 1 (SPEC §6.2).** The reap was gated on the
+> fleet-owner flag, but its premise — "no worker in this process group can be
+> mid-turn" — is per lane, and the flag is coarser: `serve --no-web` with
+> `TASKLOOM_LLM_MAX_CONCURRENCY=0` is a fleet owner (it starts tools workers)
+> whose llm lane belongs to a peer. At the default bound it would have cleared
+> that peer's claims and re-dispatched its runs; the peer's committed turn is
+> then `Stale` and the work happens twice. The sweep now runs only for a fleet
+> that consumes both lanes, and says so when it does not. Full reasoning in
+> SPEC §6.2.
 
 **Companion to:** `SINGLE_CONTAINER_RUNTIME.md` (this document revises its
 "Shutdown" section) · `SPEC.md` §6 (this document adds §6.2)
