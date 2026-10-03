@@ -20,6 +20,13 @@ can address both but they are not the same problem.
 (2) is where "90% of the way there" is true, and it is worth saying
 exactly which 90%: the *seam* exists. The *preemption* does not.
 
+One fact reframes everything below, so it is stated up front:
+**`TASKLOOM_LLM_MAX_CONCURRENCY` defaults to 1** (`.env.example`; the
+entrypoint falls back to 1). The single-worker host is not an edge case to
+be handled at the end — it is the default deployment, and at one worker
+queue priority alone cannot deliver a real-time chat (§4.4). That is a
+reason to sequence the streaming work earlier than it might otherwise look.
+
 ## 1. What is already true (grounding)
 
 Verified against `main` (97d94f8), not assumed.
@@ -161,8 +168,13 @@ semaphore is counted in. So preemption is not "stop the task" — it is
 The mechanism is the smallest one that exists:
 
 - add a `chat` lane, same table, `queue_name = chat`;
-- give the LLM workers the **head** receiver: `messenger:consume chat llm
-  tools`.
+- give the LLM workers the **head** receiver: `messenger:consume chat llm`.
+
+The tools workers are untouched — the fleet already splits the two kinds
+(`LLM_CMD` consumes `llm`, `TOOLS_CMD` consumes `tools`), so a worker that
+runs the model does not also run tools, and a slow tool cannot block a
+chat. (A single worker *could* be given all three lanes; the fleet does not,
+and matching the fleet keeps the change to one line per worker type.)
 
 Because consume order is strict priority (§1), every existing LLM worker
 becomes chat-aware with no new process, no lock, no async runtime. A chat
@@ -218,15 +230,30 @@ client.
 *(Decision locked: real-time is the goal; streaming abort is acceptable as
 v2.)*
 
-### 4.4 The single-worker case, and the reservation question
+### 4.4 The single-worker case — which is the default
 
-If `TASKLOOM_LLM_MAX_CONCURRENCY = 1` (one worker), a chat and a task
-cannot run at the same time at all: the chat wins the *next* call but still
-waits for the current one. Priority does not create a spare worker.
-Whether v1 should **reserve ≥1 worker for chat** (N is the task budget;
-chat may exceed it) is open — see §9. v1's answer is "N is the total; chat
-just goes first", which is correct but means a single-worker deployment
-still feels the current generation.
+`TASKLOOM_LLM_MAX_CONCURRENCY` defaults to **1**. At one worker a chat and
+a task cannot run at the same time at all: the chat wins the *next* call
+but still waits for the current one. Priority reorders the queue; it does
+not create a spare worker. So at the default,
+
+> chat latency under priority alone ≈ one in-flight generation,
+> every time.
+
+For a reasoning model that is tens of seconds — which is not "real-time",
+and no scheduling change fixes it. The levers, in order of honesty:
+
+1. **Streaming abort (§4.3) is the real fix** at any worker count, and the
+   *only* fix at N=1. At the default this is not a nice-to-have; it is the
+   difference between the feature working and not. That is why the phasing
+   in §8 puts the client seam in v1 rather than deferring all of it.
+2. **N ≥ 2 makes queue priority sufficient** — chat runs on a free worker
+   while a task's generation is in flight. If a deployment can spend the
+   GPU, this is the cheap answer and it is one env var.
+3. **Reserving ≥1 worker for chat** is the open question (§9): is N the
+   *task* budget (chat may exceed it) or the *total* (chat competes and
+   wins)? v1 assumes total, which is correct but leaves N=1 dependent on
+   (1).
 
 ## 5. Alerts are not chat
 
@@ -300,7 +327,9 @@ one is a real risk, not a checklist item.
   clears *every* claim, on the premise that no worker in this process group
   can be mid-turn — a premise that "covers only the lanes this fleet
   actually consumes" (`docker/entrypoint.sh`). **Adding a `chat` lane means
-  the shape check must learn it.** A fleet that consumes `chat` has new
+  the shape check must learn it** — and since the lane is owned by the LLM
+  workers, the ownership rule is "`chat` is owned exactly when
+  `LLM_WORKERS > 0`", the same predicate that governs `llm`. A fleet that consumes `chat` has new
   claims in the table; a fleet that does not must decline the sweep for
   that lane, exactly as it already does for a peer-owned `llm` lane.
   Getting this wrong is the same "work done twice, live side effects and
@@ -334,6 +363,8 @@ one is a real risk, not a checklist item.
    loop and the ledger. No streaming. This is the "chat preempts tasks"
    milestone.
 3. **Streaming client + cancel token** → true sub-second preemption.
+   *At the default N=1 this is what makes chat real-time; at N≥2 it is
+   what makes it instant. Either way it is on the critical path.*
 4. **Alerts** — severity, destination policy, coalescing.
 5. **Task sub-priorities** (a daily briefing above email processing). The
    lane scheme generalizes directly: `chat` > `llm_high` > `llm` >
