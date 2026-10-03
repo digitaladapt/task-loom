@@ -62,11 +62,11 @@ final class QueryBuilderOrderingTest extends TestCase
         foreach ($this->phpFilesUnder(self::ROOT.'/src') as $file) {
             $contents = file_get_contents($file);
 
-            if ($contents === false) {
+            if (false === $contents) {
                 self::fail(sprintf('Could not read %s.', $file));
             }
 
-            if (preg_match(self::DEPRECATED_ORDER, $contents) === 1) {
+            if (1 === preg_match(self::DEPRECATED_ORDER, $contents)) {
                 $offenders[] = substr($file, \strlen(self::ROOT) + 1);
             }
         }
@@ -74,8 +74,8 @@ final class QueryBuilderOrderingTest extends TestCase
         self::assertSame(
             [],
             $offenders,
-            "Passing a string as \$order to QueryBuilder::orderBy()/addOrderBy() is "
-            ."deprecated (doctrine/orm#11313). Use \\SortDirection::Ascending / "
+            'Passing a string as $order to QueryBuilder::orderBy()/addOrderBy() is '
+            .'deprecated (doctrine/orm#11313). Use \\SortDirection::Ascending / '
             ."::Descending instead — the global enum needs no import.\nOffending files:\n  - "
             .implode("\n  - ", $offenders),
         );
@@ -113,7 +113,7 @@ final class QueryBuilderOrderingTest extends TestCase
     ): void {
         self::assertSame(
             $expectedToMatch,
-            preg_match(self::DEPRECATED_ORDER, $snippet) === 1,
+            1 === preg_match(self::DEPRECATED_ORDER, $snippet),
             sprintf('Pattern misjudged: %s', $snippet),
         );
     }
@@ -131,7 +131,7 @@ final class QueryBuilderOrderingTest extends TestCase
         foreach ($iterator as $entry) {
             \assert($entry instanceof \SplFileInfo);
 
-            if ($entry->isFile() && $entry->getExtension() === 'php') {
+            if ($entry->isFile() && 'php' === $entry->getExtension()) {
                 $files[] = $entry->getPathname();
             }
         }
