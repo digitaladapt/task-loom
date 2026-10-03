@@ -2,7 +2,8 @@
 
 **Status:** design. Nothing here is built. Once built, the attribution
 invariant and the chat aggregate would land as SPEC §15; the priority lane
-as a §6.x note.
+as a §6.x note. **The first thing to settle is not either of those — it is
+the surface the chat runs on (§9).**
 
 ## 0. The two problems
 
@@ -20,12 +21,11 @@ can address both but they are not the same problem.
 (2) is where "90% of the way there" is true, and it is worth saying
 exactly which 90%: the *seam* exists. The *preemption* does not.
 
-One fact reframes everything below, so it is stated up front:
-**`TASKLOOM_LLM_MAX_CONCURRENCY` defaults to 1** (`.env.example`; the
-entrypoint falls back to 1). The single-worker host is not an edge case to
-be handled at the end — it is the default deployment, and at one worker
-queue priority alone cannot deliver a real-time chat (§4.4). That is a
-reason to sequence the streaming work earlier than it might otherwise look.
+One fact reframes the capacity half, so it is stated up front:
+**`TASKLOOM_LLM_MAX_CONCURRENCY` defaults to 1, and it means the total
+in-flight count.** The single-worker host is not an edge case to be handled
+at the end — it is the default deployment, and at one worker queue priority
+alone cannot deliver a real-time chat (§4.4).
 
 ## 1. What is already true (grounding)
 
@@ -36,9 +36,8 @@ Verified against `main` (97d94f8), not assumed.
   (`config/packages/messenger.yaml`). Routing maps `LlmTurnMessage → llm`
   and `ToolTurnMessage → tools`.
 - **The unit is one LLM call.** One delivery of `LlmTurnMessage` = one
-  request = "the unit the `TASKLOOM_LLM_MAX_CONCURRENCY` semaphore is
-  counted in" (its own docblock). N workers ⇒ at most N requests on the
-  wire.
+  request = the unit `TASKLOOM_LLM_MAX_CONCURRENCY` is counted in (its own
+  docblock). N workers ⇒ at most N requests on the wire.
 - **Concurrency is the worker count.** `docker/entrypoint.sh` spawns
   `LLM_WORKERS` processes running `messenger:consume llm` and
   `TOOLS_WORKERS` running `messenger:consume tools`. Setting the LLM
@@ -92,10 +91,10 @@ contradiction with no author.
 The distinction matters and should not be collapsed.
 
 - **The turn record** is rich and durable: `speaker` (`andrew` | `nia`),
-  `direction` (inbound/outbound — machinery, not meaning), `surface`
-  (`ntfy` | `web` | `voice` | `cli` | `task`), `transport_ref` (the
-  transport's own id — ntfy's message id, which we already rely on), `at`,
-  and `reply_to`.
+  `role`, `origin` (the surface it came through — config-resolved, §9),
+  `content`, `reply_to_id` (intra-conversation threading), `at`. Direction
+  is derivable from `speaker` given the roster and is not stored; nothing
+  transport-specific is stored at all (§9).
 - **The prompt** renders attribution as **roles**: `andrew → user`,
   `nia → assistant`. This mapping is what tells the model whose opinions
   are whose, and it is the form a small model is actually trained on — so
@@ -161,7 +160,15 @@ jamming a conversation into a `Run` because the plumbing is already there.
 
 ### 4.1 The unit and the mechanism
 
-The schedulable unit is **one LLM call**, because that is what the
+`TASKLOOM_LLM_MAX_CONCURRENCY` is the **total** number of requests that may
+be in flight to the model at once — not a per-lane budget, not a task-only
+budget. It is the same quantity as the model server's own parallelism: a
+llama.cpp with `parallel=1` *rejects outright* any request that arrives
+mid-generation, so the fleet's in-flight count has to match what the server
+will actually accept. One worker is the fleet shape that matches a
+single-slot server.
+
+The schedulable unit is therefore **one LLM call**, because that is what the
 semaphore is counted in. So preemption is not "stop the task" — it is
 **which lane the next available worker drains first**.
 
@@ -173,14 +180,14 @@ The mechanism is the smallest one that exists:
 The tools workers are untouched — the fleet already splits the two kinds
 (`LLM_CMD` consumes `llm`, `TOOLS_CMD` consumes `tools`), so a worker that
 runs the model does not also run tools, and a slow tool cannot block a
-chat. (A single worker *could* be given all three lanes; the fleet does not,
-and matching the fleet keeps the change to one line per worker type.)
+chat. (A single worker *could* be given all three lanes; the fleet does
+not, and matching the fleet keeps the change to one line per worker type.)
 
 Because consume order is strict priority (§1), every existing LLM worker
 becomes chat-aware with no new process, no lock, no async runtime. A chat
 turn sitting in the `chat` lane is taken before any task turn the same
-worker could have taken — and for *every* worker, since they are symmetric.
-That is the mechanism, in full.
+worker could have taken — and for *every* worker, since they are
+symmetric. That is the mechanism, in full.
 
 ### 4.2 What "halt, run, resume" actually scopes to
 
@@ -217,8 +224,8 @@ client.
 - **v1 — no abort.** The chat call jumps the queue and at worst waits out
   the current generation. Nothing is cancelled, no compute is wasted, and
   correctness is untouched (a withdrawn call re-runs from checkpoint).
-  **Do now:** widen `LlmClientInterface` with a cancellation/streaming seam
-  (a cancel token plus an optional per-chunk callback) and keep the
+  **Do now:** widen `LlmClientInterface` with a cancellation/streaming
+  seam (a cancel token plus an optional per-chunk callback) and keep the
   non-streaming implementation. The seam costs nothing today and makes v2
   an implementation, not a redesign.
 - **v2 — streaming abort.** POST with `stream: true`, read chunks, and
@@ -232,28 +239,27 @@ v2.)*
 
 ### 4.4 The single-worker case — which is the default
 
-`TASKLOOM_LLM_MAX_CONCURRENCY` defaults to **1**. At one worker a chat and
-a task cannot run at the same time at all: the chat wins the *next* call
-but still waits for the current one. Priority reorders the queue; it does
-not create a spare worker. So at the default,
+`TASKLOOM_LLM_MAX_CONCURRENCY` defaults to **1**, and it means the *total*
+in-flight count (§4.1) — a decision, not a gap to be filled later. There is
+no "reserve a worker for chat": with a single-slot model server there is no
+spare slot to reserve, and the count has to match what the server will
+accept. So at the default:
 
-> chat latency under priority alone ≈ one in-flight generation,
-> every time.
+> chat latency under priority alone ≈ one in-flight generation, every time.
 
-For a reasoning model that is tens of seconds — which is not "real-time",
-and no scheduling change fixes it. The levers, in order of honesty:
+For a reasoning model that is tens of seconds — not "real-time", and no
+scheduling change fixes it. The levers, in order of honesty:
 
 1. **Streaming abort (§4.3) is the real fix** at any worker count, and the
    *only* fix at N=1. At the default this is not a nice-to-have; it is the
-   difference between the feature working and not. That is why the phasing
-   in §8 puts the client seam in v1 rather than deferring all of it.
-2. **N ≥ 2 makes queue priority sufficient** — chat runs on a free worker
-   while a task's generation is in flight. If a deployment can spend the
-   GPU, this is the cheap answer and it is one env var.
-3. **Reserving ≥1 worker for chat** is the open question (§9): is N the
-   *task* budget (chat may exceed it) or the *total* (chat competes and
-   wins)? v1 assumes total, which is correct but leaves N=1 dependent on
-   (1).
+   difference between the feature working and not. The phasing in §8 puts
+   the client seam in v1 for this reason.
+2. **More workers help only if the server can serve them.** Raising N lets
+   a chat run on a free worker *while* a task's generation is in flight —
+   but on a `parallel=1` server that second request is rejected outright,
+   so the chat waits exactly the same and the extra workers just log
+   errors. "Increase the worker count" is only a lever when the model
+   server can actually accept the parallelism.
 
 ## 5. Alerts are not chat
 
@@ -283,28 +289,40 @@ surfaced in the UI*. An alert is an *outbound notification*. They are
 different, and this doc should say how they meet: an alert may point at a
 `needs_attention` run, but the UI queue is not the notification channel.
 
-**Open (per the user):** an interactive `ask-user` turn — chat or alert?
-The proposed line is **"does this turn expect an answer?"** If yes, it is
-conversation (it belongs where the reply will be typed); if it only
-reports, it is an alert. The line is *intent*, not origin — a task may emit
-either.
+An alert is exactly the case ntfy is good at (§9): fire-and-forget, no
+transcript, no reply expected. Chat and alerts are not the same transport
+problem, and should not share one.
+
+**Deferred: interactive `ask-user`.** The original plan for `ask-user` was
+a turn that hands back a *link to a web-based interaction*. That work is
+**deferred** — the interaction model itself is under reconsideration, so
+pinning a destination for it now would be designing against a guess. The
+classification line above is what the eventual `ask-user` slots into: an
+outbound turn that expects an answer is conversation, one that only reports
+is an alert.
 
 ## 6. Data model sketch (v1)
 
 Infrastructure lives in the ledger; these are the new aggregates.
 
     Chat        id, title, created_at, updated_at
-    ChatTurn    id, chat_id, seq, speaker, role, direction, surface,
-                transport_ref, content, reply_to_id, at
+    ChatTurn    id, chat_id, seq, speaker, role, origin, content,
+                reply_to_id, at
     Alert       id, severity, source, subject, body, destination,
-                dedup_key, delivered_at, at
+                dedup_key, origin, delivered_at, at
 
 Notes:
 
+- `origin` is the surface the turn came through (`web` in v1), resolved
+  from config — **not** a per-message transport id. An earlier draft of
+  this doc had a `transport_ref` field here; it is gone, and §9 explains
+  why it was a mistake.
+- `direction` is not stored: given the roster, it is derivable from
+  `speaker` (the assistant's turns are outbound).
 - `speaker` is an id (`andrew` | `nia`) validated against the roster;
-  `role` is stored denormalized so a transcript renders without re-deriving
-  config, and so a historical turn keeps the role it was rendered with even
-  if the roster changes.
+  `role` is stored denormalized so a transcript renders without
+  re-deriving config, and so a historical turn keeps the role it was
+  rendered with even if the roster changes.
 - The roster is **config in v1** (two fixed participants), not a table.
   A table is over-engineering until a third participant exists; the
   `speaker`/`role` split is what keeps that an addition later.
@@ -324,14 +342,12 @@ These are the places the change touches existing, load-bearing code. Each
 one is a real risk, not a checklist item.
 
 - **The boot sweep (SPEC §6.2) reasons over the fleet's shape.** The reap
-  clears *every* claim, on the premise that no worker in this process group
-  can be mid-turn — a premise that "covers only the lanes this fleet
-  actually consumes" (`docker/entrypoint.sh`). **Adding a `chat` lane means
-  the shape check must learn it** — and since the lane is owned by the LLM
-  workers, the ownership rule is "`chat` is owned exactly when
-  `LLM_WORKERS > 0`", the same predicate that governs `llm`. A fleet that consumes `chat` has new
-  claims in the table; a fleet that does not must decline the sweep for
-  that lane, exactly as it already does for a peer-owned `llm` lane.
+  clears *every* claim, on the premise that no worker in this process
+  group can be mid-turn — a premise that "covers only the lanes this fleet
+  actually consumes" (`docker/entrypoint.sh`). **Adding a `chat` lane
+  means the shape check must learn it**, and since the lane is owned by
+  the LLM workers the ownership rule is "`chat` is owned exactly when
+  `LLM_WORKERS > 0`" — the same predicate that already governs `llm`.
   Getting this wrong is the same "work done twice, live side effects and
   all" bug the lane-ownership rule exists to prevent. This is the
   highest-consequence integration point in the design.
@@ -339,10 +355,12 @@ one is a real risk, not a checklist item.
   recovery re-dispatches what abandoned claims are *owed*. A chat turn is
   owed in the same sense a run turn is; omit it and a chat hangs on
   restart.
-- **`TASKLOOM_LLM_MAX_CONCURRENCY` now counts chat calls.** A chat can
-  occupy the only worker. Intended — that is priority — but the operator
-  must understand that capacity includes chat traffic, and a busy chat
-  reduces task throughput. Say so where the variable is documented.
+- **`TASKLOOM_LLM_MAX_CONCURRENCY` now counts chat calls**, and it is a
+  *total* that must match the model server's parallelism (§4.1). A chat
+  can occupy the only slot. Intended — that is priority — but the operator
+  must understand that capacity includes chat traffic, and that setting N
+  above the server's `parallel` produces rejected requests, not extra
+  throughput. Say so where the variable is documented.
 - **`redeliver_timeout` on the `chat` lane** must match the run lanes
   (7200s), for the same reason: it has to be able to take over a dead
   worker's claim.
@@ -350,18 +368,24 @@ one is a real risk, not a checklist item.
   `failed` and the run shows it. A chat turn that throws must not die
   silently — the human is *waiting*. A failed chat call should produce a
   visible "I couldn't get a turn" signal, not a dropped message. There is
-  no precedent for this in the run lanes; it must be designed, not assumed.
-- **No Messenger retry on the chat lane either.** Same reasoning as the run
-  lanes: the engine owns retry semantics and the ledger is the only source
-  of truth. A retry strategy here would be a second, invisible one.
+  no precedent for this in the run lanes; it must be designed, not
+  assumed.
+- **No Messenger retry on the chat lane either.** Same reasoning as the
+  run lanes: the engine owns retry semantics and the ledger is the only
+  source of truth. A retry strategy here would be a second, invisible one.
 
 ## 8. Phasing
 
-1. **Attribution.** Turn records, the roster, role rendering. Stands alone;
-   fixes the safety invariant even before chat exists.
+1. **A conversational loop, and the surface it runs on.** Decide
+   build-vs-adopt (§9), then the smallest thing that sends a message to the
+   model, streams a reply back, and records the turn. **Attribution (§2)
+   lands with it** — a turn record *is* the chat's data model, so splitting
+   them would mean writing it twice. This is the step that answers the
+   open questions by existing.
 2. **The chat lane as priority head** + the chat turn handler, reusing the
-   loop and the ledger. No streaming. This is the "chat preempts tasks"
-   milestone.
+   loop and the ledger. No streaming on the *client* side yet (the lane is
+   a queue-priority change; it does not need the streaming reader). This is
+   the "chat preempts tasks" milestone.
 3. **Streaming client + cancel token** → true sub-second preemption.
    *At the default N=1 this is what makes chat real-time; at N≥2 it is
    what makes it instant. Either way it is on the critical path.*
@@ -373,22 +397,70 @@ one is a real risk, not a checklist item.
 *(Decision locked: v1 is chat + everything else; task sub-priorities are
 later.)*
 
-## 9. Open questions
+## 9. The chat surface — which product?
 
-1. **Reserve a worker for chat?** Is `TASKLOOM_LLM_MAX_CONCURRENCY` the
-   task budget (chat may exceed it) or the total (chat competes and wins
-   the queue)? v1 assumes total; a single-worker host argues for a
-   reservation.
-2. **`ask-user` destination** — chat or alert? Proposed rule: expects an
-   answer ⇒ chat.
-3. **Transport shape.** One ntfy topic per conversation, or a
-   request/response pair? What does `transport_ref` correlate against on
-   the way back?
+This is now the **first** question, ahead of any lane work, because it
+decides what a "turn" is and where it comes from. The options, at three
+levels of ambition:
+
+1. **Build the smallest web chat.** A page that sends a message, shows the
+   conversation, and streams the reply. It reuses the existing stack (Twig
+   + FrankenPHP) and the existing sign-in (SPEC §4.3, §11), and it follows
+   the shape already in the tree — a controller per area
+   (`RunController`, `TaskAdminController`, …) with a `templates/<area>/`
+   directory. The read path is not new ground either: `McpController`
+   already returns a `StreamedResponse`, so streaming bytes out of a
+   controller is precedent, not invention. Cost: a controller, a template,
+   two small entities, and an SSE-or-poll read path for the assistant's
+   turn. This is the option that *answers the open questions by existing*
+   — you cannot know what the chat wants until you can use one.
+2. **Adopt an existing chat front-end** (Matrix / Signal / IRC with a
+   bridge). Cheaper if the bridge is trivial; expensive in exactly the place
+   this system cannot afford it — a third party's identity and delivery
+   semantics leaking into attribution. §2's invariant needs authorship to
+   be *ours*, not a homeserver's opinion of it.
+3. **ntfy as the surface.** ntfy is a *notification* transport: push,
+   mostly one-way, with no notion of a transcript. Good for alerts (§5).
+   Wrong as the chat.
+
+**Recommendation:** build the minimal web chat (1), keep ntfy for alerts
+(3, for that purpose), and treat any other surface as an *adapter* onto the
+same turn record later — not as the thing the record is shaped around.
+
+**Multiple surfaces?** Support them as adapters, but only after one works
+end to end. The turn record in §6 is deliberately surface-agnostic (a single
+`origin` field), which is what makes "add a surface" an addition rather than
+a migration. Do not build the adapter layer before there is a second
+adapter.
+
+**What this settles.** The first draft of this doc carried a
+`transport_ref` field — "the transport's own message id" — and an open
+question about "one ntfy topic per conversation, or a request/response
+pair". Both presumed the conversation lives *inside* a delivery transport's
+id space. If the chat is a web surface we build, the endpoint is the
+interface and there is no durable per-message transport id to store:
+`transport_ref` is deleted, and `reply_to_id` (intra-conversation
+threading) is the only correlation field that survives. This is the kind of
+error the surface decision exists to flush out, which is why it comes
+first.
+
+## 10. Open questions
+
+1. **The chat surface** — build vs adopt (§9). *Blocks the first code.*
+2. **The streaming read path** — SSE or long-poll, and whether a chat
+   turn's partial output is persisted per chunk or only on completion.
+   (Related to §4.3: the same streaming reader serves both the preemption
+   goal and the "watch it type" feel.)
+3. **Unbounded conversation.** A `Run` ends, so its context is bounded by
+   construction. A chat does not end, so its transcript grows forever. The
+   SPEC has context-budget machinery for runs; a chat needs the analogous
+   policy — what scrolls out, what is summarized, what is always kept.
+   Not designed here.
 4. **Which human?** The roster makes a second human an addition, but
    nothing yet decides *which* participant an inbound message is from. v1:
-   one human, identity from config.
+   one human, identity from the session.
 
-## 10. What this doc is not
+## 11. What this doc is not
 
 Not a task. Not a `Run`. Not a second engine. The claim of this design is
 that attribution and priority are both small changes *because* they are
