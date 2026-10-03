@@ -1,9 +1,9 @@
 # Chat and Capacity
 
-**Status:** design. Nothing here is built. Once built, the attribution
-invariant, the chat aggregate, and the exchange ledger would land as SPEC
-§15; the priority lane as a §6.x note. **The first thing to settle is the
-surface (§9) — decided, then the aggregate shape (§3.3).**
+**Status:** design — settled. Nothing here is built. The open questions
+from review are answered (§10.4 lists them); what remains open is listed in
+§10. Once built, the attribution invariant, the chat aggregate, and the
+exchange ledger would land as SPEC §15; the priority lane as a §6.x note.
 
 ## 0. The two problems
 
@@ -482,12 +482,24 @@ Notes:
   invariant, so it does not live in the `payload` JSON (§2.3). The
   machinery events (`llm_request`, `checkpoint`, `failure`, …) leave them
   null and use `payload` exactly as `RunEvent` does.
-- **The transcript is a filtered read.** The ordered `ChatExchangeEvent`
-  rows whose type is conversational, across the chat's exchanges. No
-  separate turn table in v1 — a turn *is* an event here, which is what
-  keeps the model to the three nouns in §3.1. If the conversational and
-  machinery concerns later want separation, splitting a `ChatTurn` table
-  out is an addition over the same rows, not a migration of them.
+- **The transcript is a filtered read — there is no `ChatTurn` table.**
+  The ordered `ChatExchangeEvent` rows whose type is conversational, across
+  the chat's exchanges. A turn *is* an event here, which is what keeps the
+  model to the three nouns in §3.1.
+
+  **Decision: no separate turn table.** There is no benefit to a fourth
+  table when the event row already holds `speaker`/`role`/`content` as typed
+  columns — a second table would be a duplicate of rows that already exist,
+  and a second thing to keep in step. (§2.3 is why those columns are typed,
+  so the transcript read is a plain indexed query, not a JSON scan.)
+
+  *When this would change, and why it stays cheap:* promote a `ChatTurn`
+  table only if the conversational rows outgrow the event row — per-chunk
+  persistence (§10.1) is the plausible trigger, since a partial response has
+  no natural `seq` in the ledger. That is a **projection over these rows,
+  not a migration of them**: the ledger keeps every event, so a `ChatTurn`
+  table would be built by reading and reshaping, with the events remaining
+  the source of truth. Nothing in v1 has to be undone for it.
 - `triggered_by` (à la `RunTrigger`) is **inbound in v1**. It exists now,
   unused-but-representable, because §9's v1 is respond-only and Nia
   initiating contact later must be an addition: an initiated exchange is
@@ -510,7 +522,7 @@ Notes:
 
 Messages:
 
-    ChatTurnMessage   chatId, exchangeId        → chat lane
+    ChatExchangeMessage   chatId, exchangeId     → chat lane
 
 Same shape discipline as `LlmTurnMessage`: ids only, state in the row,
 validated under the claim.
@@ -558,9 +570,9 @@ one is a real risk, not a checklist item.
 
 ## 8. Phasing
 
-1. **The conversational loop and the surface it runs on.** Decide
-   build-vs-adopt (§9), then the smallest thing that sends a message to the
-   model, gets a reply, and records the exchange. **Attribution (§2) and
+1. **The conversational loop on the web surface.** The smallest thing
+   that sends a message to the model, gets a reply, and records the
+   exchange — on the decided surface (§9, the minimal web chat). **Attribution (§2) and
    the aggregate shape (§3.3) land with it** — the turn record *is* the
    chat's data model, so splitting them means writing it twice.
 2. **The chat lane as priority head** + the chat turn handler, reusing the
@@ -678,8 +690,9 @@ first.
    one human, identity from the session.
 4. **Settled, for the record:** the chat surface (web, §9); concurrency
    semantics (total, §4.1); `ask-user` (deferred, §5); table reuse vs
-   duplication (§3.3, duplicate the shape, share the machinery); v1
-   initiation (respond-only, seam left, §9).
+   duplication (§3.3, duplicate the shape, share the machinery); the turn
+   table (§6, none — the transcript is a filtered read over the ledger);
+   v1 initiation (respond-only, seam left, §9).
 
 ## 11. What this doc is not
 
