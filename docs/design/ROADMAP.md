@@ -125,9 +125,11 @@ job; arithmetic is the harness's.
 
 ## v1.x (each needs its own design note before build)
 
+- Chat + LLM priority — design note: `docs/design/CHAT_AND_CAPACITY.md`
 - `session` tasks: workspace, compaction contract, milestone semantics
 - `request_tool` escape hatch for mid-run pivots (still gated)
-- Per-task priority / queue jumping
+- Per-task priority / queue jumping (lane scheme sketched in
+  `CHAT_AND_CAPACITY.md` §8)
 - External-agent access to the task MCP server (auth story)
 - Model types (fast/coder/…) per task
 
