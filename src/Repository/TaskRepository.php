@@ -32,7 +32,7 @@ final class TaskRepository extends ServiceEntityRepository
         $qb = $this->createQueryBuilder('t')
             ->where('t.enabled = false')
             ->andWhere('t.archivedAt IS NULL')
-            ->orderBy('t.updatedAt', 'ASC');
+            ->orderBy('t.updatedAt', \SortDirection::Ascending);
 
         return $qb->getQuery()->getResult();
     }
@@ -48,7 +48,7 @@ final class TaskRepository extends ServiceEntityRepository
             ->where('t.enabled = true')
             ->andWhere('t.archivedAt IS NULL')
             ->andWhere('t.supersededBy IS NULL')
-            ->orderBy('t.updatedAt', 'ASC')
+            ->orderBy('t.updatedAt', \SortDirection::Ascending)
             ->getQuery()->getResult();
     }
 
@@ -64,7 +64,7 @@ final class TaskRepository extends ServiceEntityRepository
             ->where('t.replacementFor = :task')
             ->andWhere('t.archivedAt IS NULL')
             ->setParameter('task', $task)
-            ->orderBy('t.updatedAt', 'DESC')
+            ->orderBy('t.updatedAt', \SortDirection::Descending)
             ->getQuery()->getResult();
     }
 
@@ -89,7 +89,7 @@ final class TaskRepository extends ServiceEntityRepository
     {
         return $this->createQueryBuilder('t')
             ->where('t.archivedAt IS NOT NULL')
-            ->orderBy('t.archivedAt', 'DESC')
+            ->orderBy('t.archivedAt', \SortDirection::Descending)
             ->getQuery()->getResult();
     }
 

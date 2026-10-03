@@ -10,10 +10,11 @@ use App\Repository\McpServerRepository;
 use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
 
 /**
- * Exercises McpServerRepository::findSyncable(). The suite runs with
- * failOnDeprecation=true, so this test also guards against the deprecated
- * string form of QueryBuilder::orderBy() ('ASC') sneaking back in — the
- * SortDirection::Ascending enum is required.
+ * Exercises McpServerRepository::findSyncable().
+ *
+ * (The string vs `\SortDirection` form of QueryBuilder::orderBy() is guarded
+ * centrally by Tests\Doctrine\QueryBuilderOrderingTest, not asserted here — a
+ * row-level assertion cannot tell the two apart, since SQLite accepts both.)
  */
 final class McpServerRepositoryTest extends KernelTestCase
 {
