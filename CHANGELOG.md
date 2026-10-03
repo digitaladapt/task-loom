@@ -119,6 +119,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The boot sweep no longer reaps claims on a lane this fleet does not consume**
+  (SPEC §6.2). The sweep's soundness rests on "no worker in this process group
+  can be mid-turn", and at the default `TASKLOOM_FLEET_GRAB_AFTER` that premise
+  clears *every* claim in the table. But it was gated on the fleet-owner flag,
+  which is coarser than the premise: `serve` sets it whenever it starts any
+  worker, including `serve --no-web` with `TASKLOOM_LLM_MAX_CONCURRENCY=0` —
+  the worker-fleet-with-no-model shape, where the llm lane is consumed by a
+  peer in another container. Such a process would clear claims that peer was
+  holding, re-dispatch its runs, and reset `lock_version`; the peer's committed
+  turn is then discarded as `Stale` and the work is done twice, live side
+  effects and all. The same hole existed on the tools lane (worst there, since
+  that is where the side effects are). The sweep now runs only when the fleet
+  consumes both lanes, and a `serve` that does not says so out loud — a quietly
+  skipped sweep would be indistinguishable from a sweep with nothing to do.
+  Nothing is stranded: the single container's stop-time failure is repaired by
+  its successor, which runs the full fleet. Operators who want the sweep on a
+  partial fleet set `TASKLOOM_FLEET_GRAB_AFTER` above the longest turn. Found by
+  asking whether a fleet with no local llm worker could steal a peer's job.
+
 - **A tool call the model repeats inside one turn is dispatched once**
   (SPEC §5.1, §5.3). A local model sometimes asks for the same call twice
   (or four times) in a single assistant turn — the same tool with the same

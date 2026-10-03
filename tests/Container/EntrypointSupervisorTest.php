@@ -128,6 +128,82 @@ final class EntrypointSupervisorTest extends TestCase
         self::assertLessThan($firstWorker, $sweep, 'the boot sweep must complete before the first worker consumes');
     }
 
+    public function testAServeWithNoLocalLlmWorkerDoesNotSweepOnBoot(): void
+    {
+        // THE EXTERNAL-CONSUMER HOLE (SPEC §6.2's own second topology).
+        //
+        // `serve` is the worker fleet's supervisor, so it is marked a fleet
+        // owner whether or not it runs any llm worker — the flag means "I start
+        // workers", and a host running only tools workers starts some. But the
+        // sweep's soundness argument is narrower than the flag it is gated on.
+        // It is "no worker in this process group can be mid-turn, therefore any
+        // claim in the table is a dead predecessor's" — and that is only true
+        // of a lane this process actually consumes. With
+        // TASKLOOM_LLM_MAX_CONCURRENCY=0 the llm lane is consumed by a peer this
+        // process cannot see, and at the default bound (any age) the sweep
+        // clears that peer's claims, re-dispatches its runs, and resets
+        // lock_version — after which the peer's committed turn is discarded as
+        // Stale and the work is simply done twice, live side effects and all.
+        //
+        // The single container's stop-time trouble (a turn that outlived the
+        // shutdown window) is repaired by the *successor*, which does run an llm
+        // worker and does sweep. The skipping case is the one that needs it said
+        // out loud.
+        $process = $this->startServe([
+            'TASKLOOM_LLM_MAX_CONCURRENCY' => '0',
+            'TASKLOOM_TOOL_MAX_CONCURRENCY' => '1',
+        ]);
+
+        try {
+            $this->waitFor(fn (): bool => 1 === $this->countLines('TOOLS WORKER up'));
+        } finally {
+            $this->stopServe($process);
+        }
+
+        self::assertStringContainsString(
+            '[fleet-owner=1]',
+            $this->readPhpLog(),
+            'the process is still an owner — it supervises the tools worker — so the gate must be what declines the sweep',
+        );
+        self::assertStringNotContainsString(
+            'app:run:requeue --startup',
+            $this->readPhpLog(),
+            'a fleet that consumes no llm turns cannot know the llm lane is idle, so it must not reap claims a peer may be holding',
+        );
+        self::assertStringContainsString(
+            'boot sweep skipped',
+            $process->getErrorOutput(),
+            'a silently skipped sweep is indistinguishable from a sweep with nothing to do',
+        );
+    }
+
+    public function testAWorkerFleetWithNoToolsWorkerDoesNotSweepOnBoot(): void
+    {
+        // The same hole on the other lane, and the reason the rule is stated as
+        // "every lane this fleet might steal from" rather than "the llm lane".
+        // A claim is held for one LLM request *or* one set of tool calls, so a
+        // fleet running llm workers but no tools worker can still clear a
+        // peer's tool claim — and a stolen tool turn is the worse of the two,
+        // because tool calls are where the side effects are.
+        $process = $this->startServe([
+            'TASKLOOM_LLM_MAX_CONCURRENCY' => '1',
+            'TASKLOOM_TOOL_MAX_CONCURRENCY' => '0',
+        ]);
+
+        try {
+            $this->waitFor(fn (): bool => 1 === $this->countLines('LLM WORKER up'));
+        } finally {
+            $this->stopServe($process);
+        }
+
+        self::assertStringNotContainsString(
+            'app:run:requeue --startup',
+            $this->readPhpLog(),
+            'a fleet that consumes no tool turns cannot know the tools lane is idle',
+        );
+        self::assertStringContainsString('boot sweep skipped', $process->getErrorOutput());
+    }
+
     public function testTheFleetOwningProcessGroupIsMarkedAsSuch(): void
     {
         // This is the authority the sweep is gated on: set for the process
@@ -145,13 +221,15 @@ final class EntrypointSupervisorTest extends TestCase
 
     public function testTheFleetGetsAFreshIdentityOnEveryStart(): void
     {
-        // This is what makes the boot sweep work rather than merely look like
-        // it does. A claim stamped with the *previous* start's id is provably a
-        // dead predecessor's, so it is cleared the moment the container comes
-        // back — seconds later, or on another host — instead of waiting out
-        // CLAIM_STALE_SECONDS. A stable id (which a compose-supplied value
-        // would be) would make every restart look like the same fleet, and
-        // recency would be all there was to go on again — the bug this fixes.
+        // Attribution only, and deliberately so. The identity is NOT what
+        // decides the sweep — a first cut used it as a permission check and
+        // declined every claim in the table, because every restart is a new
+        // identity and so every leftover claim is "another fleet" (SPEC §6.2).
+        // The sweep decides on age instead. What a fresh identity buys is the
+        // ability to attribute a claim to a particular start of the container
+        // after the fact, which is why a compose-supplied value would be wrong:
+        // one label shared by every service and every restart explains nothing
+        // about who held what.
         $first = $this->readFleetIdFromServe();
         $second = $this->readFleetIdFromServe();
 
@@ -160,7 +238,7 @@ final class EntrypointSupervisorTest extends TestCase
         self::assertNotSame(
             $first,
             $second,
-            'two container starts must be two different fleets, or a restart can never be distinguished from a peer',
+            'two starts must be distinguishable, or a claim cannot be attributed to the run that left it',
         );
     }
 
@@ -586,8 +664,16 @@ final class EntrypointSupervisorTest extends TestCase
             'TASKLOOM_PROJECT_DIR' => $this->sandbox,
             // The stubs answer every console command the entrypoint asks; these
             // are only here so a stray real lookup could not reach the network.
+            //
+            // Both lanes default to a worker on purpose: the boot sweep only
+            // runs for a fleet that consumes every lane the claim protocol
+            // spans (see the entrypoint's boot-recovery block), so a harness
+            // that defaulted a lane to 0 would make "the sweep ran" a claim
+            // about a topology the sweep declines — which is exactly how two
+            // tests came to encode a fleet with no tools worker reaping the
+            // tools lane. Tests that mean to model a partial fleet say so.
             'TASKLOOM_LLM_MAX_CONCURRENCY' => '1',
-            'TASKLOOM_TOOL_MAX_CONCURRENCY' => '0',
+            'TASKLOOM_TOOL_MAX_CONCURRENCY' => '1',
         ], $env);
 
         $process = new Process(

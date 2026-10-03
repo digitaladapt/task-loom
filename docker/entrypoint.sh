@@ -582,8 +582,66 @@ if [ "$command" = "serve" ]; then
     # separates them. The requeue must precede the spawn for the same reason
     # the fence exists at all: a run sitting owed on a lane no consumer has
     # reached yet is exactly the state being repaired.
-    php bin/console app:run:requeue --startup --no-interaction \
-        || log "warning: boot sweep reported failures; the fleet is starting anyway"
+    #
+    # ...and "no worker exists" has to mean *no worker on that lane*, which is
+    # narrower than the fleet-owner flag. The flag's real content is "I am the
+    # process group that consumes the run queues", and the reap's authority is
+    # derived from it: at the default bound it clears every claim in the table,
+    # on the premise that nothing in this process group can be mid-turn. That
+    # premise covers only the lanes this fleet actually consumes. With
+    # TASKLOOM_LLM_MAX_CONCURRENCY=0 the llm lane belongs to a peer this process
+    # cannot see, and the sweep would clear claims that peer is holding right
+    # now — re-dispatch its runs, reset lock_version — after which the peer's
+    # committed turn is discarded as Stale and the work is simply done twice,
+    # live side effects and all. Tool claims are the same case on the other
+    # lane, and worse in consequence, since that is where the side effects are.
+    #
+    # So the sweep runs only when this fleet consumes every lane the claim
+    # protocol spans, and says so rather than skipping in silence — a sweep that
+    # quietly did nothing is indistinguishable from a sweep with nothing to do,
+    # which is the failure mode this whole feature exists to stop repeating.
+    #
+    # This is deliberately coarser than it looks necessary, and it has to be.
+    # The reap is a blanket `UPDATE run ... WHERE claimed_at IS NOT NULL`
+    # (App\RunEngine\ClaimReaper) with no notion of which lane a claim belongs
+    # to, so "does this fleet own everything it is about to clear?" cannot be
+    # answered per row. A fleet running a co-located tools worker beside a
+    # peer-owned llm lane is in fact the only consumer of every llm claim in the
+    # table — but nothing in the sweep can express that, so the check is stated
+    # on the fleet's shape and declines on any lane it does not own.
+    #
+    # The `serve --no-web` refusal above is a *different* rule and does not
+    # cover this one: it fires only in --no-web mode and only when llm, tools
+    # and the scheduler are all off. A `serve` with llm 0 and tools 1 is a
+    # perfectly good fleet under that check, and was the one clearing a peer's
+    # llm claims.
+    #
+    # The operator who genuinely wants the sweep here can say so explicitly:
+    # set TASKLOOM_FLEET_GRAB_AFTER above the longest a turn can run (safely
+    # TASKLOOM_LLM_TIMEOUT + 60), which is the same knobs-and-judgement answer
+    # the multi-replica topology already gets (App\RunEngine\ClaimReaper).
+    #
+    # A fleet with no llm worker at all is *not* stranded by this: the single
+    # container's stop-time trouble is a turn that outlived its shutdown window,
+    # and that is repaired by its successor — which runs the full fleet and does
+    # sweep. Skipping here costs nothing on the documented path.
+    if [ "$LLM_WORKERS" -gt 0 ] && [ "$TOOL_WORKERS" -gt 0 ]; then
+        php bin/console app:run:requeue --startup --no-interaction \
+            || log "warning: boot sweep reported failures; the fleet is starting anyway"
+    else
+        # Named explicitly rather than counted, because the two cases have
+        # different remedies in the field: no llm worker means a peer owns the
+        # model, no tools worker means a peer owns the side effects.
+        MISSING_LANES=""
+        if [ "$LLM_WORKERS" -eq 0 ]; then
+            MISSING_LANES="llm"
+        fi
+        if [ "$TOOL_WORKERS" -eq 0 ]; then
+            MISSING_LANES="${MISSING_LANES:+$MISSING_LANES and }tools"
+        fi
+        log "warning: boot sweep skipped — this fleet consumes no local ${MISSING_LANES} worker, so claims on that lane may belong to a peer that is working right now."
+        log "warning:   abandoned claims will wait out CLAIM_STALE_SECONDS instead. If this host is the only consumer, set TASKLOOM_FLEET_GRAB_AFTER above the longest turn (TASKLOOM_LLM_TIMEOUT + 60) to sweep safely."
+    fi
     bail_if_stopping
 
     sync_catalog

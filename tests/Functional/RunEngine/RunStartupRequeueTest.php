@@ -196,15 +196,17 @@ final class RunStartupRequeueTest extends KernelTestCase
         // taken (claim() requires the same hour). Recovery that looked like
         // recovery and did nothing.
         //
-        // The claim here is 5 seconds old. Its owner is this fleet. That is a
-        // dead predecessor by identity, whatever the clock says, so it goes.
+        // The claim here is 5 seconds old, and the bound in force is the
+        // default — any age. Age is the only question the sweep asks, and at
+        // boot its answer is settled for every claim in the table: nothing in
+        // this process group has reached the lane yet.
         $run = $this->runAwaitingItsSecondTurn(claimAgeSeconds: 5, claimFleet: 'fleet-under-test');
 
         $tester = $this->commandAsFleetOwner('1');
         $tester->execute(['--startup' => true]);
 
         self::assertStringContainsString('cleared 1 (any age)', $tester->getDisplay());
-        self::assertNull($this->claimedAt($run), 'a dead predecessor\'s claim is clearable at any age');
+        self::assertNull($this->claimedAt($run), 'a claim left at boot is clearable at any age under the default bound');
 
         // And the run is now genuinely carryable: the delivery is *taken* and
         // runs, rather than dropped as Stale on the claim it could not win.
