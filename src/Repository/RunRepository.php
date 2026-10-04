@@ -34,7 +34,7 @@ final class RunRepository extends ServiceEntityRepository
         return $this->createQueryBuilder('r')
             ->where('r.status = :queued')
             ->setParameter('queued', RunStatus::Queued)
-            ->orderBy('r.id', 'ASC')
+            ->orderBy('r.id', \SortDirection::Ascending)
             ->getQuery()->getResult();
     }
 
@@ -49,7 +49,7 @@ final class RunRepository extends ServiceEntityRepository
         return $this->createQueryBuilder('r')
             ->where('r.status IN (:statuses)')
             ->setParameter('statuses', [RunStatus::Queued, RunStatus::Running])
-            ->orderBy('r.id', 'ASC')
+            ->orderBy('r.id', \SortDirection::Ascending)
             ->getQuery()->getResult();
     }
 
@@ -74,7 +74,7 @@ final class RunRepository extends ServiceEntityRepository
             ->where('r.status IN (:statuses)')
             ->andWhere('r.parent IS NULL')
             ->setParameter('statuses', [RunStatus::NeedsAttention, RunStatus::Incomplete])
-            ->orderBy('r.finishedAt', 'DESC')
+            ->orderBy('r.finishedAt', \SortDirection::Descending)
             ->getQuery()->getResult();
     }
 
@@ -92,7 +92,7 @@ final class RunRepository extends ServiceEntityRepository
             ->where('r.task = :task')
             ->andWhere('r.parent IS NULL')
             ->setParameter('task', $task)
-            ->orderBy('r.id', 'DESC')
+            ->orderBy('r.id', \SortDirection::Descending)
             ->getQuery()->getResult();
     }
 
@@ -108,7 +108,7 @@ final class RunRepository extends ServiceEntityRepository
     {
         return $this->createQueryBuilder('r')
             ->where('r.parent IS NULL')
-            ->orderBy('r.id', 'DESC')
+            ->orderBy('r.id', \SortDirection::Descending)
             ->setMaxResults($limit)
             ->getQuery()->getResult();
     }
@@ -135,7 +135,7 @@ final class RunRepository extends ServiceEntityRepository
             ->where('r.task IN (:taskIds)')
             ->andWhere('r.parent IS NULL')
             ->setParameter('taskIds', $taskIds)
-            ->orderBy('r.id', 'DESC')
+            ->orderBy('r.id', \SortDirection::Descending)
             ->getQuery()->getResult();
 
         $latest = [];
@@ -166,7 +166,7 @@ final class RunRepository extends ServiceEntityRepository
             ->andWhere('r.status IN (:statuses)')
             ->setParameter('task', $task)
             ->setParameter('statuses', [RunStatus::Queued, RunStatus::Running])
-            ->orderBy('r.id', 'ASC')
+            ->orderBy('r.id', \SortDirection::Ascending)
             ->getQuery()->getResult();
     }
 
@@ -182,7 +182,7 @@ final class RunRepository extends ServiceEntityRepository
         return $this->createQueryBuilder('r')
             ->where('r.parent = :parent')
             ->setParameter('parent', $parent)
-            ->orderBy('r.id', 'ASC')
+            ->orderBy('r.id', \SortDirection::Ascending)
             ->getQuery()->getResult();
     }
 
