@@ -34,7 +34,7 @@ final class RunEventRepository extends ServiceEntityRepository
         $qb = $this->createQueryBuilder('e')
             ->where('e.run = :run')
             ->setParameter('run', $run)
-            ->orderBy('e.seq', 'ASC');
+            ->orderBy('e.seq', \SortDirection::Ascending);
 
         if (null !== $errorClass) {
             $qb->andWhere('e.errorClass = :errorClass')
@@ -87,7 +87,7 @@ final class RunEventRepository extends ServiceEntityRepository
             ->andWhere('e.type = :type')
             ->setParameter('run', $run)
             ->setParameter('type', $type)
-            ->orderBy('e.seq', 'ASC')
+            ->orderBy('e.seq', \SortDirection::Ascending)
             ->getQuery()->getResult();
     }
 

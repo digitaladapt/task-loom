@@ -22,8 +22,9 @@ use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
  * names are alphabetical.
  *
  * The deprecated string form of QueryBuilder::orderBy() would slip through a
- * test that only checked the *result* (SQLite happens to agree), so the suite
- * runs with failOnDeprecation=true and an ASC/DESC string would surface here.
+ * test that only checked the *result* (SQLite happens to agree), so it is
+ * caught by the source check in Tests\Doctrine\QueryBuilderOrderingTest
+ * instead.
  */
 final class ToolRepositoryTest extends KernelTestCase
 {
