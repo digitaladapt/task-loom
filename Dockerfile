@@ -51,10 +51,19 @@ FROM dunglas/frankenphp:1-php8.5-trixie AS app
 # tini (PID 1: reaps zombies and forwards signals to the entrypoint, which
 # supervises the fleet), bash (the entrypoint's interpreter), sqlite3 (the
 # CLI bin/backup-db.sh uses for WAL-aware snapshots).
+#
+# PHP extensions:
+#   pcntl — signal handling in the worker fleet.
+#   intl  — without it framework-bundle raises a deprecation on every boot
+#           (the translator/validator subsystem is enabled). Nothing in the
+#           app calls intl directly; the Symfony String component simply runs
+#           its grapheme handling on the native ICU instead of the polyfill,
+#           which is what "for best performance" means. libicu is already in
+#           the base image, so compiling intl here adds only the extension.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash ca-certificates curl sqlite3 tini \
-    && install-php-extensions pcntl \
+    && install-php-extensions pcntl intl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
