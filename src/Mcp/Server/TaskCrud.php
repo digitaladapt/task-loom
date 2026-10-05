@@ -36,11 +36,19 @@ use Doctrine\ORM\EntityNotFoundException;
  * proposed what.
  *
  * This service also implements the SPEC §4.4 replacement semantics for
- * updates: an update to an enabled task creates a disabled replacement
- * draft; the original is never touched. The draft carries the task's
- * step graph too (SPEC §13: steps are task content) — replaced when the
- * update supplies a new graph, cloned with remapped edges when it does
- * not.
+ * updates: an update to a *record* — a task that is enabled, or that has
+ * ever run — creates a disabled replacement draft; the original is never
+ * touched. The draft carries the task's step graph too (SPEC §13: steps are
+ * task content) — replaced when the update supplies a new graph, cloned with
+ * remapped edges when it does not. Only a never-enabled, never-run draft is
+ * edited in place.
+ *
+ * "Has run" is the sharper half of that gate, and it is read here, from the
+ * runs table, at the moment of the write. Keying only on `enabled` was a live
+ * incident: a disabled task that had run fell back to the in-place branch,
+ * replaceSteps() deleted step rows that run.step_id still pointed at, and the
+ * task's run surface stopped loading entirely. The enabled flag is not the
+ * question; whether the version is a record is.
  *
  * Step graphs arrive in the authoring/wire format (nested arrays, SPEC
  * §13.2) and are translated to depends_on edges here, in the same
@@ -104,9 +112,10 @@ final class TaskCrud
     }
 
     /**
-     * Update a task. Enabled tasks are immutable (SPEC §4.4): the update
-     * returns a disabled replacement draft carrying the edits; the
-     * original keeps running untouched. Draft tasks are edited in place.
+     * Update a task. A task that is enabled, or that has ever run, is an
+     * immutable record (SPEC §4.4): the update returns a disabled replacement
+     * draft carrying the edits; the original is untouched. A never-enabled,
+     * never-run draft is edited in place.
      *
      * The `steps` change key (SPEC §13.2) replaces the task's entire step
      * graph with the supplied wire-format graph; an empty array clears
@@ -130,7 +139,15 @@ final class TaskCrud
         $hasSteps = \array_key_exists('steps', $changes);
         $specs = $hasSteps ? $this->codec->parse($changes['steps']) : null;
 
-        if ($task->isEnabled()) {
+        // SPEC §4.4: the gate is "is this version a record?", and a run makes
+        // it one. The runs table is the authority, so read it here — the
+        // identity map's word for it is from whenever the row was loaded, and
+        // a task that ran since is exactly the case this has to catch.
+        if ($this->tasks->hasRuns($task)) {
+            $task->markHasRuns();
+        }
+
+        if ($task->isContentLocked()) {
             return $this->createReplacementDraft($task, $changes, $specs, $author);
         }
 
@@ -191,6 +208,15 @@ final class TaskCrud
         $draft = $original->createReplacementDraft($author);
         $this->applyChanges($draft, $changes);
 
+        // The draft deliberately does NOT inherit the original's hasRuns.
+        // Record-ness is per version, and the draft is a version that has not
+        // run: its own step rows are deletable precisely because nothing
+        // points at them yet. Inheriting it would make the draft unbuildable
+        // — replaceSteps() constructs its steps, and the content guard would
+        // refuse its own graph — while protecting nothing: every run in the
+        // store points at the *original's* steps, and the replacement path
+        // never touches those (it clones them onto new rows).
+
         return $this->inTransaction(function () use ($original, $draft, $specs): Task {
             $this->em->persist($draft);
             $this->em->flush();
@@ -219,6 +245,8 @@ final class TaskCrud
      */
     private function replaceSteps(Task $task, array $specs): void
     {
+        $this->sweepRefsTo($task);
+
         foreach ($this->steps->findForTask($task) as $existing) {
             $this->em->remove($existing);
         }
@@ -426,6 +454,9 @@ final class TaskCrud
         return ToolboxMode::tryFrom($mode) ?? throw new \InvalidArgumentException(\sprintf('Invalid toolbox_mode "%s" — expected "tags" or "explicit".', $mode));
     }
 
+    /**
+     * Find a task, or fail naming it.
+     */
     private function findOrThrow(int $taskId): Task
     {
         $task = $this->tasks->find($taskId);
@@ -441,5 +472,41 @@ final class TaskCrud
         $this->tasks->refresh($task);
 
         return $task;
+    }
+
+    /**
+     * Drop a task's runs' references to step rows that no longer exist. Every
+     * step deletion in the codebase runs through here, which is what makes it
+     * a trustworthy backstop, and a cheap one: one indexed query, and normally
+     * nothing to repair.
+     *
+     * It exists because the database will not do it for us. run.step_id is
+     * declared `ON DELETE SET NULL`, which is the right behavior — but SQLite
+     * does not enforce foreign keys unless `PRAGMA foreign_keys` is on, and
+     * nothing in this deployment turns it on (the connection middleware sets
+     * journal_mode only). So the ON DELETE action is decorative, and a
+     * deleted step leaves run.step_id pointing at a row that is gone: the
+     * run's step relation becomes an unresolvable Doctrine proxy, and loading
+     * the run — or the task page that lists it — throws instead of rendering.
+     *
+     * Doing it by hand keeps the ledger loadable without depending on a
+     * connection pragma. Turning the pragma on is still worth doing, and
+     * belongs with the other connection-level SQLite settings; when it lands,
+     * this sweep becomes a no-op that costs one query.
+     */
+    private function sweepRefsTo(Task $task): void
+    {
+        // Scoped by run.task_id as well as by the step set, and that is not
+        // belt-and-braces: `step_id NOT IN (SELECT ...)` is TRUE for every row
+        // when the set is empty, so an unscoped form would clear references
+        // belonging to *other* tasks — which is exactly what it did the first
+        // time, on the path where the task being written is itself empty (a
+        // freshly created replacement draft, before its graph is built).
+        $this->em->getConnection()->executeStatement(
+            'UPDATE run SET step_id = NULL'
+            .' WHERE task_id = :task AND step_id IS NOT NULL'
+            .' AND step_id NOT IN (SELECT id FROM step WHERE task_id = :task)',
+            ['task' => $task->getId()],
+        );
     }
 }

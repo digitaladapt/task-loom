@@ -13,8 +13,8 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Step entity semantics (SPEC §13.1, §4.4): steps are task content —
- * editable on drafts, immutable once the task is enabled. depends_on is
- * the canonical edge storage.
+ * editable on drafts, immutable once the task is a record (enabled, or
+ * having run). depends_on is the canonical edge storage.
  */
 final class StepLifecycleTest extends TestCase
 {
@@ -120,5 +120,24 @@ final class StepLifecycleTest extends TestCase
 
         self::assertTrue($task->isEnabled());
         self::assertFalse($task->isDraft());
+    }
+
+    /**
+     * A disabled task that has run is still a record, so its step graph is
+     * frozen too (SPEC §4.4, §13.1). This is the incident's exact shape from
+     * the step side: the rows a run points at must not be deletable to make
+     * room for an in-place edit, whatever the enabled flag says.
+     */
+    public function testADisabledTaskWithRunsCannotGainOrLoseSteps(): void
+    {
+        $task = $this->makeTask();
+        $task->enable();
+        $task->disable();
+        $task->markHasRuns();
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('has run');
+
+        $this->makeStep($task);
     }
 }

@@ -5,7 +5,6 @@
 {% import 'task/_schedule.html.twig' as schedule_ui %}
 
 {% set editing = task is not null %}
-{% set is_enabled = editing and task.enabled %}
 
 {% block title %}{{ editing ? 'Edit task #' ~ task.id : 'New task' }} — TaskLoom{% endblock %}
 
@@ -48,18 +47,18 @@
     </p>
 {% endif %}
 
-{% if is_enabled %}
+{% if content_locked %}
     {#
-        SPEC §4.4 — the single most important thing to say on this page. An
-        enabled task is immutable *for everyone*: saving produces a disabled
-        replacement draft, and the running task is untouched until a human
-        approves it.
+        SPEC §4.4 — the single most important thing to say on this page. A
+        task that is enabled, or that has ever run, is immutable *for
+        everyone*: saving produces a disabled replacement draft, and the
+        original is untouched until a human approves it.
     #}
     <section aria-labelledby="immutable-heading" class="notice">
-        <h2 id="immutable-heading">This task is enabled</h2>
+        <h2 id="immutable-heading">{{ task.enabled ? 'This task is enabled' : 'This task has run' }}</h2>
         <p>
-            Enabled tasks are immutable — saving here creates a <strong>replacement draft</strong>
-            with your changes. Task #{{ task.id }} keeps running, untouched, until you approve the draft
+            {% if task.enabled %}Enabled tasks are immutable{% else %}A task that has run is a record, and records are immutable{% endif %} — saving
+            here creates a <strong>replacement draft</strong> with your changes. Task #{{ task.id }} is left exactly as it is{% if not task.enabled %} (its run history and the steps those runs recorded are kept){% endif %} until you approve the draft
             from its page (SPEC §4.4). Its step graph is copied onto the draft, then replaced by whatever
             you submit below.
         </p>

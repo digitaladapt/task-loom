@@ -67,15 +67,41 @@ final class TaskLifecycleTest extends TestCase
 
         $task->disable();
         self::assertFalse($task->isEnabled());
-        self::assertTrue($task->isDraft(), 'a disabled task is editable again');
+        self::assertTrue($task->isDraft(), 'a disabled task that never ran is editable again');
         self::assertSame('0 8 * * *', $task->getSchedule(), 'the pause keeps the schedule');
 
-        // Content setter is allowed while disabled — the same rule as a draft.
+        // Content setter is allowed while disabled — for a task with no runs,
+        // the same rule as a draft.
         $task->setTitle('Paused and edited');
         self::assertSame('Paused and edited', $task->getTitle());
 
         $task->enable();
         self::assertTrue($task->isEnabled(), 're-enabling resumes the same task');
+    }
+
+    /**
+     * The other side of that coin, and the correction to it (SPEC §4.4): a
+     * paused task that has run is still a record. Disable is a lifecycle
+     * flag; it is not the editability switch, and it never was — a run makes
+     * the version immutable (its step rows are what run.step_id points at,
+     * and this project has the incident to prove it).
+     */
+    public function testADisabledTaskThatHasRunIsNotADraftAndCannotBeMutated(): void
+    {
+        $task = $this->makeTask();
+        $task->enable();
+        $task->disable();
+
+        $task->markHasRuns();
+
+        self::assertFalse($task->isEnabled());
+        self::assertFalse($task->isDraft(), 'a disabled task with run history is not a draft');
+        self::assertTrue($task->isContentLocked());
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('immutable');
+
+        $task->setTitle('Sneaky mutation of a record');
     }
 
     /**
