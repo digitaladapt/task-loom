@@ -78,9 +78,10 @@ final class TaskTools
     }
 
     /**
-     * Update a task. Enabled tasks are immutable (SPEC §4.4): the update
-     * returns a disabled replacement draft; the original keeps running.
-     * Draft tasks are edited in place.
+     * Update a task. A task that is enabled, or that has ever run, is an
+     * immutable record (SPEC §4.4): the update returns a disabled replacement
+     * draft; the original is untouched. A never-enabled, never-run draft is
+     * edited in place.
      *
      * The `steps` change (SPEC §13.2) replaces the task's entire step
      * graph with the supplied wire-format graph ([] clears it); omitting
@@ -104,12 +105,15 @@ final class TaskTools
         return [
             'id' => $task->getId(),
             // isDraft() is true for replacement drafts too (not enabled,
-            // not archived) — the chain is what distinguishes them.
+            // not archived) — the chain is what distinguishes them. The
+            // in-place branch is only reachable for a never-enabled,
+            // never-run draft (SPEC §4.4), so "draft" still means what it
+            // says here.
             'status' => $isReplacement ? 'replacement_draft' : 'draft',
             'replacement_for' => $task->getReplacementFor()?->getId(),
             'steps' => \count($this->crud->stepsFor($task)),
             'note' => $isReplacement
-                ? 'Enabled task is immutable — created a disabled replacement draft; approve it in the UI to swap (SPEC §4.4).'
+                ? 'A task that is enabled or has run is immutable — created a disabled replacement draft; approve it in the UI to swap (SPEC §4.4).'
                 : 'Draft updated in place.',
         ];
     }
@@ -172,7 +176,13 @@ final class TaskTools
         return [
             'id' => $task->getId(),
             'title' => $task->getTitle(),
-            'status' => $task->isDraft() ? 'draft' : ($task->isEnabled() ? 'enabled' : 'disabled'),
+            // A disabled task with run history is a record, not a draft —
+            // the same distinction the admin page draws (SPEC §4.4).
+            'status' => match (true) {
+                $task->isEnabled() => 'enabled',
+                $task->isDraft() => 'draft',
+                default => 'disabled',
+            },
             'archived' => $task->isArchived(),
         ];
     }

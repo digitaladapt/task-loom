@@ -5,7 +5,11 @@ declare(strict_types=1);
 namespace App\Tests\Functional\Admin;
 
 use App\Entity\McpServer;
+use App\Entity\Run;
+use App\Entity\RunRole;
+use App\Entity\RunStatus;
 use App\Entity\ServerProtocol;
+use App\Entity\Step;
 use App\Entity\Task;
 use App\Entity\TaskAuthor;
 use App\Entity\TaskKind;
@@ -49,6 +53,75 @@ final class AdminTaskEditorTest extends WebTestCase
         $em->createQuery('DELETE FROM App\Entity\McpServer')->execute();
         $em->flush();
         $em->clear();
+    }
+
+    /**
+     * Regression (live incident, browser end): a task that had run, been
+     * disabled, and then been edited from the editor in place — which deleted
+     * the step row a run of the task pointed at, leaving the task's own page
+     * unloadable ("Entity of type 'App\\Entity\\Step' for IDs id(71) was not
+     * found").
+     *
+     * The editor is the surface that has to hold the line for a human the way
+     * TaskCrud holds it for an agent, and the run-bearing half of the rule is
+     * the surprising half: nothing about this task says "enabled".
+     */
+    public function testEditingADisabledTaskThatHasRunCreatesAReplacementAndTheTaskPageStillLoads(): void
+    {
+        // The graph is authored on the draft, as it would be in real use.
+        $task = $this->makeDraft('Paused record');
+        $step = new Step($task, 1, 'Fetch', 'Fetch it.', ToolboxMode::Tags, ['weather']);
+        $this->em()->persist($step);
+        $this->em()->flush();
+
+        $task->enable();
+        $this->tasks()->save($task);
+
+        // A step child under its parent aggregator: the child is the row that
+        // carries run.step_id, and the one a graph replacement would have
+        // deleted out from under the ledger.
+        $parent = new Run($task);
+        $parent->setRole(RunRole::Parent);
+        $parent->setStatus(RunStatus::Succeeded);
+        $this->em()->persist($parent);
+
+        $child = new Run($task);
+        $child->setRole(RunRole::Step);
+        $child->setStep($step);
+        $child->setParent($parent);
+        $child->setStatus(RunStatus::Succeeded);
+        $this->em()->persist($child);
+        $this->em()->flush();
+
+        $task->disable();
+        $this->tasks()->save($task);
+        $taskId = $task->getId();
+        $stepId = $step->getId();
+
+        // The editor says why before anything is saved.
+        $crawler = $this->client->request('GET', '/tasks/'.$taskId.'/edit');
+        self::assertResponseIsSuccessful();
+        self::assertStringContainsString('This task has run', (string) $this->client->getResponse()->getContent());
+
+        // A real browser save: every field the form renders, including the
+        // step graph it seeded from the stored one.
+        $this->client->submit($crawler->selectButton('Save changes')->form(['title' => 'Edited record']));
+        self::assertResponseRedirects();
+
+        $this->em()->clear();
+        $fresh = $this->tasks()->find($taskId);
+        self::assertInstanceOf(Task::class, $fresh);
+        self::assertSame('Paused record', $fresh->getTitle(), 'the record is never mutated in place');
+
+        $drafts = $this->tasks()->findReplacementDraftsFor($fresh);
+        self::assertCount(1, $drafts, 'the edit landed as a replacement draft');
+        self::assertSame('Edited record', $drafts[0]->getTitle());
+
+        // The step the run recorded is still there, and the task page — the
+        // page that throws on a dangling step_id — still renders.
+        self::assertNotNull($this->steps()->find($stepId));
+        $this->client->request('GET', '/tasks/'.$taskId);
+        self::assertResponseIsSuccessful();
     }
 
     public function testTheNewTaskFormRenders(): void

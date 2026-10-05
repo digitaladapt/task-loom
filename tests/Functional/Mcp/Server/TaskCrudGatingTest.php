@@ -4,11 +4,15 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional\Mcp\Server;
 
+use App\Entity\Run;
+use App\Entity\RunRole;
+use App\Entity\RunStatus;
 use App\Entity\Task;
 use App\Entity\TaskAuthor;
 use App\Entity\TaskKind;
 use App\Entity\ToolboxMode;
 use App\Mcp\Server\TaskCrud;
+use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\EntityNotFoundException;
@@ -163,6 +167,102 @@ final class TaskCrudGatingTest extends KernelTestCase
 
         $all = $this->crud->list(includeArchived: true);
         self::assertCount(2, $all);
+    }
+
+    /**
+     * Regression (live incident): a task that had been enabled, then disabled
+     * because it misbehaved, was updated to fix it. The gate asked only
+     * `isEnabled()`, the disabled task looked like an editable draft, and the
+     * in-place branch deleted its step rows — including the one a run of the
+     * task still pointed at. The task's own page then could not be loaded at
+     * all ("Entity of type 'App\\Entity\\Step' for IDs id(71) was not
+     * found"): the run surface pulls the runs by task_id, and one dangling
+     * step reference is fatal to the whole render.
+     *
+     * The rule is that a version which has run is a record, so the edit must
+     * land as a replacement draft — and the step rows the ledger points at
+     * must survive it.
+     */
+    public function testUpdateOnADisabledTaskThatHasRunCreatesAReplacementAndKeepsTheStepRows(): void
+    {
+        $task = $this->crud->create('Stepped', 'Compose.', TaskKind::Run, ToolboxMode::Tags, ['a'], null, [
+            [['title' => 'Fetch', 'brief' => 'Fetch it.']],
+        ]);
+        $task->enable();
+        $this->tasks->save($task);
+
+        $steps = static::getContainer()->get(StepRepository::class)->findForTask($task);
+        self::assertCount(1, $steps);
+        $stepIds = array_map(static fn ($step) => $step->getId(), $steps);
+
+        // The run that ties the ledger to those step rows: a step child,
+        // which is the shape that carries run.step_id.
+        $run = new Run($task);
+        $run->setRole(RunRole::Step);
+        $run->setStep($steps[0]);
+        $run->setStatus(RunStatus::Succeeded);
+        $this->em()->persist($run);
+        $this->em()->flush();
+
+        // The incident's shape: enabled, broke, disabled, then fixed.
+        $task->disable();
+        $this->tasks->save($task);
+        self::assertFalse($task->isEnabled());
+
+        $draft = $this->crud->update($task->getId(), [
+            'brief' => 'Fixed brief',
+            'steps' => [[['title' => 'Fetch retry', 'brief' => 'Fetch it again.']]],
+        ]);
+
+        // A replacement, not an in-place edit.
+        self::assertNotSame($task->getId(), $draft->getId());
+        self::assertSame($task->getId(), $draft->getReplacementFor()?->getId());
+        self::assertSame('Fixed brief', $draft->getBrief());
+
+        // The original is untouched, and its step rows — the ones the run
+        // points at — are still there. This is the half that used to crash.
+        $this->em()->clear();
+        $original = $this->tasks->find($task->getId());
+        self::assertNotNull($original);
+        self::assertSame('Compose.', $original->getBrief());
+
+        $survivors = static::getContainer()->get(StepRepository::class)->findForTask($original);
+        self::assertSame($stepIds, array_map(static fn ($step) => $step->getId(), $survivors));
+
+        // And the run still resolves its step — this is the assertion that
+        // used to be impossible. Loading the run surface is what threw the
+        // incident's "Entity of type 'App\Entity\Step' for IDs id(71) was
+        // not found"; a dangling step_id is fatal to the whole render.
+        $reloaded = $this->em()->find(Run::class, $run->getId());
+        self::assertNotNull($reloaded);
+        self::assertNotNull($reloaded->getStep(), 'the run keeps the step it recorded');
+        self::assertSame($stepIds[0], $reloaded->getStep()->getId());
+    }
+
+    /**
+     * The mutability line the incident drew: a draft is edited in place only
+     * while it has never run. Same gate, both sides, so the two cannot drift
+     * apart again.
+     */
+    public function testOnlyANeverRunNeverEnabledDraftIsEditedInPlace(): void
+    {
+        $neverRun = $this->crud->create('Never ran', 'B', TaskKind::Run, ToolboxMode::Tags, [], null);
+        self::assertTrue($neverRun->isDraft());
+
+        $edited = $this->crud->update($neverRun->getId(), ['title' => 'Renamed in place']);
+        self::assertSame($neverRun->getId(), $edited->getId());
+        self::assertSame('Renamed in place', $edited->getTitle());
+
+        $ran = $this->crud->create('Ran', 'B', TaskKind::Run, ToolboxMode::Tags, [], null);
+        $run = new Run($ran);
+        $this->em()->persist($run);
+        $this->em()->flush();
+
+        // Never enabled, but a run exists: a record, edited by replacement.
+        self::assertFalse($ran->isEnabled());
+        $replacement = $this->crud->update($ran->getId(), ['title' => 'Renamed by replacement']);
+        self::assertNotSame($ran->getId(), $replacement->getId());
+        self::assertSame('Ran', $this->tasks->find($ran->getId())?->getTitle(), 'the run-bearing task is never mutated');
     }
 
     private function em(): EntityManagerInterface

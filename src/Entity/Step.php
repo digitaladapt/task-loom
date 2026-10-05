@@ -21,8 +21,10 @@ use Doctrine\ORM\Mapping as ORM;
  * authoring boundary — never persisted.
  *
  * Steps are task content: like the brief and toolbox, they are frozen
- * once the task is enabled (SPEC §4.4). Editing steps of an enabled
- * task requires a replacement draft.
+ * once the task is a record — enabled, or having run (SPEC §4.4). Editing
+ * them requires a replacement draft. The run-bearing half matters here more
+ * than anywhere else: a step row is what run.step_id points at, so deleting
+ * one to make room for an edit orphans the ledger that recorded it.
  */
 #[ORM\Entity(repositoryClass: StepRepository::class)]
 #[ORM\Index(name: 'idx_step_task', columns: ['task_id'])]
@@ -88,8 +90,8 @@ class Step
         array $toolbox,
         array $dependsOn = [],
     ) {
-        if ($task->isEnabled()) {
-            throw new \LogicException('Cannot add a step to an enabled task: create a replacement draft instead (SPEC §4.4, §13.1).');
+        if ($task->isContentLocked()) {
+            throw new \LogicException('Cannot add a step to a task that is enabled or has run: create a replacement draft instead (SPEC §4.4, §13.1).');
         }
 
         $this->task = $task;
@@ -182,14 +184,14 @@ class Step
     }
 
     /**
-     * Content mutation guard (SPEC §4.4 via §13.1): steps are task
-     * content; an enabled task's step graph is immutable like the rest
-     * of it.
+     * Content mutation guard (SPEC §4.4 via §13.1): steps are task content;
+     * a step graph is immutable like the rest of a record's content, and a
+     * task that has run is a record.
      */
     private function assertMutable(): void
     {
-        if ($this->task->isEnabled()) {
-            throw new \LogicException('Steps of an enabled task are immutable: create a replacement draft instead (SPEC §4.4, §13.1).');
+        if ($this->task->isContentLocked()) {
+            throw new \LogicException('Steps of a task that is enabled or has run are immutable: create a replacement draft instead (SPEC §4.4, §13.1).');
         }
     }
 }

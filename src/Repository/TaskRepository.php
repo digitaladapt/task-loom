@@ -81,6 +81,36 @@ final class TaskRepository extends ServiceEntityRepository
     }
 
     /**
+     * Whether a task has ever run (SPEC §4.4). Part of the write gate: a task
+     * that has run is an immutable record whether or not it is currently
+     * enabled, so "has this version run?" has to be asked of the store and not
+     * inferred from the task row.
+     *
+     * Deliberately uncached and unmemoized. The admin UI loads a task and then
+     * calls TaskCrud in the same request, and the MCP serve process holds
+     * entities across many; in both, a stale "no" is the write that corrupts a
+     * record. The read is a COUNT on idx_run_task, which is the cheap side of
+     * that trade.
+     *
+     * Scoped to the task, not the replacement chain: a draft has no runs of its
+     * own, and a run of the version it replaces is a run of that version.
+     */
+    public function hasRuns(Task $task): bool
+    {
+        $taskId = $task->getId();
+        if (null === $taskId) {
+            return false;
+        }
+
+        return $this->getEntityManager()->createQueryBuilder()
+            ->select('COUNT(r.id)')
+            ->from(\App\Entity\Run::class, 'r')
+            ->where('r.task = :task')
+            ->setParameter('task', $taskId)
+            ->getQuery()->getSingleScalarResult() > 0;
+    }
+
+    /**
      * Archived tasks, oldest first — the dead records (SPEC §4.4).
      *
      * @return list<Task>
