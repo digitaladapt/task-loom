@@ -27,7 +27,8 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
  * Authoring happens here; approval does not. A save lands a disabled draft
  * (SPEC §4.3, for humans as much as agents), and the human enables it from
  * the queue — the same two-step the MCP path has, so the gate means
- * something. Editing an enabled task opens a replacement draft (SPEC §4.4).
+ * something. Editing a task that is enabled, or that has already run, opens
+ * a replacement draft instead (SPEC §4.4).
  *
  * A failed save never throws the human's work away: the submission is
  * re-rendered with every problem anchored to its field, which is why the
@@ -107,13 +108,14 @@ final class TaskEditorController extends AbstractController
             return $this->renderEditor($task, $submission->values, ['_form' => $e->getMessage()]);
         }
 
-        // SPEC §4.4: the original kept running; the edit is a replacement
+        // SPEC §4.4: the original is untouched; the edit is a replacement
         // draft awaiting approval. Say so plainly — otherwise the human
-        // saves, sees their text, and assumes the running task changed.
+        // saves, sees their text, and assumes the live task changed.
         if ($saved->getId() !== $task->getId()) {
             $this->addFlash('ok', \sprintf(
-                'Task #%d is enabled and immutable — your edit was saved as replacement draft #%d. Approve it to swap.',
+                'Task #%d is immutable (%s) — your edit was saved as replacement draft #%d. Approve it to swap.',
                 $task->getId(),
+                $task->isEnabled() ? 'enabled' : 'it has run',
                 $saved->getId(),
             ));
 
@@ -193,6 +195,11 @@ final class TaskEditorController extends AbstractController
             'timezone' => $this->timezone,
             'schedule_preview_url' => $this->generateUrl('app_task_schedule_preview'),
             'submit_label' => null === $task ? 'Create draft' : 'Save changes',
+            // SPEC §4.4: the page has to say a save cannot land in place for
+            // any reason its content is frozen — enabled, or having run. The
+            // second is the one nobody expects, and the one that once made
+            // the editor quietly destroy the step rows a run pointed at.
+            'content_locked' => null !== $task && ($task->isEnabled() || $this->tasks->hasRuns($task)),
         ]);
     }
 

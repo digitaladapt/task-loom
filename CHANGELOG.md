@@ -119,6 +119,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A task that has run is now immutable, so disabling it no longer re-opens
+  it for editing (SPEC §4.4, §13).** The rule was always "once a task is
+  enabled it is a record", but the write gate asked `isEnabled()`, and
+  disabling clears that flag. A task that was enabled, misbehaved, and was
+  disabled to fix it therefore came back to the editor looking like an
+  untouched draft: the save went through the **in-place** path, and
+  `replaceSteps()` deleted the task's step rows — including the one
+  `run.step_id` still pointed at. The task's own page could then not be loaded
+  at all ("Entity of type `App\Entity\Step` for IDs `id(71)` was not found"),
+  because the run surface pulls a task's runs by `task_id` and one dangling
+  step reference is fatal to the whole render.
+
+  The gate now asks whether the version is a **record**, and a run makes it
+  one: `Task::isContentLocked()` is `enabled || hasRuns`, and that is what
+  `TaskCrud::update()` consults. A disabled task with run history gets a
+  replacement draft, exactly as an enabled task does; only a never-enabled,
+  never-run draft is edited in place. Everything downstream of the old premise
+  moved with it — the entity's content guard, `Step`'s mutations, the
+  editor's notice and flash, and the `task_list`/`task_get` status, which no
+  longer calls a paused task with history a "draft".
+
+  **The answer comes from the store, not from the entity.** `hasRuns` is
+  deliberately *not* a column: the runs table is the record of it, and the
+  write gate reads it there (`TaskRepository::hasRuns()`) at the moment of the
+  write. A replacement draft does **not** inherit its original's runs — that
+  is what makes a draft editable into shape before approval, and safe, because
+  grants and reclaims are the only content mutations in the codebase and every
+  one of them replaces the frozen original instead of touching it.
+
+  Also fixed in passing, and found by the new test: `replaceSteps()` now drops
+  a task's runs' references to step rows that no longer exist, in the same
+  transaction. `run.step_id` is declared `ON DELETE SET NULL`, but SQLite does
+  not enforce foreign keys unless `PRAGMA foreign_keys` is on and nothing sets
+  it (the connection middleware sets `journal_mode` only), so the action has
+  never actually run. The sweep keeps the ledger loadable without depending on
+  that pragma; turning it on belongs with the other connection-level settings,
+  and is worth doing separately.
+
 - **The boot sweep no longer reaps claims on a lane this fleet does not consume**
   (SPEC §6.2). The sweep's soundness rests on "no worker in this process group
   can be mid-turn", and at the default `TASKLOOM_FLEET_GRAB_AFTER` that premise

@@ -11,11 +11,19 @@ use Doctrine\ORM\Mapping as ORM;
  * A task: a brief, a toolbox, a schedule — and once enabled, an immutable
  * record (SPEC §4.4).
  *
- * Drafts (enabled = false) are freely editable. Enabled tasks are never
- * mutated — not by agents, not by users: any content update creates a
- * replacement draft via replacementFor. The only mutations an enabled task
- * receives are lifecycle flags (disabling/archiving/superseding), never its
- * content (title, brief, toolbox, schedule, kind).
+ * Drafts (enabled = false, never run) are freely editable. A task that is
+ * enabled — or that has ever run — is an immutable record: never mutated,
+ * not by agents and not by users; any content update creates a replacement
+ * draft via replacementFor. The only mutations such a task receives are
+ * lifecycle flags (disabling/archiving/superseding), never its content
+ * (title, brief, toolbox, schedule, kind).
+ *
+ * "Has ever run" is disqualifying in its own right, and not merely because a
+ * run of a task is evidence of intent. A step row is the target of a run row
+ * (run.step_id), so replacing the graph of a task that has run deletes rows
+ * the ledger still points at, and the run surface cannot be loaded at all
+ * (SPEC §4.4, §13). The write gate therefore asks about the record, not about
+ * the enabled flag: see isContentLocked().
  */
 #[ORM\Entity(repositoryClass: TaskRepository::class)]
 #[ORM\Index(name: 'idx_task_replacement_for', columns: ['replacement_for_id'])]
@@ -86,6 +94,14 @@ class Task
      */
     #[ORM\Column]
     private bool $enabled = false;
+
+    /**
+     * Whether this version has ever run — the other half of the immutability
+     * rule (SPEC §4.4), and deliberately **not a column**: the runs table is
+     * the record of it (run.task_id), and this holds the answer as of the
+     * last time someone read it there.
+     */
+    private bool $hasRuns = false;
 
     /** Who authored this version of the task (SPEC §4.3). */
     #[ORM\Column(length: 16, enumType: TaskAuthor::class)]
@@ -240,6 +256,39 @@ class Task
     }
 
     /**
+     * Whether this task has ever run — per version, not per chain. Only ever
+     * true because someone read it from the store (TaskCrud's write gate) and
+     * said so: an entity built in a unit test, or a replacement draft that has
+     * not been approved yet, knows nothing about runs and says false.
+     */
+    public function hasRuns(): bool
+    {
+        return $this->hasRuns;
+    }
+
+    /**
+     * Record that this version has run (SPEC §4.4).
+     */
+    public function markHasRuns(): void
+    {
+        $this->hasRuns = true;
+    }
+
+    /**
+     * Whether this version is a record that must not be mutated in place
+     * (SPEC §4.4): it is enabled, or it has run. Either way its content is
+     * frozen and an edit produces a replacement draft instead.
+     *
+     * This is the predicate the write gate asks — not isEnabled() alone. A
+     * disabled task is a *paused* task, and a paused task that has run is
+     * still a record: its step rows are what run.step_id points at.
+     */
+    public function isContentLocked(): bool
+    {
+        return $this->enabled || $this->hasRuns;
+    }
+
+    /**
      * Lifecycle mutation only (SPEC §4.4): enabling a task is a manual,
      * user-driven action; agents can never reach it. Enabling is allowed on
      * drafts only — superseded tasks stay dead.
@@ -302,10 +351,14 @@ class Task
             && !$this->replacementFor->isSuperseded();
     }
 
-    /** An editable, not-yet-enabled, not-archived task. */
+    /**
+     * An editable task: not yet enabled, never run, not archived. The
+     * run-bearing half is what keeps this honest — a paused task with run
+     * history is not a draft, whatever its enabled flag says.
+     */
     public function isDraft(): bool
     {
-        return !$this->enabled && null === $this->archivedAt;
+        return !$this->isContentLocked() && null === $this->archivedAt;
     }
 
     public function getArchivedAt(): ?\DateTimeImmutable
@@ -430,13 +483,13 @@ class Task
     }
 
     /**
-     * Content mutation guard (SPEC §4.4): enabled tasks are immutable — an
-     * enabled task only ever receives lifecycle flags.
+     * Content mutation guard (SPEC §4.4): a task that is enabled, or that has
+     * run, is an immutable record — it only ever receives lifecycle flags.
      */
     private function assertMutable(): void
     {
-        if ($this->enabled) {
-            throw new \LogicException('Enabled tasks are immutable: create a replacement draft instead (SPEC §4.4).');
+        if ($this->isContentLocked()) {
+            throw new \LogicException('A task that is enabled or has run is immutable: create a replacement draft instead (SPEC §4.4).');
         }
     }
 }
