@@ -23,7 +23,6 @@ const editor = document.querySelector('[data-task-editor]');
 
 if (editor) {
     initStepBuilder(editor);
-    initToolboxModeSwitcher(editor);
     initSchedule(editor);
 }
 
@@ -162,46 +161,11 @@ function initStepBuilder(root) {
 
 /* ---------------------------------------------------------------- toolbox */
 
-// One radio group per toolbox (the task's, and each step's). The panels are
-// kept in the DOM rather than rebuilt, so switching mode back and forth never
-// loses what the human typed; the server honours only the selected mode.
-//
-// Delegated from the form, not bound per fieldset: step cards are cloned into
-// existence by the builder, and a per-element binding would silently skip
-// every one of them (which it did — the explicit-tools panel of a newly added
-// step stayed hidden, so its checkboxes could never be ticked).
-function initToolboxModeSwitcher(root) {
-    const sync = (fieldset) => {
-        const active = fieldset.querySelector('[data-toolbox-mode]:checked');
-        const mode = active ? active.value : 'tags';
-        fieldset.querySelectorAll('[data-toolbox-panel]').forEach((panel) => {
-            panel.hidden = panel.dataset.toolboxPanel !== mode;
-        });
-    };
-
-    root.addEventListener('change', (event) => {
-        const radio = event.target.closest('[data-toolbox-mode]');
-        if (radio) {
-            const fieldset = radio.closest('fieldset.toolbox');
-            if (fieldset) {
-                sync(fieldset);
-            }
-        }
-    });
-
-    // Freshly cloned cards (and the prototype) need their initial state too;
-    // called by the builder after every insertion.
-    root.
-        addEventListener('taskloom:toolbox-sync', (event) => {
-            const scope = event.target instanceof Element ? event.target : root;
-            scope.querySelectorAll('fieldset.toolbox').forEach(sync);
-            if (scope.matches?.('fieldset.toolbox')) {
-                sync(scope);
-            }
-        });
-
-    root.querySelectorAll('fieldset.toolbox').forEach(sync);
-}
+// The panel switcher lives in its own module (`toolbox.js`), imported by the
+// shell entrypoint, because the widget is shared with the chat pages and this
+// file is not loaded there. What stays here is the builder's half of the
+// contract: a freshly cloned step card must be told to settle its panels, and
+// the switcher listens for this bubbling event.
 
 /* --------------------------------------------------------------- schedule */
 

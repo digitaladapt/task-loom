@@ -35,9 +35,17 @@
     <form method="post" action="{{ path('app_chat_new') }}" class="chat-compose">
         <input type="hidden" name="_token" value="{{ csrf_token('chat-new') }}">
 
+        {#
+            The initial mode is `tags`, matching the widget's own default — this
+            said `explicit`, which opened a new conversation on the tool-name
+            panel while every other picker in the app opened on tags. The mode
+            is not cosmetic: it is the panel whose free-text companion and
+            checkboxes the human sees first, and getting it backwards invites
+            choosing by tool name when the catalog's tags were the point.
+        #}
         {{ toolbox_ui.toolbox(
             '',
-            {toolbox_mode: 'explicit', toolbox: []},
+            {toolbox_mode: 'tags', toolbox: []},
             known_tags,
             catalog_tools,
             errors|default({}),
