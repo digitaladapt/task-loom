@@ -37,8 +37,19 @@ namespace App\Context;
  * real failure (a task brief too large for the model) and is reported as
  * such rather than silently mangled.
  *
- * Token estimates are deliberately conservative (3.5 chars ≈ 1 token; see
- * {@see CHARS_PER_TOKEN}). The number is a guard rail, not a billing meter:
+ * **The Inputs block is capped, since it cannot be pruned.** A head is
+ * usually bounded — the brief, the toolbox, the grounding — but the Inputs
+ * block (SPEC §13.4) grows with the task's width, and the final consumer
+ * receives *every* step output. Because the head is never pruned, an
+ * unbounded Inputs block is an unbounded floor on every request the run
+ * makes, which is the same failure the tool-result cap prevents on the other
+ * side of the head. So each artifact is capped to a per-input share of
+ * {@see maxInputArtifactPct} (one input gets the whole allowance, two get
+ * half each, and so on), keeping the block's total under the knob whatever
+ * the fan-in. See {@see capInputArtifact()}.
+ *
+ * Token estimates are deliberately conservative and shared
+ * ({@see TokenEstimate}). The number is a guard rail, not a billing meter:
  * under-counting would let a request exceed the model's window on the wire,
  * where the failure is a hard provider error rather than our clean
  * fail-closed one, so the estimate errs toward declaring exhaustion early.
@@ -47,23 +58,15 @@ namespace App\Context;
  */
 final readonly class ContextWindow
 {
-    /**
-     * Characters per token for the budget estimate.
-     *
-     * 3.5 rather than the classic 4: this prompt is not prose. It is
-     * markdown headers, JSON tool results, key names, uids and other
-     * identifiers, all of which the byte-pair tokenizers behind these models
-     * split finer than English. Measured against this engine's own compiled
-     * output, 4 chars/token under-counts a realistic head by roughly 15–25%,
-     * and the check exists to fail early, not to be flattering.
-     */
-    private const float CHARS_PER_TOKEN = 3.5;
+    private const float CHARS_PER_TOKEN = TokenEstimate::CHARS_PER_TOKEN;
     private const string TRUNCATED_MARKER = '…[truncated]';
+    private const string INPUT_TRUNCATED_MARKER = '…[truncated — input capped]';
 
     public function __construct(
         private int $contextLimitTokens,
         private float $maxToolOutputPct = 15.0,
         private int $windowTailExchanges = 10,
+        private float $maxInputArtifactPct = 50.0,
     ) {
     }
 
@@ -82,6 +85,32 @@ final readonly class ContextWindow
         }
 
         return substr($result, 0, $maxChars)."\n".self::TRUNCATED_MARKER;
+    }
+
+    /**
+     * Cap one step-input artifact carried in an Inputs block (SPEC §13.4).
+     *
+     * $inputCount is how many inputs compete for the budget; each gets
+     * `budget / $inputCount`, so the block's total stays under the knob
+     * whatever the fan-in. The cap is on the artifact text only — the
+     * `## Inputs` framing and the step-title labels are the harness's and are
+     * not counted against it.
+     *
+     * When the artifact does not fit, it is truncated with a marker that says
+     * so: the model — and a human reading the transcript — must be able to
+     * tell a trimmed input from a short one. Data, not instructions: the
+     * stored artifact is untouched, only the copy sent to the model is
+     * bounded.
+     */
+    public function capInputArtifact(string $artifact, int $inputCount): string
+    {
+        $perInputChars = (int) floor($this->contextLimitTokens * self::CHARS_PER_TOKEN * $this->maxInputArtifactPct / 100 / max(1, $inputCount));
+
+        if (\strlen($artifact) <= $perInputChars) {
+            return $artifact;
+        }
+
+        return substr($artifact, 0, $perInputChars)."\n".self::INPUT_TRUNCATED_MARKER;
     }
 
     /**
@@ -171,7 +200,7 @@ final readonly class ContextWindow
 
     private function tokensFor(int $chars): int
     {
-        return (int) ceil($chars / self::CHARS_PER_TOKEN);
+        return TokenEstimate::tokensForChars($chars);
     }
 
     /**

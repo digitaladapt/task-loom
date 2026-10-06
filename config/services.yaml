@@ -134,6 +134,7 @@ services:
             $contextLimitTokens: '%env(int:TASKLOOM_CONTEXT_LIMIT)%'
             $maxToolOutputPct: '%env(float:TASKLOOM_MAX_TOOL_OUTPUT_PCT)%'
             $windowTailExchanges: '%env(int:TASKLOOM_WINDOW_TAIL_EXCHANGES)%'
+            $maxInputArtifactPct: '%env(float:TASKLOOM_MAX_INPUT_ARTIFACT_PCT)%'
 
     # The grounding block (SPEC §4.2 / §5.6). Same required deployment
     # timezone as the scheduler: the block states the wall-clock time the
@@ -165,6 +166,7 @@ services:
             $completion: '%env(default::TASKLOOM_COMPLETION_PROMPT)%'
             $completionFile: '%env(default::TASKLOOM_COMPLETION_PROMPT_FILE)%'
             $listTools: '%env(default::TASKLOOM_PROMPT_TOOLBOX_LIST)%'
+            $includeBriefInSystem: '%env(default::TASKLOOM_PROMPT_BRIEF_IN_SYSTEM)%'
 
     App\RunEngine\RunEngine:
         arguments:

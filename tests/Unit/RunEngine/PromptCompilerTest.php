@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Tests\Unit\RunEngine;
 
+use App\Context\ContextWindow;
 use App\Context\Grounding;
 use App\Entity\McpServer;
 use App\Entity\ServerProtocol;
@@ -14,6 +15,7 @@ use App\Entity\TaskKind;
 use App\Entity\Tool;
 use App\Entity\ToolboxMode;
 use App\RunEngine\PromptCompiler;
+use App\RunEngine\PromptTemplate;
 use App\RunEngine\StepOutput;
 use PHPUnit\Framework\TestCase;
 
@@ -83,6 +85,31 @@ final class PromptCompilerTest extends TestCase
         self::assertStringContainsString('Standup at 09:00.', $system);
     }
 
+    /**
+     * A head is never pruned, so the Inputs block is capped: an artifact
+     * larger than its share of the input budget is truncated with a marker
+     * that says so, rather than pinning the whole run's floor to its size.
+     */
+    public function testOversizedInputArtifactIsCappedWithAMarker(): void
+    {
+        $task = $this->task();
+        $step = $this->step($task, 'Summary', 'Summarize.');
+
+        // 1000 tokens × 3.5 × 50% / 1 input = 1750 chars of allowance.
+        $compiler = new PromptCompiler(
+            new Grounding(timezone: 'UTC', now: new \DateTimeImmutable('2026-09-26 09:00', new \DateTimeZone('UTC'))),
+            new ContextWindow(contextLimitTokens: 1000, maxToolOutputPct: 15.0, windowTailExchanges: 10),
+        );
+
+        $system = $compiler->compileForStep($task, $step, [$this->tool('summary_tool')], [
+            new StepOutput(stepId: 1, title: 'Huge', artifact: str_repeat('x', 50_000)),
+        ])['system'];
+
+        self::assertStringContainsString('## Inputs', $system);
+        self::assertStringContainsString('[truncated — input capped]', $system);
+        self::assertStringNotContainsString(str_repeat('x', 2000), $system);
+    }
+
     public function testInputsAreFramedAsDataNotInstructions(): void
     {
         $task = $this->task();
@@ -103,7 +130,15 @@ final class PromptCompilerTest extends TestCase
         $task = $this->task();
         $step = $this->step($task, 'Summary', 'Summarize.');
 
-        $system = $this->compiler()->compileForStep($task, $step, [$this->tool('summary_tool')], [
+        // Turn the (default-off) toolbox list back on, so there is a Toolbox
+        // section for the Inputs block to sit in front of.
+        $compiler = new PromptCompiler(
+            new Grounding(timezone: 'UTC', now: new \DateTimeImmutable('2026-09-26 09:00', new \DateTimeZone('UTC'))),
+            new ContextWindow(contextLimitTokens: 32768, maxToolOutputPct: 15.0, windowTailExchanges: 10),
+            new PromptTemplate(listTools: '1'),
+        );
+
+        $system = $compiler->compileForStep($task, $step, [$this->tool('summary_tool')], [
             new StepOutput(stepId: 1, title: 'Weather', artifact: '21°C and sunny.'),
         ])['system'];
 
@@ -115,10 +150,13 @@ final class PromptCompilerTest extends TestCase
 
     private function compiler(): PromptCompiler
     {
-        return new PromptCompiler(new Grounding(
-            timezone: 'UTC',
-            now: new \DateTimeImmutable('2026-09-26 09:00', new \DateTimeZone('UTC')),
-        ));
+        return new PromptCompiler(
+            new Grounding(
+                timezone: 'UTC',
+                now: new \DateTimeImmutable('2026-09-26 09:00', new \DateTimeZone('UTC')),
+            ),
+            new ContextWindow(contextLimitTokens: 32768, maxToolOutputPct: 15.0, windowTailExchanges: 10),
+        );
     }
 
     private function task(): Task
