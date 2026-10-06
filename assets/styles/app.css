@@ -15,10 +15,27 @@
     --danger: #ff5c5c;
     --ok: #3ddc97;
     --muted: #9aa0b5;
+    /* The reading column. 40rem of *content*, plus a gutter either side — the
+       geometry the hand-rolled columns produced, now stated once. */
+    --page-width: 40rem;
+    --page-gutter: 1rem;
 }
 
 html {
     touch-action: manipulation;
+}
+
+/*
+ * border-box everywhere. Stated once rather than sprinkled: an element with
+ * `width: 100%` and a gutter must not overflow its parent, and relying on every
+ * component to remember `box-sizing` is the same opt-in trap the page column
+ * had. `.visually-hidden` is the one element that sizes itself deliberately and
+ * it declares its own width, so it is unaffected either way.
+ */
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
 }
 
 body {
@@ -61,16 +78,55 @@ button {
 a {
     color: var(--accent);
 }
+/*
+ * One page column, declared once.
+ *
+ * Everything between the site header and the footer sits inside `main.page`,
+ * so "how wide is a page" is answered in a single place instead of by six
+ * components that each have to remember to opt in. The opt-in arrangement had
+ * already failed: a chat form outside any `section` rendered full-viewport
+ * width, and `.chat-transcript { margin: 1rem 0 }` overrode
+ * `section { margin: 0 auto }` (class beats type selector), which is why the
+ * conversation page was centred down to the title and full-bleed after it.
+ *
+ * padding is on the column and NOT on the children, so a child's `width: 100%`
+ * means "the column's width" and cannot re-introduce the overflow that
+ * `width: 100%` + padding causes in a content-box.
+ */
+.page {
+    padding: 0 var(--page-gutter);
+    /* The gutter is inside the box (border-box), so the width has to allow for
+       it — otherwise the column silently narrows by two gutters, which is what
+       happened when this was first written as a plain 40rem. */
+    max-width: calc(var(--page-width) + 2 * var(--page-gutter));
+    margin: 0 auto;
+}
+
 /* ===== Admin UI (SPEC §8) ===== */
 
 .page-header {
     display: flex;
+    flex-wrap: wrap;
     align-items: baseline;
     justify-content: space-between;
-    gap: 0.5rem;
-    padding: 0.75rem 1rem;
-    max-width: 40rem;
-    margin: 0 auto;
+    gap: 0.25rem 0.5rem;
+    padding: 0.75rem 0;
+    margin: 0;
+}
+
+/*
+ * A conversation's title is its first message, so it can be a full sentence —
+ * and beside a date it used to squeeze both into broken columns. Let the
+ * heading take the row when it needs it and the meta line follow it.
+ */
+.page-header h1 {
+    flex: 1 1 100%;
+}
+
+/* The meta line follows the heading, squarely under it rather than floating. */
+.page-header > .muted {
+    flex: 1 1 auto;
+    margin: 0;
 }
 
 .page-header h1 {
@@ -80,9 +136,9 @@ a {
 
 .cards {
     list-style: none;
-    padding: 0 1rem;
-    max-width: 40rem;
-    margin: 0 auto 1.5rem;
+    /* The column is .page's job now; this only spaces itself. */
+    padding: 0;
+    margin: 0 0 1.5rem;
 }
 
 .card {
@@ -107,8 +163,7 @@ a {
 
 .flash {
     padding: 0.5rem 1rem;
-    max-width: 40rem;
-    margin: 0 auto 0.75rem;
+    margin: 0 0 0.75rem;
     border-radius: 6px;
     border: 1px solid;
 }
@@ -127,9 +182,7 @@ a {
     display: grid;
     grid-template-columns: minmax(7rem, 10rem) 1fr;
     gap: 0.25rem 1rem;
-    padding: 0 1rem;
-    max-width: 40rem;
-    margin: 0 auto 1.5rem;
+    margin: 0 0 1.5rem;
 }
 
 .record dt {
@@ -144,9 +197,9 @@ a {
 }
 
 section {
-    padding: 0 1rem;
-    max-width: 40rem;
-    margin: 0 auto 1.5rem;
+    /* No column, no gutter: `main.page` holds both, and a section that set its
+       own margin was able to override the column's centring. */
+    margin: 0 0 1.5rem;
 }
 
 section h2 {
@@ -616,10 +669,7 @@ fieldset legend {
  * Sits in the same column as the page content, right under the header.
  */
 .page-back {
-    max-width: 40rem;
-    margin: 0 auto 0.5rem;
-    padding: 0 1rem;
-    box-sizing: border-box;
+    margin: 0 0 0.5rem;
     font-size: 0.9rem;
 }
 
@@ -832,9 +882,25 @@ fieldset legend {
     margin: 1rem 0;
 }
 
+/*
+ * A full-column message box, which is what a chat wants. It is safe to say
+ * `width: 100%` here because the gutter lives on `main.page`, not on this
+ * element's parent — `width: 100%` plus a padding gutter is how the old layout
+ * made the textarea 26px wider than the column it lived in.
+ */
 .chat-compose textarea {
     width: 100%;
     resize: vertical;
+}
+
+/*
+ * Send stays its own size. As a stretched flex child in a column it rendered as
+ * a full-column slab next to a textarea of the same width, which reads as a
+ * banner rather than a button — and on the conversation page it was a
+ * viewport-wide bar.
+ */
+.chat-compose button[type="submit"] {
+    align-self: flex-start;
 }
 
 .chat-transcript {
@@ -845,7 +911,21 @@ fieldset legend {
 }
 
 .chat-turn {
-    max-width: 90%;
+    /*
+     * Sized by its words, capped well inside the column.
+     *
+     * A percentage of the column meant a one-line "yes" drew a 600px bubble,
+     * because `align-self` packs the box to the edge and the box was always
+     * wide. `fit-content` lets a short turn stay short, which is the whole
+     * point of bubbles.
+     *
+     * This is deliberately a layout choice and not a distinction of
+     * substance. The spoken lines are genuine turns; everything else in the
+     * transcript is machinery, and the design already refuses to let machinery
+     * read as a turn.
+     */
+    max-width: min(90%, 32rem);
+    width: fit-content;
 }
 
 .chat-turn-andrew {
@@ -873,4 +953,96 @@ fieldset legend {
 
 .chat-turn-andrew .chat-bubble {
     border: 1px solid var(--accent);
+}
+
+/*
+ * Markdown inside a bubble.
+ *
+ * The renderer produces block elements, so the bubble's own line-height has to
+ * not compound with their margins: the first and last child lose their margin,
+ * and everything between them keeps a smaller one than a page-level rule would.
+ * Without this a two-line reply gains ~2rem of padding.
+ */
+.md > :first-child {
+    margin-top: 0;
+}
+
+.md > :last-child {
+    margin-bottom: 0;
+}
+
+.md p,
+.md ul,
+.md ol,
+.md pre,
+.md blockquote {
+    margin: 0.5rem 0;
+}
+
+.md ul,
+.md ol {
+    padding-left: 1.25rem;
+}
+
+.md li + li {
+    margin-top: 0.2rem;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+    font-size: 1rem;
+    margin: 0.75rem 0 0.35rem;
+}
+
+.md code {
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 4px;
+    padding: 0.1rem 0.3rem;
+    font-size: 0.9em;
+}
+
+.md pre.md-code {
+    /*
+     * Wraps rather than scrolls.
+     *
+     * A pretty-printed tool result is the thing you opened the bubble to read,
+     * and horizontal scrolling inside a bubble hides it — badly on a phone,
+     * where a sideways swipe in the middle of a transcript is a trap. Wrapping
+     * is less faithful to the JSON's layout and much easier to actually read.
+     * `overflow-wrap: anywhere` because a JSON string with no spaces would
+     * otherwise push the bubble wider than the page.
+     */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    padding: 0.5rem 0.65rem;
+}
+
+.md pre.md-code code {
+    background: none;
+    padding: 0;
+}
+
+.md blockquote {
+    border-left: 3px solid var(--muted);
+    padding-left: 0.65rem;
+    color: var(--muted);
+}
+
+.md hr {
+    border: 0;
+    border-top: 1px solid var(--muted);
+}
+
+/*
+ * A tool call, once per round. `use` rather than the markdown filter: a tool
+ * NAME is an identifier from a catalog, not prose, and a markdown pass would
+ * eat the underscores in `read_email`.
+ */
+.chat-tool .tool-sep {
+    opacity: 0.6;
+    margin: 0 0.15rem;
 }

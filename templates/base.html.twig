@@ -121,6 +121,33 @@
             </header>
         {% endif %}
 
-        {% block body %}{% endblock %}
+        {#
+            The page column: one wrapper, so pages stop each having to add
+            their own.
+
+            Before this, the column lived on every individual component —
+            `.page-header`, `section`, `.cards`, `.record`, `.flash`,
+            `.page-back` each carried the same `max-width: 40rem; margin: 0
+            auto`. That works only for as long as every element remembers, and
+            the chat pages did not: a form and a status paragraph that sat
+            outside any `section` rendered full-viewport width, and a rule like
+            `.chat-transcript { margin: 1rem 0 }` silently *overrode* the
+            `section { margin: 0 auto }` that was holding the column, because a
+            class beats a type selector. A page whose layout depends on every
+            element opting in is a page that will drift.
+
+            `main` rather than a `div`: it is the landmark a screen reader uses
+            to skip to the content, and these pages had none — which is why
+            `auth/login.html.twig` had to invent its own `<main>` (it keeps it:
+            the sign-in shell centres a card in the viewport, which is a
+            different job from this column).
+
+            Padding here rather than on the children means the 40rem is the
+            *content* width, and the gutter is part of the column, so nothing
+            inside has to know about the edge.
+        #}
+        <main class="page">
+            {% block body %}{% endblock %}
+        </main>
     </body>
 </html>

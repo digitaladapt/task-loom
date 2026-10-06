@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A conversation's replies render as Markdown, and tool payloads render as
+  readable JSON.** The transcript used `nl2br`, so an answer arrived as asterisks
+  and backticks — worst on a phone, where reading a bulleted reply as prose with
+  punctuation in it is materially harder than reading the list.
+
+  The renderer is hand-written and deliberately small (`App\Admin\MarkdownRenderer`):
+  headings, lists, fenced code, emphasis, code spans, blockquotes, rules and
+  http(s) links, and nothing else. SPEC §11 restricts non-Symfony dependencies to
+  an approved list, so `league/commonmark` is Andrew's decision to make rather
+  than something to slip in — but this is written so that swapping it later is a
+  one-class change, since the Twig filter and the CSS do not care who produced
+  the HTML.
+
+  It escapes first and adds markup after, with no raw-HTML pass-through, and link
+  targets are pinned to http(s) rather than escaped and hoped for. The test
+  states the invariant that actually matters — the only tags and attributes in
+  the output are the ones the renderer writes — because "the output never
+  contains the word `onerror`" is satisfied by escaped text that legitimately
+  contains that word, which is a test that passes for the wrong reason.
+
+  `App\Admin\JsonPresenter` fixes the other half: a tool result's `content` is a
+  **string** (the OpenAI `tool` message shape), and a real MCP server returns
+  structured data in it as JSON text, so the payload printed as JSON on the
+  outside and one long escaped line of JSON on the inside. Nested JSON strings
+  are now decoded, so the payload is one document shown once at each level it was
+  encoded. The stored value is untouched, and so is what the model receives: a
+  `tool` message's content is text, the endpoint's contract says so, and a model
+  reads JSON far better than prose about JSON. Only the page changes.
+
+  The transcript also names each tool once per round rather than once per call —
+  a round can legitimately call the same tool twice, and "used echo, echo" reads
+  like a bug when it is a real second call.
+
+
 - **Chat tools — a conversation can act (SPEC §15.8).** A chat exchange gets a
   toolbox, chosen the same way a task's is (by tag or explicitly, from the
   discovered catalog) and **re-chosen before each message**. Start a chat with
