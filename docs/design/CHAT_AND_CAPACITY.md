@@ -1,6 +1,7 @@
 # Chat and Capacity
 
-**Status:** design — settled, and **§8 steps 1 and 2 are built** (SPEC §15).
+**Status:** design — settled, and **§8 steps 1, 2 and the tool loop are built**
+(SPEC §15 and §15.8; the tool loop has its own note, `CHAT_TOOLS.md`).
 The attribution invariant, the chat aggregate, the exchange ledger, the
 phone-first web surface, and the chat lane as priority head all shipped
 together; this doc is now the record of why they are shaped the way they are,
@@ -294,8 +295,12 @@ the *tables*.**
   `ChatExchange` implement, and write `requireRun`/`claim`/reap/requeue
   **once** against the interface. That is what keeps the "two schemas to
   keep in step" con to one implementation, not two.
-- If chat later gains tools, `ToolCall` hangs off the shared event base,
-  so it serves both ledgers without a second table.
+- Chat gained tools without touching this: the tool events are ordinary
+  `ChatExchangeEvent` rows, and the call primitives themselves were factored
+  into `App\RunEngine\ToolCallPrimitives` so both engines agree on what "the
+  same call" means and how errors go back to the model. A separate `ToolCall`
+  *table* is still not needed, and `run_event`/`chat_exchange_event` remain
+  the two ledgers.
 
 #### What is deliberately *not* shared
 

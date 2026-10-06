@@ -30,6 +30,39 @@ enum ChatEventType: string
     /** The model answered. */
     case LlmResponse = 'llm_response';
 
+    /**
+     * The model asked for a tool (SPEC §15, `CHAT_TOOLS.md` §3).
+     *
+     * This row is the *evidence*, not the enforcement: dispatch is refused by
+     * the frozen toolbox lookup (the same `tool_not_found` path a run uses),
+     * and this records what was asked, by which exchange, so "did anything
+     * dispatch that the model did not ask for?" is answerable from the ledger
+     * rather than from a chain of implication. A chat transcript grows for
+     * years and is half written by the model, so the run engine's free
+     * assumptions are worth paying a row to keep.
+     */
+    case ToolCall = 'tool_call';
+
+    /**
+     * A tool's result, written by the executor (SPEC §15).
+     *
+     * Present in the transcript only from here: the prompt compiler may render
+     * a `tool` role message *only* from an attested result row, never from
+     * anything else in the ledger and never from a tool's own content that
+     * happens to look like a result. Same reasoning as `ToolCall`.
+     */
+    case ToolResult = 'tool_result';
+
+    /**
+     * A tool call refused before dispatch, with the reason (SPEC §5.1).
+     *
+     * Kept distinct from `Failure` on purpose: an unknown tool, a schema
+     * violation or a tool error is information the model gets back so it can
+     * self-correct, *not* an exchange failure. A person should not lose their
+     * reply because they or the model fumbled an argument.
+     */
+    case ToolError = 'tool_error';
+
     /** The exchange's resume position advanced. */
     case Checkpoint = 'checkpoint';
 
@@ -48,5 +81,29 @@ enum ChatEventType: string
     public function isConversational(): bool
     {
         return self::Message === $this || self::Reply === $this;
+    }
+
+    /**
+     * Whether this event is part of the model's conversation window — a turn
+     * somebody said, or an attested tool exchange.
+     *
+     * Broader than {@see isConversational()} on purpose, and the distinction
+     * matters: the *transcript on the page* is what people said, while the
+     * *messages sent to the model* also have to carry the tool calls and
+     * results, or the model is re-asked a question whose answer it already
+     * has. Keeping these as one predicate would put tool plumbing in the
+     * conversation (noisy) or drop it from the request (broken).
+     */
+    public function isWireMessage(): bool
+    {
+        return $this->isConversational()
+            || self::ToolCall === $this
+            || self::ToolResult === $this
+            // A refusal is feedback, and feedback has to reach the model or it
+            // cannot self-correct — which is the entire reason a refused call
+            // is not an exchange failure. Leaving it out also breaks the wire
+            // shape: an assistant `tool_calls` message with no matching `tool`
+            // result is a malformed request.
+            || self::ToolError === $this;
     }
 }

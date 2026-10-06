@@ -1,5 +1,7 @@
 {% extends 'base.html.twig' %}
 
+{% import '_toolbox.html.twig' as toolbox_ui %}
+
 {% block title %}Chat — TaskLoom{% endblock %}
 
 {% block body %}
@@ -14,15 +16,34 @@
 {% endfor %}
 
 {#
-    Starting a conversation is one field. The title is derived from the first
-    message rather than asked for separately — naming a conversation before
-    you can speak in it is friction for no gain, and the first thing you say
-    is usually the better name anyway.
+    Starting a conversation is one field — plus what she may use in it.
+
+    The title is derived from the first message rather than asked for
+    separately: naming a conversation before you can speak in it is friction
+    for no gain, and the first thing you say is usually the better name anyway.
+
+    The toolbox here applies to the *first* exchange only. Starting a
+    conversation with no tools and enabling them once you have talked the
+    problem through is the intended shape: ask first, act second.
+
+    (From the second message onward the picker follows the *previous*
+    exchange's choice, so turning a tool off stays off until you turn it back
+    on.)
 #}
 <section aria-labelledby="new-chat-heading">
     <h2 id="new-chat-heading">Start a conversation</h2>
     <form method="post" action="{{ path('app_chat_new') }}" class="chat-compose">
         <input type="hidden" name="_token" value="{{ csrf_token('chat-new') }}">
+
+        {{ toolbox_ui.toolbox(
+            '',
+            {toolbox_mode: 'explicit', toolbox: []},
+            known_tags,
+            catalog_tools,
+            errors|default({}),
+            'chat_toolbox'
+        ) }}
+
         <label for="new-message" class="visually-hidden">First message</label>
         <textarea id="new-message" name="message" rows="3" required
                   placeholder="Say something…" autocomplete="off"></textarea>

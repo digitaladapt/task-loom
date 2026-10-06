@@ -585,7 +585,7 @@ final class RunEngine
         // Only exact within-turn repeats are affected: the same call in a
         // LATER turn can be a legitimate poll for state that has changed, and
         // is left alone.
-        [$calls, $droppedCalls] = $this->dropDuplicateToolCalls($response->getToolCalls());
+        [$calls, $droppedCalls] = ToolCallPrimitives::dropDuplicateCalls($response->getToolCalls());
 
         if ([] !== $droppedCalls) {
             $this->logger->info(
@@ -687,62 +687,6 @@ final class RunEngine
     }
 
     /**
-     * Drop exact within-turn repeats from a model's tool-call list: the same
-     * tool name with arguments that are equal as data (key order is not
-     * semantic difference).
-     *
-     * Order is preserved and the FIRST occurrence wins, so the surviving
-     * call keeps its original id — and the replayed assistant message
-     * (`toolCalls`) matches the results the tool turn will produce, which
-     * the endpoint requires. This is deliberately narrower than the run
-     * digest's repetition metric: that one counts repeats ACROSS a run to
-     * diagnose the model, while this removes them WITHIN a single turn to
-     * stop paying for them.
-     *
-     * @param list<array{id: string, name: string, arguments: array<string, mixed>}> $calls
-     *
-     * @return array{0: list<array{id: string, name: string, arguments: array<string, mixed>}>, 1: list<array{id: string, name: string, arguments: array<string, mixed>}>} the kept calls and the dropped ones
-     */
-    private function dropDuplicateToolCalls(array $calls): array
-    {
-        $seen = [];
-        $kept = [];
-        $dropped = [];
-
-        foreach ($calls as $call) {
-            $signature = $call['name'].'|'.$this->canonicalJson($call['arguments']);
-
-            if (isset($seen[$signature])) {
-                $dropped[] = $call;
-                continue;
-            }
-
-            $seen[$signature] = true;
-            $kept[] = $call;
-        }
-
-        return [$kept, $dropped];
-    }
-
-    /**
-     * A stable string for any argument tree: keys sorted at every depth, so
-     * two calls that differ only in key order compare equal. Mirrors
-     * {@see \App\Admin\RunDigest}'s canonicalisation — the two must agree on
-     * what "the same call" means.
-     */
-    private function canonicalJson(mixed $value): string
-    {
-        if (\is_array($value)) {
-            if (!array_is_list($value)) {
-                ksort($value);
-            }
-            $value = array_map($this->canonicalJson(...), $value);
-        }
-
-        return (string) json_encode($value, \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE);
-    }
-
-    /**
      * Execute one tool call: validate → dispatch → result, with retries
      * feeding errors back to the model (§5.1, §5.2).
      *
@@ -771,7 +715,7 @@ final class RunEngine
 
             return [
                 'toolCallId' => $callId,
-                'content' => $this->errorFeedbackJson('tool_not_found', $toolName, 'not in this run\'s toolbox'),
+                'content' => ToolCallPrimitives::errorFeedbackJson('tool_not_found', $toolName, 'not in this run\'s toolbox'),
             ];
         }
 
@@ -792,7 +736,7 @@ final class RunEngine
 
                 return [
                     'toolCallId' => $callId,
-                    'content' => $this->errorFeedbackJson('invalid_arguments', $toolName, implode('; ', $errors), $attempt),
+                    'content' => ToolCallPrimitives::errorFeedbackJson('invalid_arguments', $toolName, implode('; ', $errors), $attempt),
                 ];
             }
 
@@ -841,7 +785,7 @@ final class RunEngine
 
                 return [
                     'toolCallId' => $callId,
-                    'content' => $this->errorFeedbackJson('tool_error', $toolName, $e->getMessage(), $attempt),
+                    'content' => ToolCallPrimitives::errorFeedbackJson('tool_error', $toolName, $e->getMessage(), $attempt),
                 ];
             }
 
@@ -1116,27 +1060,6 @@ final class RunEngine
     private function failureKey(string $toolName, ErrorClass $errorClass): string
     {
         return $toolName.'|'.$errorClass->value;
-    }
-
-    /**
-     * Structured, actionable error fed back to the model so the loop
-     * self-corrects (SPEC §5.1).
-     *
-     * @return string JSON
-     */
-    private function errorFeedbackJson(string $error, string $tool, string $detail, ?int $attempt = null): string
-    {
-        $payload = [
-            'error' => $error,
-            'tool' => $tool,
-            'detail' => $detail,
-        ];
-
-        if (null !== $attempt) {
-            $payload['attempt'] = $attempt;
-        }
-
-        return (string) json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     }
 
     /**

@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace App\Admin;
 
 use App\Entity\TaskKind;
-use App\Entity\ToolboxMode;
 use App\Scheduler\ScheduleExpression;
 use App\Scheduler\ScheduleFormatException;
 use App\Scheduler\SchedulePreset;
@@ -98,21 +97,14 @@ final readonly class TaskEditorSubmission
             $kind = TaskKind::Run->value;
         }
 
-        $toolboxMode = self::text($input['toolbox_mode'] ?? ToolboxMode::Tags->value);
-        if (null === ToolboxMode::tryFrom($toolboxMode)) {
-            $errors['toolbox'] = \sprintf('Unknown toolbox mode "%s".', $toolboxMode);
-            $toolboxMode = ToolboxMode::Tags->value;
+        // The picker's fields -> a declaration. One implementation, shared
+        // with the chat surface: two parsers would be two answers to "what
+        // does this checked box mean?".
+        $toolbox = ToolboxSelection::parse($input);
+        $toolboxMode = $toolbox->mode->value;
+        if (null !== $toolbox->error) {
+            $errors['toolbox'] = $toolbox->error;
         }
-
-        // Only the selected mode's list is honoured; the other picker is
-        // hidden in the browser and ignored here, so a stale checkbox can
-        // never leak into the saved declaration. Each list also has a
-        // free-text companion (comma-separated) so a tag the catalog does not
-        // carry yet — or a tool whose checkbox list failed to render — can
-        // still be authored; the catalog preview is what warns about it.
-        $toolbox = ToolboxMode::Explicit->value === $toolboxMode
-            ? self::mergeEntries($input['toolbox_tools'] ?? [], $input['toolbox_tools_extra'] ?? '')
-            : self::mergeEntries($input['toolbox_tags'] ?? [], $input['toolbox_tags_extra'] ?? '');
 
         [$steps, $stepErrors] = self::parseSteps($input['steps'] ?? []);
         $errors += $stepErrors;
@@ -125,7 +117,7 @@ final readonly class TaskEditorSubmission
             'brief' => $brief,
             'kind' => $kind,
             'toolbox_mode' => $toolboxMode,
-            'toolbox' => $toolbox,
+            'toolbox' => $toolbox->declared,
             'steps' => $steps,
             ...$scheduleValues,
         ], $errors, $schedule);
@@ -257,21 +249,17 @@ final readonly class TaskEditorSubmission
             $errors[$path.'.brief'] = 'A step brief is required — it is the prompt this step\'s run receives.';
         }
 
-        $toolboxMode = self::text($rawStep['toolbox_mode'] ?? ToolboxMode::Tags->value);
-        if (null === ToolboxMode::tryFrom($toolboxMode)) {
-            $errors[$path.'.toolbox'] = \sprintf('Unknown toolbox mode "%s".', $toolboxMode);
-            $toolboxMode = ToolboxMode::Tags->value;
+        $toolbox = ToolboxSelection::parse($rawStep);
+        $toolboxMode = $toolbox->mode->value;
+        if (null !== $toolbox->error) {
+            $errors[$path.'.toolbox'] = $toolbox->error;
         }
-
-        $toolbox = ToolboxMode::Explicit->value === $toolboxMode
-            ? self::mergeEntries($rawStep['toolbox_tools'] ?? [], $rawStep['toolbox_tools_extra'] ?? '')
-            : self::mergeEntries($rawStep['toolbox_tags'] ?? [], $rawStep['toolbox_tags_extra'] ?? '');
 
         return [
             'title' => $title,
             'brief' => $brief,
             'toolbox_mode' => $toolboxMode,
-            'toolbox' => $toolbox,
+            'toolbox' => $toolbox->declared,
         ];
     }
 
@@ -360,62 +348,8 @@ final readonly class TaskEditorSubmission
         return [$values, $expression, $errors];
     }
 
-    /**
-     * A checkbox list plus its free-text companion, as one list: scalars only,
-     * trimmed, empties dropped, duplicates collapsed, order preserved
-     * (checkboxes first, in the order rendered, then anything typed).
-     *
-     * @param array<array-key, mixed> $checked
-     *
-     * @return list<string>
-     */
-    private static function mergeEntries(mixed $checked, mixed $typed): array
-    {
-        $list = [];
-        foreach (self::stringList($checked) as $item) {
-            $list[$item] = true;
-        }
-
-        if (\is_scalar($typed)) {
-            foreach (explode(',', (string) $typed) as $item) {
-                $item = trim($item);
-                if ('' !== $item) {
-                    $list[$item] = true;
-                }
-            }
-        }
-
-        return array_keys($list);
-    }
-
     private static function text(mixed $value): string
     {
         return \is_scalar($value) ? trim((string) $value) : '';
-    }
-
-    /**
-     * A submitted checkbox list: scalars only, trimmed, empties dropped,
-     * duplicates collapsed, order preserved.
-     *
-     * @return list<string>
-     */
-    private static function stringList(mixed $value): array
-    {
-        if (!\is_array($value)) {
-            return [];
-        }
-
-        $list = [];
-        foreach ($value as $item) {
-            if (!\is_scalar($item)) {
-                continue;
-            }
-            $text = trim((string) $item);
-            if ('' !== $text) {
-                $list[$text] = true;
-            }
-        }
-
-        return array_keys($list);
     }
 }

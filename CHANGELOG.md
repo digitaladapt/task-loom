@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Chat tools — a conversation can act (SPEC §15.8).** A chat exchange gets a
+  toolbox, chosen the same way a task's is (by tag or explicitly, from the
+  discovered catalog) and **re-chosen before each message**. Start a chat with
+  nothing, talk a problem through, then tick the task-management tools and act
+  on what you just decided.
+
+  **The toolbox is frozen when the exchange starts.** That is the rule, and it
+  is what keeps the run engine's tool safety intact where the run engine never
+  assumed it would need it: one tool set for the whole turn, so the tool
+  definitions on the wire, the toolbox in the prompt and the map dispatch
+  consults cannot disagree — and a tool outside the frozen set never
+  dispatches, exactly as in a run. It is also why "configurable before sending
+  each message" costs nothing: a message *starts* the exchange.
+
+  **Every exchange freezes its own toolbox, and the picker reopens on your
+  last answer** — so the choice carries forward *visibly* rather than
+  invisibly. Turn a tool off for one message and it stays off; the answer to
+  "what can she do right now?" is a thing on screen rather than a thing to
+  remember, and "why could she do that?" is answered by the exchange that did
+  it. The picker is inert while a reply is pending, rather than accepting a
+  change it could not apply.
+
+  Turning everything off is an answer, and it carries like any other. The
+  subtle failure that avoids: if "nothing chosen" were stored as *no record*,
+  then `[]` (a deliberate empty selection) and `NULL` (no record) would be the
+  same bytes, and a tool you switched off would quietly come back on at the
+  next message. So the empty declaration is written as the positive fact it
+  is, and the column stays NULL only for rows that predate chat tools — three
+  states, three readings, no ambiguity.
+
+  **A failing tool does not lose your reply.** The error is recorded, fed back
+  to the model in the structured shape a run uses, and the conversation
+  continues. Only an unusable answer fails the exchange: a transport failure,
+  an empty reply, or the ceiling — `TASKLOOM_CHAT_TOOL_ROUNDS` (default 6),
+  which is a capacity bound as much as a correctness one, because chat is the
+  priority head and every task is waiting behind whoever is watching the
+  spinner. A reply that needs more than six round-trips is usually a task
+  wearing a conversation's clothes, and it now says so.
+
+  Tool turns ride the **existing `tools` lane**: a tool turn is I/O-bound on
+  somebody else's server and must not hold the model, which is as true for a
+  conversation as for a run, and a second lane would buy nothing but another
+  lane to reason about and another co-located requirement for the boot sweep.
+
+  **Two things a run gets for free and a conversation does not**, now kept as
+  recorded facts rather than inferences: every dispatch writes a `tool_call`
+  row (the evidence that only the model issued calls — a chat transcript is
+  long and half-written by the model, which is the injection surface the
+  capacity note already flags), and a `tool` role message may only be rendered
+  from a result or refusal row the *executor* wrote, never from prose that
+  happens to be in the ledger.
+
 - **Chat — conversations (SPEC §15).** The first cut of the thing the capacity
   design was for: you can hold a conversation with the assistant, and it goes
   to the front of the queue to answer you.
@@ -187,6 +239,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   context limit, mirroring the tool-result cap on the other side of the head.
 
 ### Changed
+
+- **The toolbox picker is one widget, and the parsing is one class.** It moved
+  to `templates/_toolbox.html.twig` (out of `task/`, because it is no longer
+  only the task editor's) and the form fields are now read by
+  `App\Admin\ToolboxSelection`, shared by the task editor and the chat
+  surface. Same field names, same rules, one implementation — a second copy of
+  either would be a second answer to "what does this checked box mean?".
 
 - **The prompt no longer carries two duplicate renderings by default** (SPEC
   §4.1). The `## Toolbox` prose list and the brief inside the system head both

@@ -97,6 +97,13 @@ framework:
             App\Message\LlmTurnMessage: llm
             App\Message\ToolTurnMessage: tools
             App\Message\ChatReplyMessage: chat
+            # Chat's tool turns ride the existing `tools` lane, deliberately:
+            # a tool turn is I/O-bound on somebody else's server and must not
+            # hold the model, and that is as true for a conversation as for a
+            # run. A second tools lane would buy nothing but another lane to
+            # reason about and another co-located requirement for the boot
+            # sweep's lane-ownership check. See CHAT_TOOLS.md.
+            App\Message\ChatToolTurnMessage: tools
 
 when@test:
     framework:

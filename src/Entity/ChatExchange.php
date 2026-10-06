@@ -77,6 +77,35 @@ class ChatExchange
     private ?array $checkpoint = null;
 
     /**
+     * The toolbox the human chose for this exchange (SPEC §15,
+     * `docs/design/CHAT_TOOLS.md`): the mode plus the tags or tool names they
+     * picked. Null means "no tools", which is also what every exchange
+     * written before chat had a toolbox means — so those rows keep behaving
+     * exactly as they did.
+     *
+     * The *declaration* is stored, not just its resolution, so the editor can
+     * reopen showing what was chosen — including an entry the catalog no
+     * longer carries. Resolving on read would rewrite the human's selection to
+     * whatever resolves today.
+     *
+     * @var array{mode: string, declared: list<string>}|null
+     */
+    #[ORM\Column(type: 'json', nullable: true)]
+    private ?array $toolboxDeclaration = null;
+
+    /**
+     * The resolved tools, frozen (SPEC §4.1's snapshot, in the run engine's
+     * own shape). Frozen at exchange start and never re-resolved, for the
+     * reason the run engine freezes a run's: the tool definitions on the wire,
+     * the toolbox in the prompt, and the map dispatch consults must be one
+     * set, or a tool outside the declared set has a path to dispatch.
+     *
+     * @var list<array<string, mixed>>|null
+     */
+    #[ORM\Column(type: 'json', nullable: true)]
+    private ?array $toolboxSnapshot = null;
+
+    /**
      * Execution-claim token, in the run's sense exactly (SPEC §6): incremented
      * by the claim when a worker takes the exchange for one message, so a
      * duplicate delivery can detect that an owner is already at work.
@@ -148,6 +177,36 @@ class ChatExchange
     public function isTerminal(): bool
     {
         return \in_array($this->status, [ChatExchangeStatus::Answered, ChatExchangeStatus::Failed], true);
+    }
+
+    /**
+     * Record the toolbox this exchange runs with.
+     *
+     * Called once, at exchange start, inside the same transaction that records
+     * the inbound turn — because the snapshot is part of what the exchange
+     * *is*, not a preference read later. There is deliberately no setter that
+     * can be called mid-exchange: the freeze is the safety property, so the
+     * only way to change tools is to start a new exchange.
+     *
+     * @param array{mode: string, declared: list<string>} $declaration
+     * @param list<array<string, mixed>>                  $snapshot
+     */
+    public function freezeToolbox(array $declaration, array $snapshot): void
+    {
+        $this->toolboxDeclaration = $declaration;
+        $this->toolboxSnapshot = $snapshot;
+    }
+
+    /** @return array{mode: string, declared: list<string>}|null */
+    public function getToolboxDeclaration(): ?array
+    {
+        return $this->toolboxDeclaration;
+    }
+
+    /** @return list<array<string, mixed>>|null */
+    public function getToolboxSnapshot(): ?array
+    {
+        return $this->toolboxSnapshot;
     }
 
     /** @return array<string, mixed>|null */

@@ -60,6 +60,49 @@ final readonly class ToolboxResolver
     }
 
     /**
+     * Resolve an ad-hoc declaration (SPEC §15, `CHAT_TOOLS.md`): a chat
+     * exchange's toolbox, chosen per message.
+     *
+     * Shares every rule with a task's resolution — the same explicit lookup,
+     * the same tag intersection, the same canonical order — and differs in
+     * exactly one: **an empty result is not an exception.** For a task an
+     * empty toolbox is a dispatch failure, because a task exists to do
+     * something. For a conversation it is the ordinary case (most chats want
+     * no tools) and, when it comes from tags, often just a tag nobody has
+     * applied yet. The caller decides what to say about it; the resolver does
+     * not invent a failure.
+     *
+     * @param list<string> $declared
+     *
+     * @return list<Tool>
+     */
+    public function resolveChat(ToolboxMode $mode, array $declared): array
+    {
+        if (ToolboxMode::Explicit === $mode) {
+            return array_values(array_filter(array_map(
+                fn (string $name): ?Tool => $this->tools->findOneBy(['name' => $name]),
+                $declared,
+            )));
+        }
+
+        return $this->resolveByTags($declared);
+    }
+
+    /**
+     * The catalog as a picker offers it: enabled tools on enabled servers, in
+     * the canonical order.
+     *
+     * @return list<Tool>
+     */
+    public function catalog(): array
+    {
+        return array_values(array_filter(
+            $this->tools->findAllOrdered(),
+            static fn (Tool $tool): bool => $tool->getServer()->isEnabled(),
+        ));
+    }
+
+    /**
      * @param list<string> $declared
      *
      * @return list<Tool>

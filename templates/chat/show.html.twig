@@ -1,5 +1,7 @@
 {% extends 'base.html.twig' %}
 
+{% import '_toolbox.html.twig' as toolbox_ui %}
+
 {% block title %}{{ chat.title }} — TaskLoom{% endblock %}
 
 {% block body %}
@@ -24,6 +26,11 @@
     is the *reader's* view; the model's view is roles, with no visible name
     prefix (SPEC §15 §2.5) — the two are deliberately different renderings of
     the same stored turn.
+
+    A tool call renders as a line of its own rather than as a bubble: it is
+    something she *did*, not something she said, and the result is not shown
+    at all — it is already reflected in the reply, and it is often long. The
+    full row is in the ledger for anyone who needs it.
 #}
 <section aria-labelledby="transcript-heading" class="chat-transcript">
     <h2 id="transcript-heading" class="visually-hidden">Transcript</h2>
@@ -33,13 +40,21 @@
     {% endif %}
 
     {% for turn in transcript %}
-        <article class="chat-turn chat-turn-{{ turn.speaker.value }}">
-            <p class="chat-speaker">
-                {{ turn.speaker.value == 'nia' ? 'Nia' : 'You' }}
+        {% if turn.type.value == 'tool_call' %}
+            <p class="chat-tool muted">
+                used
+                {% for call in turn.payload.calls|default([]) %}<code>{{ call.name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
                 <span class="muted">{{ turn.createdAt|date('H:i') }}</span>
             </p>
-            <div class="chat-bubble">{{ turn.content|nl2br }}</div>
-        </article>
+        {% else %}
+            <article class="chat-turn chat-turn-{{ turn.speaker.value }}">
+                <p class="chat-speaker">
+                    {{ turn.speaker.value == 'nia' ? 'Nia' : 'You' }}
+                    <span class="muted">{{ turn.createdAt|date('H:i') }}</span>
+                </p>
+                <div class="chat-bubble">{{ turn.content|nl2br }}</div>
+            </article>
+        {% endif %}
     {% endfor %}
 </section>
 
@@ -61,12 +76,45 @@
     </p>
 {% endif %}
 
+{#
+    Saying something, with the tools for the exchange it starts.
+
+    The picker is the same macro the task editor uses (SPEC §4.1), with the
+    same field names — so what a checked box means is decided in one place
+    (`App\\Admin\\ToolboxSelection`), and the widget cannot drift from the parser.
+
+    **Disabled while a reply is pending**, deliberately, rather than accepting
+    a change it would ignore: the toolbox freezes when the exchange starts
+    (`CHAT_TOOLS.md` §2), so the tools shown are the ones she is actually
+    using right now. A control that silently does nothing would be worse.
+
+    The picker always reopens showing your **last answer** — the running
+    exchange's frozen set while a reply is pending, otherwise the previous
+    exchange's choice, pre-filling the next message. So what you see ticked is
+    what you chose, and what she can do is never a thing you have to remember.
+
+    That includes *unticking everything*: if the last exchange ran with no
+    tools, this renders nothing ticked. That is a real answer being carried,
+    not an absence of one — which is why the engine freezes an empty
+    declaration rather than leaving the column NULL.
+#}
 <form method="post" action="{{ path('app_chat_say', {id: chat.id}) }}" class="chat-compose">
     <input type="hidden" name="_token" value="{{ csrf_token('chat-say-' ~ chat.id) }}">
+
+    {{ toolbox_ui.toolbox(
+        '',
+        toolbox_values|default({toolbox_mode: 'explicit', toolbox: []}),
+        known_tags,
+        catalog_tools,
+        errors|default({}),
+        'chat_toolbox',
+        pending
+    ) }}
+
     <label for="say-message" class="visually-hidden">Message</label>
     <textarea id="say-message" name="message" rows="3" required
-              placeholder="Say something…" autocomplete="off"></textarea>
-    <button type="submit">Send</button>
+              placeholder="Say something…" autocomplete="off" {{ pending ? 'disabled' }}></textarea>
+    <button type="submit" {{ pending ? 'disabled' }}>Send</button>
 </form>
 
 <p class="page-back"><a href="{{ path('app_chat_list') }}">← All conversations</a></p>
