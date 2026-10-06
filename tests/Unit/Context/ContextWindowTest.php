@@ -201,6 +201,49 @@ final class ContextWindowTest extends TestCase
         self::assertStringContainsString('Location: Reykjavik', $rendered);
     }
 
+    public function testShortInputArtifactUntouched(): void
+    {
+        $window = new ContextWindow(contextLimitTokens: 10000, maxToolOutputPct: 15.0, windowTailExchanges: 10);
+
+        self::assertSame('Sunny, 21C.', $window->capInputArtifact('Sunny, 21C.', 1));
+    }
+
+    /**
+     * One input gets the whole input allowance: 1000 tokens × 3.5 × 50% =
+     * 1750 chars, truncated with a marker that says it was trimmed (a
+     * silently-shortened input would be indistinguishable from a short one).
+     */
+    public function testOversizedInputArtifactIsCappedWithAMarker(): void
+    {
+        $window = new ContextWindow(contextLimitTokens: 1000, maxToolOutputPct: 15.0, windowTailExchanges: 10);
+
+        $capped = $window->capInputArtifact(str_repeat('x', 100_000), 1);
+
+        self::assertStringStartsWith(str_repeat('x', 1750), $capped);
+        self::assertLessThanOrEqual(1750 + 40, \strlen($capped));
+        self::assertStringContainsString('[truncated — input capped]', $capped);
+    }
+
+    /**
+     * The share shrinks with the fan-in, so the block's total stays under
+     * the knob however many steps feed it.
+     */
+    public function testEachInputGetsAnEqualShareOfTheBudget(): void
+    {
+        $window = new ContextWindow(contextLimitTokens: 1000, maxToolOutputPct: 15.0, windowTailExchanges: 10);
+
+        $one = $window->capInputArtifact(str_repeat('x', 10_000), 1);
+        $half = $window->capInputArtifact(str_repeat('x', 10_000), 2);
+        $quarter = $window->capInputArtifact(str_repeat('x', 10_000), 4);
+
+        // 1750, 875, 437 chars of allowance (plus the marker) respectively.
+        self::assertStringStartsWith(str_repeat('x', 1750), $one);
+        self::assertStringStartsWith(str_repeat('x', 875), $half);
+        self::assertStringStartsWith(str_repeat('x', 437), $quarter);
+        self::assertLessThan(\strlen($one), \strlen($half));
+        self::assertLessThan(\strlen($half), \strlen($quarter));
+    }
+
     /**
      * @return array{assistant: array{content: ?string, toolCalls: list<array<string, mixed>>}, toolResults: list<array{toolCallId: string, content: string}>}
      */

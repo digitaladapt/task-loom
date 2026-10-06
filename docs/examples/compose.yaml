@@ -64,9 +64,14 @@ x-taskloom-env: &taskloom-env
   TASKLOOM_SYSTEM_PROMPT_FILE: ${TASKLOOM_SYSTEM_PROMPT_FILE:-}
   TASKLOOM_COMPLETION_PROMPT: ${TASKLOOM_COMPLETION_PROMPT:-}
   TASKLOOM_COMPLETION_PROMPT_FILE: ${TASKLOOM_COMPLETION_PROMPT_FILE:-}
-  # Render the prompt's human-readable toolbox list (the tool definitions are
-  # always sent regardless). Set to 0 to save tokens on large toolboxes.
-  TASKLOOM_PROMPT_TOOLBOX_LIST: ${TASKLOOM_PROMPT_TOOLBOX_LIST:-1}
+  # Render the prompt's human-readable toolbox list. Off by default, because
+  # the tool definitions (always sent) already carry the names — set to 1 to
+  # render the duplicate prose list.
+  TASKLOOM_PROMPT_TOOLBOX_LIST: ${TASKLOOM_PROMPT_TOOLBOX_LIST:-0}
+  # Repeat the brief inside the system head's "## Task" section. Off by
+  # default: the brief already travels in the user message. Set to 1 to
+  # restore the historic duplication.
+  TASKLOOM_PROMPT_BRIEF_IN_SYSTEM: ${TASKLOOM_PROMPT_BRIEF_IN_SYSTEM:-0}
   # The scheduler daemon: enabled; tick interval in seconds.
   TASKLOOM_SCHEDULER_ENABLED: ${TASKLOOM_SCHEDULER_ENABLED:-1}
   TASKLOOM_SCHEDULE_INTERVAL: ${TASKLOOM_SCHEDULE_INTERVAL:-60}
@@ -93,6 +98,9 @@ x-taskloom-env: &taskloom-env
   TASKLOOM_CIRCUIT_BREAKER: ${TASKLOOM_CIRCUIT_BREAKER:-3}
   TASKLOOM_CONTEXT_LIMIT: ${TASKLOOM_CONTEXT_LIMIT:-32768}
   TASKLOOM_MAX_TOOL_OUTPUT_PCT: ${TASKLOOM_MAX_TOOL_OUTPUT_PCT:-15}
+  # Cap on the whole Inputs block (a stepped run's dependency outputs): each
+  # artifact gets an equal share, so a wide task cannot pin its runs' floor.
+  TASKLOOM_MAX_INPUT_ARTIFACT_PCT: ${TASKLOOM_MAX_INPUT_ARTIFACT_PCT:-50}
   TASKLOOM_WINDOW_TAIL_EXCHANGES: ${TASKLOOM_WINDOW_TAIL_EXCHANGES:-10}
   # Absolute URLs in non-HTTP contexts (CLI, workers): the public address of
   # this deployment, as users and agents reach it.

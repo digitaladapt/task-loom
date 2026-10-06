@@ -218,6 +218,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing. Any other argument after `serve` is refused by name rather than
   ignored. See `docs/design/SINGLE_CONTAINER_RUNTIME.md`.
 
+- **`TASKLOOM_PROMPT_BRIEF_IN_SYSTEM`** — a toggle to repeat the task/step
+  brief inside the system head's `## Task` section, for an operator who wants
+  it there as well as in the user message. Off by default: the brief travels
+  once (SPEC §4.1, §13.4).
+
+- **`TASKLOOM_MAX_INPUT_ARTIFACT_PCT`** — the cap on the whole Inputs block
+  (SPEC §13.4): each dependency output gets an equal share of it, so a wide
+  task cannot pin its runs' floor to its widest step. Defaults to 50% of the
+  context limit, mirroring the tool-result cap on the other side of the head.
+
 ### Changed
 
 - **The toolbox picker is one widget, and the parsing is one class.** It moved
@@ -226,6 +236,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `App\Admin\ToolboxSelection`, shared by the task editor and the chat
   surface. Same field names, same rules, one implementation — a second copy of
   either would be a second answer to "what does this checked box mean?".
+
+- **The prompt no longer carries two duplicate renderings by default** (SPEC
+  §4.1). The `## Toolbox` prose list and the brief inside the system head both
+  repeat something sent anyway — the tool definitions carry the names and
+  descriptions, and the brief travels in the user message — so both are now
+  **off** unless a deployment opts back in (`TASKLOOM_PROMPT_TOOLBOX_LIST=1`,
+  `TASKLOOM_PROMPT_BRIEF_IN_SYSTEM=1`). This is a deliberately breaking change
+  to what an unconfigured deployment sends: duplicate content in the prompt was
+  never intended, even where the spec described it. The tool definitions and
+  the brief are still sent — only their duplicates are gone. The default
+  preamble's "the tools listed below" became "the tools provided", since that
+  list is no longer rendered by default.
 
 ### Fixed
 

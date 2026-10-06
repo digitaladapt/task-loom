@@ -276,7 +276,10 @@ gracefully on SIGTERM — the current tick finishes, exit 0.
 The prompt every run starts from is assembled by the harness, in a fixed
 order: **preamble → `## Task` → `## Inputs` (stepped tasks) → `## Toolbox` →
 `## Completion` → `## Grounding`**, and it travels at the head of every
-request for the whole run, never pruned.
+request for the whole run, never pruned. (`## Toolbox` renders only when its
+toggle is on.) The task *brief* is not in the head by default: it is sent
+once, in the user message — the head names the task (`Title:`, and the role
+note for a step or the final consumer) without repeating the brief.
 
 Grounding sits **last**, closest to the model's first reply: the date, time,
 zone and units are the freshest thing in the head, and most of what a run
@@ -284,17 +287,21 @@ states back is stamped with them. Its facts come from three deployment
 knobs — `TASKLOOM_TIMEZONE` (required), `TASKLOOM_UNITS`, and
 `TASKLOOM_LOCATION` — described under [Configuration](#configuration).
 
-Three parts are yours to tune, because they are the parts whose wording
-depends on your deployment rather than on the engine's mechanics. Unset
-means the built-in text — no existing prompt *wording* changes unless you
-opt in (the section order above is the one deliberate change that applies
-to everyone).
+Four parts are yours to tune, because they are the parts whose wording
+depends on your deployment rather than on the engine's mechanics.
 
-| Knob | What it replaces |
+| Knob | What it does |
 |---|---|
-| `TASKLOOM_SYSTEM_PROMPT` / `_FILE` | The opening preamble |
-| `TASKLOOM_COMPLETION_PROMPT` / `_FILE` | The text under `## Completion` |
-| `TASKLOOM_PROMPT_TOOLBOX_LIST` | Whether `## Toolbox` renders at all |
+| `TASKLOOM_SYSTEM_PROMPT` / `_FILE` | Replaces the opening preamble |
+| `TASKLOOM_COMPLETION_PROMPT` / `_FILE` | Replaces the text under `## Completion` |
+| `TASKLOOM_PROMPT_TOOLBOX_LIST` | Whether `## Toolbox` renders at all — **off** by default |
+| `TASKLOOM_PROMPT_BRIEF_IN_SYSTEM` | Whether the head repeats the brief — **off** by default |
+
+The two toggles default to **off** because each guards a *duplicate*: the
+toolbox prose list repeats the tool definitions (sent anyway), and the
+system-head brief repeats the user message. Unset, a deployment gets the
+lean head. Both are one switch away if you want the older, more repetitive
+shape back.
 
 Each text knob takes either an inline value **or** a file path; setting both
 is refused, because two sources for one value is ambiguous. For prose with
@@ -314,11 +321,11 @@ budget still fails closed into `incomplete`. You can reword how the finish
 is asked for; you cannot configure away the requirement that there *is* one.
 
 **The toolbox toggle is about prose, not access.** The tool definitions are
-sent on every request regardless of `TASKLOOM_PROMPT_TOOLBOX_LIST` — turning
-it off removes the human-readable list of the same names (useful on a large
-toolbox where those tokens are dead weight). If you turn it off, mind the
-built-in preamble's "using ONLY the tools listed below" phrasing, or replace
-the preamble too.
+sent on every request regardless of `TASKLOOM_PROMPT_TOOLBOX_LIST`. It is
+off by default, because the list is the definitions' names and descriptions
+repeated; set it to `1` to render the human-readable list again. The default
+preamble says "using only the tools provided" (not "the tools listed
+below"), so it reads correctly either way.
 
 A configured value is read when the worker boots and frozen into each run's
 prompt head, so a change affects runs started afterwards — never a run
@@ -385,10 +392,12 @@ inline. Key knobs:
 | `TASKLOOM_LOCATION` | Where the operator is, as free text (`Chicago`, `Reykjavik, Iceland`) — the grounding block's `Location:` line; unset omits it |
 | `TASKLOOM_SYSTEM_PROMPT` / `_FILE` | Replace the run prompt's opening preamble (inline, or a path to a file); unset keeps the built-in text |
 | `TASKLOOM_COMPLETION_PROMPT` / `_FILE` | Replace the text under the prompt's `## Completion` header; the engine still enforces completion structurally |
-| `TASKLOOM_PROMPT_TOOLBOX_LIST` | Render the prompt's human-readable toolbox list (`1`/`0`); the tool definitions are always sent |
+| `TASKLOOM_PROMPT_TOOLBOX_LIST` | Render the prompt's human-readable toolbox list (`1`/`0`, default `0`); the tool definitions are always sent |
+| `TASKLOOM_PROMPT_BRIEF_IN_SYSTEM` | Repeat the brief inside the system head's `## Task` section (`1`/`0`, default `0` — the brief travels in the user message) |
 | `TASKLOOM_SCHEDULER_ENABLED` / `TASKLOOM_SCHEDULE_INTERVAL` | Run the scheduler daemon in the fleet; tick interval (default 60s) |
 | `TASKLOOM_STEP_BUDGET` | Max tool-call exchanges per run (fail closed) |
 | `TASKLOOM_CONTEXT_LIMIT` | Context window for the fail-closed token budget |
+| `TASKLOOM_MAX_INPUT_ARTIFACT_PCT` | Cap on the whole Inputs block (a stepped run's dependency outputs), split evenly across the inputs (default `50`) |
 | `MESSENGER_TRANSPORT_DSN` | Doctrine-backed lane table; `auto_setup=0` — create it with `doctrine:migrations:migrate` |
 
 ## Development

@@ -118,18 +118,29 @@ except the process.
   discovered catalog (`task.tags ∩ tool.tags`).
 - Resolution happens once, at run start. **No mid-run tool expansion** — deliberate.
   There is no `request_tool` escape hatch in v1.
-- The prompt contains: preamble + task brief + toolbox schemas + completion instruction +
-  grounding block + trimmed window. Nothing else. Nothing a tool returns is ever treated as
-  instructions.
+- The prompt contains: preamble + the task (title, and optionally the brief) + toolbox
+  schemas + completion instruction + grounding block + trimmed window. Nothing else.
+  Nothing a tool returns is ever treated as instructions.
+- **The brief travels once.** It is sent in the **user message** (`Complete the following
+  task.\n\n<brief>`) and is *not* repeated in the system head by default
+  (`TASKLOOM_PROMPT_BRIEF_IN_SYSTEM=1` restores the repetition). The head still names the
+  task: `## Task` carries `Title: <title>` and, for a step or the final consumer, the role
+  note — the identity the assistant replies from — without duplicating the brief.
 - **Section order is fixed and harness-owned:** preamble → `## Task` → `## Inputs`
   (stepped runs) → `## Toolbox` → `## Completion` → `## Grounding`. Grounding is last,
   nearest the model's first reply: most of what a run states back is stamped with the
-  date, time, zone and units it reads there.
-- **Three parts are deployment-configurable** (`TASKLOOM_SYSTEM_PROMPT[_FILE]`,
-  `TASKLOOM_COMPLETION_PROMPT[_FILE]`, `TASKLOOM_PROMPT_TOOLBOX_LIST`); unset means the
-  built-in text, so an existing deployment's prompt does not change until it opts in. The
-  toolbox toggle controls the prompt's prose list only — tool definitions are sent on
-  every request regardless. A replacement preamble owns the untrusted-content sentence;
+  date, time, zone and units it reads there. The `## Toolbox` section renders only when
+  the toolbox toggle is on; the order holds among whatever renders.
+- **Four parts are deployment-configurable** (`TASKLOOM_SYSTEM_PROMPT[_FILE]`,
+  `TASKLOOM_COMPLETION_PROMPT[_FILE]`, `TASKLOOM_PROMPT_TOOLBOX_LIST`,
+  `TASKLOOM_PROMPT_BRIEF_IN_SYSTEM`). The two toggles default **off**, because each
+  guards a *duplicated* rendering, and duplicate content in the prompt was never intended:
+  the toolbox prose list repeats information the tool definitions already carry (sent on
+  every request regardless), and the system-head brief repeats the user message. Unset, a
+  deployment gets the lean head. (`TASKLOOM_PROMPT_TOOLBOX_LIST` was on by default before
+  v1.2; flipping it is a deliberate breaking change — see the CHANGELOG.) The default
+  preamble says "the tools provided", not "the tools listed below", so it no longer
+  dangles with the list off. A replacement preamble owns the untrusted-content sentence;
   the structural defenses (§4.2, frozen toolbox) are unaffected.
 - **The completion *rule* is not configurable.** The engine refuses a contentless
   terminal message and fails closed at the step budget (§5.4); the completion text is
@@ -277,6 +288,11 @@ the full, honest record — only what's sent to the model is trimmed.
   dropped. The whole-exchange drop is deterministic static trimming, not the
   LLM-driven compaction of DESIGN_CONSIDERATIONS §2.3.
 - Cap every tool result to `max_tool_output_percentage` of the context limit.
+- **Cap the Inputs block too, because the head is never pruned** (§13.4): a stepped
+  run's dependency outputs are each limited to an equal share of
+  `max_input_artifact_percentage`, so a wide task cannot grow its runs' never-pruned
+  floor without bound. This is the tool-result cap's mirror on the other side of the
+  head.
 - The budget counts the **whole request**, including the tool definitions (which travel
   beside the messages on every call) and the assistant tool-call arguments. The token
   estimate is deliberately conservative (3.5 chars ≈ 1 token, not 4): it is a guard
@@ -698,6 +714,15 @@ labeled with the step title, frozen at terminal.
   consumer, the inputs are **all** step outputs, labeled — not just the leaves'.
   Predictable beats minimal: for briefing-scale tasks the token cost is trivial, and
   dependency-edge trimming is exactly the kind of context work v1.x defers anyway.
+- **Inputs are capped, because the head is never pruned.** A head is usually bounded —
+  the brief, the toolbox, the grounding — but the Inputs block grows with the task's
+  width, and the final consumer receives *every* step output. Left unbounded it would be
+  an unbounded floor on every request the run makes, the same failure the tool-result cap
+  (§4.2) prevents on the other side of the head. So each artifact is capped
+  (`TASKLOOM_MAX_INPUT_ARTIFACT_PCT` of the context limit, split evenly across the
+  inputs — one gets the lot, two get half each, and so on), truncated with an explicit
+  `…[truncated — input capped]` marker so a trimmed input is never mistaken for a short
+  one. The stored artifact is untouched; only the copy sent to the model is bounded.
 - Step outputs are **data, not instructions** (§4.2): same untrusted-content rules as
   tool results. A weather step's output cannot reconfigure the final consumer's
   toolbox — that is frozen at run start regardless.
