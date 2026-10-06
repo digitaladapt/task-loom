@@ -56,10 +56,17 @@ final readonly class ChatToolbox
      * at dispatch, because a task exists to do something and one with no tools
      * cannot). A conversation with no tools is the ordinary case — most of
      * them, probably — and it is exactly what `chat` was before this existed.
+     *
+     * `$mode` is carried even though the declaration is empty, because the
+     * mode is itself a choice the picker has to reopen on: "no tools, chosen
+     * from the tag panel" and "no tools, chosen from the tool list" are
+     * different forms, and hardcoding either loses the other — along with
+     * anything typed in that panel's free-text companion. An empty selection
+     * is still a selection *of something*.
      */
-    public static function none(): self
+    public static function none(ToolboxMode $mode = ToolboxMode::Explicit): self
     {
-        return new self();
+        return new self($mode, [], []);
     }
 
     /**

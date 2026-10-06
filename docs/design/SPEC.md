@@ -971,10 +971,12 @@ in the same words (SPEC §4.1).
   catalog no longer carries); `toolbox_snapshot` is the resolved set, in the
   run engine's own snapshot shape. Null means "no tools" — which is also what
   every pre-tools exchange means, so those rows behave exactly as they did.
-- **It does not carry forward.** The next message starts from no tools unless
-  the human chooses again. Carrying forward is cheaper and worse: the answer
-  to "what can she do right now?" would be something you have to remember
-  rather than something on screen.
+- **Every exchange freezes its own toolbox, and the picker reopens on the
+  last answer** — the choice carries forward visibly rather than invisibly, so
+  what she can do now is on screen and what she *could* do then is answered by
+  the exchange that did it. Turning everything off carries too: an empty
+  declaration is a recorded choice, and `NULL` is reserved for rows that
+  predate chat tools, so "switched off" and "never said" cannot collide.
 - **The picker is inert while a reply is pending**, because the toolbox froze
   when that exchange started and a control that silently does nothing is worse
   than one that is visibly off.

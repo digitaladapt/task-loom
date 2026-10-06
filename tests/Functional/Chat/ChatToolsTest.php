@@ -411,13 +411,15 @@ final class ChatToolsTest extends KernelTestCase
     }
 
     /**
-     * The toolbox does NOT carry forward: the next message starts from "no
-     * tools" unless the human chooses again (`CHAT_TOOLS.md` §2.1).
+     * Every exchange freezes its OWN toolbox: the authority is the exchange,
+     * never a later one (`CHAT_TOOLS.md` §2.1).
      *
-     * This is the property that keeps "what can she do right now?" a thing on
-     * screen rather than a thing to remember.
+     * What the picker *offers* next is a separate question, and a separate
+     * test — this one is about the record. Exchange 1's tools must still read
+     * as exchange 1's after a second exchange chose differently, because that
+     * record is what answers "why could she do that?".
      */
-    public function testTheToolboxDoesNotCarryForwardToTheNextExchange(): void
+    public function testEachExchangeKeepsItsOwnFrozenToolbox(): void
     {
         $this->seedTool('get_weather', ['weather']);
         $chat = $this->newChat();
@@ -428,12 +430,43 @@ final class ChatToolsTest extends KernelTestCase
         $this->engine->reply((int) $first->getId());
         self::assertCount(1, $this->refresh($first)->getToolboxSnapshot() ?? []);
 
-        // The next message, chosen with nothing.
-        $second = $this->engine->ask($chat, 'thanks');
+        // The next message, chosen with nothing at all.
+        $second = $this->engine->ask($chat, 'thanks', ChatOrigin::Web, ChatToolbox::none(ToolboxMode::Tags));
         $this->engine->reply((int) $second->getId());
 
-        self::assertNull($this->refresh($second)->getToolboxSnapshot(), 'an exchange with no tools froze no snapshot');
-        self::assertSame(0, \count($this->refresh($second)->getToolboxDeclaration()['declared'] ?? []));
+        self::assertSame([], $this->refresh($second)->getToolboxSnapshot(), 'the second exchange ran with no tools');
+        self::assertCount(
+            1,
+            $this->refresh($first)->getToolboxSnapshot() ?? [],
+            'and the first exchange still records the tool it ran with — the choice is per exchange, not a mutable preference',
+        );
+    }
+
+    /**
+     * THE EDGE CASE, at the engine: turning everything off is recorded as a
+     * choice, not as an absence.
+     *
+     * `[]` and `NULL` must not be the same bytes. If they were, "I switched
+     * this off" and "I never said" would be indistinguishable, and the next
+     * form would put the tool back on by itself.
+     */
+    public function testTurningEverythingOffIsRecordedAsAChoiceNotAsNothing(): void
+    {
+        $this->seedTool('get_weather', ['weather']);
+        $chat = $this->newChat();
+
+        $this->llm->method('chat')->willReturn(new LlmResponse('ok', 'stop', [], [], null, 5));
+
+        $exchange = $this->engine->ask($chat, 'no tools please', ChatOrigin::Web, ChatToolbox::none(ToolboxMode::Tags));
+        $this->engine->reply((int) $exchange->getId());
+
+        $fresh = $this->refresh($exchange);
+        self::assertSame([], $fresh->getToolboxSnapshot());
+        self::assertSame(
+            ['mode' => 'tags', 'declared' => []],
+            $fresh->getToolboxDeclaration(),
+            'the empty choice is stored, mode and all — NULL is reserved for rows that predate chat tools',
+        );
     }
 
     /**

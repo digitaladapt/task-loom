@@ -88,10 +88,15 @@
     (`CHAT_TOOLS.md` §2), so the tools shown are the ones she is actually
     using right now. A control that silently does nothing would be worse.
 
-    The values come from the current exchange when one is pending, and are
-    empty otherwise — the deliberate no-carry-forward rule (§2.1): the answer
-    to "what can she do right now?" is always on screen, never something you
-    have to remember from three exchanges ago.
+    The picker always reopens showing your **last answer** — the running
+    exchange's frozen set while a reply is pending, otherwise the previous
+    exchange's choice, pre-filling the next message. So what you see ticked is
+    what you chose, and what she can do is never a thing you have to remember.
+
+    That includes *unticking everything*: if the last exchange ran with no
+    tools, this renders nothing ticked. That is a real answer being carried,
+    not an absence of one — which is why the engine freezes an empty
+    declaration rather than leaving the column NULL.
 #}
 <form method="post" action="{{ path('app_chat_say', {id: chat.id}) }}" class="chat-compose">
     <input type="hidden" name="_token" value="{{ csrf_token('chat-say-' ~ chat.id) }}">
