@@ -41,7 +41,7 @@ final readonly class TimelineEntry
                 self::value($payload, 'tool', '?'),
                 self::value($payload, 'errorClass', '?'),
             ),
-            RunEventType::ContextTrim => 'window trimmed',
+            RunEventType::ContextTrim => self::contextTrimSummary($payload),
             RunEventType::Checkpoint => \sprintf('step %s committed', self::value($payload, 'step', '?')),
             RunEventType::Completion => self::truncate(self::value($payload, 'result', '(empty artifact)')),
             RunEventType::Failure => self::value($payload, 'reason', 'failed'),
@@ -64,6 +64,21 @@ final readonly class TimelineEntry
     private static function label(RunEventType $type): string
     {
         return ucwords(str_replace('_', ' ', $type->value));
+    }
+
+    /** @param array<string, mixed> $payload */
+    private static function contextTrimSummary(array $payload): string
+    {
+        $kept = self::value($payload, 'keptExchanges', '?');
+        $dropped = self::value($payload, 'droppedExchanges', '?');
+
+        // Fall back to the bare label for a row written before the payload
+        // carried counts (or by a future writer that omits them).
+        if ('?' === $kept || '?' === $dropped) {
+            return 'window trimmed';
+        }
+
+        return \sprintf('window trimmed · kept %s, dropped %s', $kept, $dropped);
     }
 
     /** @param array<string, mixed> $payload */
