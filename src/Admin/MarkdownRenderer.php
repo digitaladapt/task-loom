@@ -4,236 +4,106 @@ declare(strict_types=1);
 
 namespace App\Admin;
 
+use App\Admin\Markdown\SafeMarkdownExtension;
+use League\CommonMark\Environment\Environment;
+use League\CommonMark\Extension\CommonMark\CommonMarkCoreExtension;
+use League\CommonMark\Extension\GithubFlavoredMarkdownExtension;
+use League\CommonMark\MarkdownConverter;
+use League\CommonMark\Util\HtmlFilter;
+
 /**
- * A small Markdown renderer for conversation text.
+ * Conversation text as HTML, for the chat transcript.
  *
- * ## Why this exists, and why it is hand-written
+ * ## Why this exists
  *
  * The assistant writes Markdown — lists, emphasis, fenced code, links — and the
  * transcript rendered it with `nl2br`, so a reply arrived as asterisks and
  * backticks. On a phone, reading a bulleted answer as prose with punctuation in
  * it is materially worse than reading the list.
  *
- * SPEC §11 restricts non-Symfony dependencies to an approved, signed-off list
- * (`mcp/sdk`, `dragonmantank/cron-expression`), so pulling in `league/commonmark`
- * is a decision for Andrew, not for me. This is the interim: a deliberately
- * *small* converter that covers what conversational replies actually use, and
- * nothing else. It is written so that swapping it for CommonMark later is a
- * one-class change — the Twig filter and the CSS do not care who produced the
- * HTML.
+ * This started as a hand-written converter, because SPEC §11 restricts
+ * non-Symfony dependencies to an approved list and `league/commonmark` was not
+ * on it. Andrew approved it, which is the right call: it is actively maintained,
+ * BSD-3, and it implements the actual spec rather than my approximation of it.
+ * Tables, nested lists, reference links, task lists, strikethrough, bare-URL
+ * autolinking and tight/loose list spacing are all correct now, and none of
+ * them were before.
  *
- * Unsupported on purpose, and left as literal text rather than half-rendered:
- * tables, nested lists, footnotes, definition lists, autolinks, and reference
- * links. Auto-linking bare URLs is *not* done here either — see below.
+ * GitHub-Flavored Markdown is included because that is the dialect a model
+ * actually emits: a reply containing `| a | b |` is trying to be a table, and
+ * rendering it as a paragraph of pipes is the failure the previous
+ * implementation had. It is a superset of CommonMark, so nothing is lost by it.
  *
- * ## Safety: it escapes first, then adds markup
+ * What is left here is the **policy**, not the parsing: `league/commonmark`'s
+ * defaults are the wrong way round for text that arrived from a model and an
+ * external MCP server, so the environment is configured, and two behaviours are
+ * overridden. See SafeMarkdownExtension and ImageRenderer for the arguments.
  *
- * Every string is HTML-escaped **before** any markup is introduced, and nothing
- * in the pipeline can un-escape it. That ordering is the whole security
- * argument, because this text is partly model output and partly tool output:
- * neither is trusted input, and a tool result is whatever an external MCP
- * server chose to return. There is no raw-HTML pass-through at all, so a reply
- * containing `<script>` renders as visible text — it cannot become script, and
- * it cannot smuggle an event handler into an attribute.
+ * ## The one visible behaviour kept from the previous implementation
  *
- * Link targets are restricted to `http`/`https`. Anything else (`javascript:`,
- * `data:`) stays literal text, because the URL is inserted into an attribute
- * and "escape it and hope" is not a plan.
+ * `renderer/soft_break` is `<br>`. CommonMark's default is a newline, which is
+ * correct for a document and wrong for a chat message: this assistant writes
+ * replies where a single newline is a line break, and rendering those as a space
+ * would silently reflow every reply. Hard breaks (`two trailing spaces`) and
+ * `<br />` keep working as CommonMark defines them.
+ *
+ * ## Safety
+ *
+ * Raw HTML is escaped, always — there is no pass-through mode, so a reply
+ * containing `<script>` renders as visible text and cannot become script. Link
+ * targets are restricted to safe URLs by the library (`allow_unsafe_links` is
+ * off), and images do not render at all (so a reply cannot make the page fetch
+ * anything). The test asserts the invariant that actually matters — the only
+ * tags and attributes in the output are ones this configuration can produce —
+ * rather than looking for scary substrings, because escaped text legitimately
+ * contains the word `onerror`.
  */
 final class MarkdownRenderer
 {
-    /** Deepest block structure this will recurse into before giving up. */
-    private const int MAX_DEPTH = 8;
+    private MarkdownConverter $converter;
 
-    public function render(string $text, int $depth = 0): string
+    public function __construct()
     {
-        if ($depth > self::MAX_DEPTH) {
-            // Pathological input (a blockquote inside itself, forever). Show it
-            // rather than looping: a renderer that hangs is worse than one that
-            // shows unrendered text.
-            return '<p>'.$this->escape($text).'</p>';
-        }
+        $environment = new Environment([
+            // Escape raw HTML rather than allowing it. This is the single most
+            // important setting here: the library defaults to `allow`.
+            'html_input' => HtmlFilter::ESCAPE,
 
-        $text = str_replace(["\r\n", "\r"], "\n", $text);
-        $lines = explode("\n", $text);
-        $count = \count($lines);
-        $html = [];
-        $i = 0;
+            // Drop `javascript:`, `data:` and friends outright instead of
+            // emitting them as an `href`.
+            'allow_unsafe_links' => false,
 
-        while ($i < $count) {
-            $line = $lines[$i];
+            // Bounded, so a pathological document cannot become unbounded work.
+            'max_nesting_level' => SafeMarkdownExtension::MAX_NESTING_LEVEL,
 
-            // Fenced code block. Taken first, because inside a fence nothing
-            // else applies — that is the point of a fence.
-            if (1 === preg_match('/^\s*```\s*(\S*)\s*$/', $line, $match)) {
-                $info = $match[1];
-                $body = [];
-                ++$i;
-                while ($i < $count && 1 !== preg_match('/^\s*```\s*$/', $lines[$i])) {
-                    $body[] = $lines[$i];
-                    ++$i;
-                }
-                ++$i; // the closing fence, or past the end
-                $html[] = $this->codeBlock($body, $info);
+            'renderer' => [
+                // A newline in a chat message is a line break. See the class
+                // docblock — this is the one deliberate deviation from
+                // CommonMark's document semantics.
+                'soft_break' => "<br>\n",
+            ],
 
-                continue;
-            }
+            'external_link' => [
+                // Every link is external, because the app links nowhere of its
+                // own from a transcript. `internal_hosts: []` makes the library
+                // treat all of them as external, which is what adds the rel.
+                'internal_hosts' => [],
+                'open_in_new_window' => true,
+                'noopener' => 'all',
+                'noreferrer' => 'all',
+            ],
+        ]);
 
-            // Horizontal rule. Before lists, because `- - -` is both otherwise.
-            if (1 === preg_match('/^\s*([-*_])(\s*\1){2,}\s*$/', $line)) {
-                $html[] = '<hr>';
-                ++$i;
+        $environment
+            ->addExtension(new CommonMarkCoreExtension())
+            ->addExtension(new GithubFlavoredMarkdownExtension())
+            ->addExtension(new SafeMarkdownExtension());
 
-                continue;
-            }
-
-            if (1 === preg_match('/^(#{1,6})\s+(.*)$/', $line, $match)) {
-                $level = \strlen($match[1]);
-                $html[] = \sprintf('<h%d>%s</h%d>', $level, $this->inline($match[2]), $level);
-                ++$i;
-
-                continue;
-            }
-
-            if (1 === preg_match('/^\s*>\s?(.*)$/', $line, $match)) {
-                $quoted = [];
-                while ($i < $count && 1 === preg_match('/^\s*>\s?(.*)$/', $lines[$i], $inner)) {
-                    $quoted[] = $inner[1];
-                    ++$i;
-                }
-                $html[] = '<blockquote>'.$this->render(implode("\n", $quoted), $depth + 1).'</blockquote>';
-
-                continue;
-            }
-
-            if (1 === preg_match('/^\s*[-*+]\s+/', $line)) {
-                [$items, $i] = $this->listItems($lines, $i, '/^\s*[-*+]\s+(.*)$/');
-                $html[] = '<ul>'.$items.'</ul>';
-
-                continue;
-            }
-
-            if (1 === preg_match('/^\s*\d+[.)]\s+/', $line)) {
-                [$items, $i] = $this->listItems($lines, $i, '/^\s*\d+[.)]\s+(.*)$/');
-                $html[] = '<ol>'.$items.'</ol>';
-
-                continue;
-            }
-
-            if ('' === trim($line)) {
-                ++$i;
-
-                continue;
-            }
-
-            // A paragraph: consecutive lines up to a blank line or the start of
-            // another block. Single newlines inside it are line breaks, because
-            // that is how a person — and this assistant — writes a chat message.
-            $paragraph = [];
-            while ($i < $count && '' !== trim($lines[$i]) && !$this->startsBlock($lines[$i])) {
-                $paragraph[] = $this->inline($lines[$i]);
-                ++$i;
-            }
-            $html[] = '<p>'.implode("<br>\n", $paragraph).'</p>';
-        }
-
-        return implode("\n", $html);
+        $this->converter = new MarkdownConverter($environment);
     }
 
-    /**
-     * @param list<string> $body
-     */
-    private function codeBlock(array $body, string $info): string
+    public function render(string $text): string
     {
-        $class = '' === $info ? '' : ' class="language-'.$this->escape($info).'"';
-
-        return \sprintf(
-            '<pre class="md-code"><code%s>%s</code></pre>',
-            $class,
-            $this->escape(implode("\n", $body)),
-        );
-    }
-
-    /**
-     * @param list<string> $lines
-     *
-     * @return array{string, int} the rendered items, and where to resume
-     */
-    private function listItems(array $lines, int $i, string $pattern): array
-    {
-        $count = \count($lines);
-        $items = '';
-
-        while ($i < $count && 1 === preg_match($pattern, $lines[$i], $match)) {
-            $text = [$match[1]];
-            ++$i;
-            // Continuation lines: an item's wrapped text, indented under it.
-            while ($i < $count && '' !== trim($lines[$i])
-                && 1 !== preg_match($pattern, $lines[$i])
-                && 1 !== preg_match('/^\s*[-*+]\s+/', $lines[$i])
-                && 1 !== preg_match('/^\s*\d+[.)]\s+/', $lines[$i])
-                && 1 !== preg_match('/^\s*```/', $lines[$i])
-                && 1 === preg_match('/^\s{2,}\S/', $lines[$i])
-            ) {
-                $text[] = trim($lines[$i]);
-                ++$i;
-            }
-            $items .= '<li>'.$this->inline(implode(' ', $text)).'</li>';
-        }
-
-        return [$items, $i];
-    }
-
-    /** Whether a line begins a block construct, ending the current paragraph. */
-    private function startsBlock(string $line): bool
-    {
-        foreach (['/^\s*```/', '/^(#{1,6})\s+/', '/^\s*>/', '/^\s*[-*+]\s+/', '/^\s*\d+[.)]\s+/'] as $pattern) {
-            if (1 === preg_match($pattern, $line)) {
-                return true;
-            }
-        }
-
-        return 1 === preg_match('/^\s*([-*_])(\s*\1){2,}\s*$/', $line);
-    }
-
-    /**
-     * Inline markup within one line.
-     *
-     * The escape happens first and everything after only *inserts* tags, so no
-     * path through this method can emit a tag the caller did not write.
-     */
-    private function inline(string $text): string
-    {
-        $text = $this->escape($text);
-
-        // Code spans first: `**this**` inside backticks must stay literal.
-        $text = (string) preg_replace_callback(
-            '/`([^`]+)`/',
-            static fn (array $m): string => '<code>'.$m[1].'</code>',
-            $text,
-        );
-
-        // Links, http(s) only. The target is already escaped, and the scheme is
-        // pinned, so it cannot become `javascript:` or break out of the
-        // attribute.
-        $text = (string) preg_replace_callback(
-            '/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/',
-            static fn (array $m): string => \sprintf(
-                '<a href="%s" rel="noopener noreferrer" target="_blank">%s</a>',
-                $m[2],
-                $m[1],
-            ),
-            $text,
-        );
-
-        $text = (string) preg_replace('/\*\*([^*\n]+)\*\*/', '<strong>$1</strong>', $text);
-        $text = (string) preg_replace('/(?<!\*)\*([^*\n]+)\*(?!\*)/', '<em>$1</em>', $text);
-
-        return $text;
-    }
-
-    private function escape(string $text): string
-    {
-        return htmlspecialchars($text, \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
+        return $this->converter->convert($text)->getContent();
     }
 }

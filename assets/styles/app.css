@@ -1005,25 +1005,90 @@ fieldset legend {
     font-size: 0.9em;
 }
 
-.md pre.md-code {
+.md pre {
+    /* A fence reads as a block, so it gets its own surface. */
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 6px;
+
     /*
      * Wraps rather than scrolls.
      *
      * A pretty-printed tool result is the thing you opened the bubble to read,
      * and horizontal scrolling inside a bubble hides it — badly on a phone,
      * where a sideways swipe in the middle of a transcript is a trap. Wrapping
-     * is less faithful to the JSON's layout and much easier to actually read.
+     * is less faithful to the code's layout and much easier to actually read.
      * `overflow-wrap: anywhere` because a JSON string with no spaces would
      * otherwise push the bubble wider than the page.
+     *
+     * (`renderer/soft_break` is `<br>`, so the parser's soft breaks — which are
+     * the *line breaks inside* a fenced block, and the whole point of the block
+     * — depend on these two properties rather than on a `<br>` element. Testing
+     * the rendered page is what caught that; a unit test of the HTML would not
+     * have.)
      */
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     padding: 0.5rem 0.65rem;
 }
 
-.md pre.md-code code {
+/* Inside a fenced block the code span should not paint its own chip. */
+.md pre code {
     background: none;
     padding: 0;
+    font-size: 0.9em;
+}
+
+/*
+ * GFM tables (the library brought these with it).
+ *
+ * A table is the one construct that cannot fit a phone, so it scrolls
+ * horizontally *within its own box*, which is the right place for a sideways
+ * swipe — unlike the transcript, where one would be a trap. `display: block`
+ * is what allows the overflow rather than stretching the bubble.
+ */
+.md table {
+    display: block;
+    overflow-x: auto;
+    border-collapse: collapse;
+    margin: 0.5rem 0;
+    font-size: 0.9rem;
+}
+
+.md th,
+.md td {
+    border: 1px solid var(--muted);
+    padding: 0.3rem 0.5rem;
+    text-align: left;
+}
+
+.md th {
+    background: rgba(0, 0, 0, 0.2);
+}
+
+/*
+ * GFM task lists. The checkbox is real and rendered by the parser
+ * (`disabled`), so it must not be sized by the 44px tap-target rule — it is
+ * not a control, it is a mark in a line of text.
+ */
+.md li > input[type="checkbox"] {
+    min-height: 0;
+    width: auto;
+    padding: 0;
+    margin: 0 0.35rem 0 0;
+    vertical-align: middle;
+    border: 0;
+    background: none;
+}
+
+.md li:has(> input[type="checkbox"]) {
+    list-style: none;
+    margin-left: -1rem;
+}
+
+/* An image, shown as its source rather than fetched (see ImageRenderer). */
+.md code.md-image {
+    font-size: 0.85em;
+    overflow-wrap: anywhere;
 }
 
 .md blockquote {

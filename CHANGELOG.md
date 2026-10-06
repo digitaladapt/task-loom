@@ -14,20 +14,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and backticks — worst on a phone, where reading a bulleted reply as prose with
   punctuation in it is materially harder than reading the list.
 
-  The renderer is hand-written and deliberately small (`App\Admin\MarkdownRenderer`):
-  headings, lists, fenced code, emphasis, code spans, blockquotes, rules and
-  http(s) links, and nothing else. SPEC §11 restricts non-Symfony dependencies to
-  an approved list, so `league/commonmark` is Andrew's decision to make rather
-  than something to slip in — but this is written so that swapping it later is a
-  one-class change, since the Twig filter and the CSS do not care who produced
-  the HTML.
+  Rendering is `league/commonmark` (`^2.10`, BSD-3, newly approved in SPEC §11),
+  with CommonMark **plus** GitHub-Flavored Markdown — the dialect a model
+  actually emits, so tables, task lists, strikethrough, bare-URL autolinking and
+  nested lists all work. A hand-written converter came first, because the
+  dependency list is Andrew's to approve; he approved the library, which is the
+  better answer: it is maintained and implements the spec rather than an
+  approximation of it.
 
-  It escapes first and adds markup after, with no raw-HTML pass-through, and link
-  targets are pinned to http(s) rather than escaped and hoped for. The test
-  states the invariant that actually matters — the only tags and attributes in
-  the output are the ones the renderer writes — because "the output never
-  contains the word `onerror`" is satisfied by escaped text that legitimately
-  contains that word, which is a test that passes for the wrong reason.
+  The library's defaults assume trusted input, and this text is model output and
+  tool results, so the posture is set explicitly: `html_input` is `escape` (the
+  default is `allow`), `allow_unsafe_links` is off, and nesting is bounded. Two
+  behaviours are overridden rather than accepted. `renderer/soft_break` is
+  `<br>`, because a newline in a chat message is a line break and CommonMark's
+  document semantics would silently reflow every reply. And **images render as
+  their source, not as an image**: honouring `![]()` would make the transcript
+  fetch a model-supplied URL, leaking the reader's IP and the fact that they
+  opened the page, and making a tracking pixel possible in a conversation.
+  Nothing did that before and it is not something to acquire by accident.
+
+  The test states the invariant that actually matters — the only tags and
+  attributes in the output are ones this configuration can produce, with the
+  allowlist derived by exercising every feature rather than copied from a
+  docblock. It deliberately does *not* assert that the output lacks the substring
+  `onerror=`: escaped text legitimately contains it, so that check fails on
+  correct output and pushes toward weakening the escaping to make it green.
 
   `App\Admin\JsonPresenter` fixes the other half: a tool result's `content` is a
   **string** (the OpenAI `tool` message shape), and a real MCP server returns

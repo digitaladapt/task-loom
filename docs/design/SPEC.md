@@ -575,6 +575,30 @@ stream that modern servers answer with 405, which an in-repo transport worked
 around for ~380 lines until the official SDK removed the need. Pinned to an
 exact version (`0.8.1`) because it is pre-1.0; relax to `^1.0` once 1.0 ships.
 2. **`dragonmantank/cron-expression`** — proven in task-weaver; needed for v1.1 scheduling.
+3. **`league/commonmark`** (`^2.10`) — Markdown for the chat transcript (§15):
+   an assistant replies in Markdown, and rendering it with `nl2br` handed the
+   reader asterisks and backticks. Approved by sign-off, and the right call over
+   a hand-written converter: it is actively maintained, BSD-3, and implements
+   the spec rather than an approximation of it — CommonMark plus
+   GitHub-Flavored Markdown, which is the dialect a model actually emits
+   (tables, task lists, strikethrough, bare-URL autolinking).
+
+   It is configured defensively, because its defaults assume trusted input and
+   this text is model output and tool results: `html_input` is `escape` (the
+   library default is `allow`), `allow_unsafe_links` is off, and
+   `max_nesting_level` is bounded. Two behaviours are overridden rather than
+   accepted — `renderer/soft_break` is `<br>`, because a newline in a chat
+   message is a line break rather than a space; and images are replaced by a
+   text line, because honouring `![]()` would make the transcript fetch a
+   model-supplied URL and turn a reply into a tracking pixel. See
+   `App\Admin\MarkdownRenderer`, `App\Admin\Markdown\SafeMarkdownExtension`
+   and `App\Admin\Markdown\ImageRenderer`.
+
+   Hard requirement: `ext-mbstring`, which the official PHP image (and so the
+   FrankenPHP base of `Dockerfile`) already builds — no image change needed.
+   It also brings `league/config` → `nette/schema`, `nette/utils`,
+   `dflydev/dot-access-data` transitively; they are library plumbing, not
+   dependencies this app calls.
 
 Transports supported: **MCP Streamable HTTP** and **OpenAPI (HTTP/JSON)**. No stdio, no SSE.
 
