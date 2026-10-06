@@ -58,6 +58,7 @@ final class AdminMenuBarTest extends WebTestCase
         yield 'runs' => ['/runs'];
         yield 'attention' => ['/attention'];
         yield 'tool catalog' => ['/tools'];
+        yield 'chat' => ['/chat'];
         yield 'new task' => ['/tasks/new'];
         yield 'task detail' => ['/tasks/{id}'];
         yield 'task edit' => ['/tasks/{id}/edit'];
@@ -76,7 +77,7 @@ final class AdminMenuBarTest extends WebTestCase
         );
 
         self::assertSame(
-            ['Tasks', 'Runs', 'Attention', 'Tool catalog', 'New task'],
+            ['Tasks', 'Runs', 'Attention', 'Tool catalog', 'Chat', 'New task'],
             $items,
             'the menu bar offers the same sections on every page, in the same order',
         );

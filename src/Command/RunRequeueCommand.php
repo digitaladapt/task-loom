@@ -185,11 +185,14 @@ final class RunRequeueCommand extends Command
 
         $grabAfter = $this->reaper->grabAfterSeconds();
         $survey = $this->reaper->survey();
-        $reaped = $dryRun ? 0 : $this->reaper->reap();
+        $reaped = $dryRun ? ['runs' => 0, 'chat_exchanges' => 0] : $this->reaper->reap();
+        $cleared = $reaped['runs'] + $reaped['chat_exchanges'];
 
         if (!$dryRun) {
             $this->logger->info('Boot sweep cleared {reaped} claim(s); {leased} left to the lease (fresher than the {grabAfter}s bound); {unowned} of the cleared had no owner label.', [
-                'reaped' => $reaped,
+                'reaped' => $cleared,
+                'runs' => $reaped['runs'],
+                'chatExchanges' => $reaped['chat_exchanges'],
                 'fleet' => $mine,
                 'grabAfter' => $grabAfter,
                 'leased' => $survey['leased'],
@@ -215,11 +218,26 @@ final class RunRequeueCommand extends Command
             )
             : \sprintf(
                 'Claims: cleared %d (%s), %d left to the lease, %d of those without an owner label.',
-                $reaped,
+                $cleared,
                 $bound,
                 $survey['leased'],
                 $survey['unowned'],
             ));
+
+        // The split, when there is one. Offered as a second line rather than
+        // folded into the first because the two aggregates have different
+        // consequences: an abandoned run is work that stopped, and an
+        // abandoned exchange is a person waiting for an answer that is not
+        // coming. An operator scanning the boot block should be able to tell
+        // which they are looking at without counting.
+        if ($survey['chat_exchanges']['clearable'] > 0 || $survey['chat_exchanges']['leased'] > 0) {
+            $output->writeln(\sprintf(
+                '  of which chat exchanges: %s %d, %d left to the lease.',
+                $dryRun ? 'would clear' : 'cleared',
+                $dryRun ? $survey['chat_exchanges']['clearable'] : $reaped['chat_exchanges'],
+                $survey['chat_exchanges']['leased'],
+            ));
+        }
 
         return true;
     }

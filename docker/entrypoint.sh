@@ -9,10 +9,23 @@
 #                            (the admin UI and the MCP server role at POST /mcp
 #                            share this process — the SDK's HTTP transport is
 #                            a PSR-7 handler, not a web server)
-#     llm workers  × N      messenger:consume llm
+#     llm workers  × N      messenger:consume chat llm
 #                           (N = TASKLOOM_LLM_MAX_CONCURRENCY: a worker holds
 #                           at most one LLM request on the wire, so N workers
-#                           ARE the concurrency semaphore — SPEC §6)
+#                           ARE the concurrency semaphore — SPEC §6.
+#
+#                           `chat` comes FIRST, and that is the whole
+#                           preemption mechanism (SPEC §15):
+#                           messenger:consume is strict-priority across its
+#                           receivers — it drains them in the order listed,
+#                           every iteration — so a queued chat reply is taken
+#                           before any task turn the same worker could have
+#                           taken. No new process, no lock, no async runtime.
+#
+#                           It does not create capacity: the semaphore is the
+#                           *total* in flight, so at the default N=1 a chat
+#                           goes next, never now, and waits out at most one
+#                           in-flight generation.)
 #     tools workers × M     messenger:consume tools
 #                           (M = TASKLOOM_TOOL_MAX_CONCURRENCY; tool turns
 #                           mostly wait on external servers, so several run at
@@ -329,7 +342,10 @@ sync_catalog() {
 # ── Child processes ─────────────────────────────────────────────────────────
 # Commands are built once, as arrays, so quoting cannot mangle an argument.
 WEB_CMD=(frankenphp run --config /etc/frankenphp/Caddyfile)
-LLM_CMD=(php bin/console messenger:consume llm
+# `chat` before `llm`: the LLM workers are the fleet's chat-aware ones, and
+# receiver order is consume order (strict priority, verified in
+# symfony/messenger Worker::run()). See the header.
+LLM_CMD=(php bin/console messenger:consume chat llm
     --time-limit="$WORKER_TIME_LIMIT" --memory-limit="$WORKER_MEMORY_LIMIT" --no-interaction)
 TOOLS_CMD=(php bin/console messenger:consume tools
     --time-limit="$WORKER_TIME_LIMIT" --memory-limit="$WORKER_MEMORY_LIMIT" --no-interaction)
@@ -625,9 +641,21 @@ if [ "$command" = "serve" ]; then
     # container's stop-time trouble is a turn that outlived its shutdown window,
     # and that is repaired by its successor — which runs the full fleet and does
     # sweep. Skipping here costs nothing on the documented path.
+    # The chat lane is owned by exactly the same predicate as `llm`, because
+    # the LLM workers drain it (LLM_CMD consumes `chat llm`). So this check
+    # covers both lanes without naming the new one — which is the one thing
+    # that had to be true for adding a lane to be safe (SPEC §6.2, §15).
     if [ "$LLM_WORKERS" -gt 0 ] && [ "$TOOL_WORKERS" -gt 0 ]; then
         php bin/console app:run:requeue --startup --no-interaction \
             || log "warning: boot sweep reported failures; the fleet is starting anyway"
+
+        # Chat exchanges owe a reply in the same sense runs owe a turn, and the
+        # consequence of missing one is worse: an unanswered exchange is a
+        # person sitting in front of a conversation that will never continue.
+        # The claim above is already cleared (ClaimReaper sweeps every
+        # claimable aggregate), so this half only has to re-dispatch.
+        php bin/console app:chat:requeue --no-interaction \
+            || log "warning: chat requeue reported failures; the fleet is starting anyway"
     else
         # Named explicitly rather than counted, because the two cases have
         # different remedies in the field: no llm worker means a peer owns the

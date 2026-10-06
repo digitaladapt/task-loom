@@ -62,14 +62,31 @@ services:
                 mcp: '@App\Toolbox\McpServerReader'
                 openapi: '@App\Toolbox\OpenApiServerReader'
 
+    # The execution-claim protocol (SPEC §6, §15), written once and used by
+    # every claimable aggregate: runs and chat exchanges. Constructed from the
+    # DBAL connection rather than the entity manager, because the claim is raw
+    # SQL by design — entity flushes must not be able to touch these columns.
+    App\Claims\ClaimStore:
+        arguments:
+            $connection: '@doctrine.dbal.default_connection'
+
     # Boot recovery (SPEC §6.2): clears execution claims a fleet that was
     # killed rather than stopped left behind. Only ever invoked behind the
     # fleet-owner gate in app:run:requeue --startup — see
     # App\RunEngine\FleetOwnership for why the authority is granted rather
     # than assumed.
-    App\RunEngine\ClaimReaper:
+    # No arguments of its own: the reaper sweeps through the shared
+    # ClaimStore, so adding a claimable aggregate cannot leave it reaping one
+    # table less than the system has.
+    App\RunEngine\ClaimReaper: ~
+
+    # The chat turn loop (SPEC §15). The bus is passed explicitly and is
+    # nullable, exactly as the run engine's is: the enqueue has to happen
+    # inside the committing transaction, so it is a constructor dependency
+    # rather than a call the caller makes afterwards.
+    App\Chat\ChatEngine:
         arguments:
-            $em: '@doctrine.orm.entity_manager'
+            $bus: '@messenger.default_bus'
 
     # Run engine (SPEC §3, §5): loop, prompt compiler, budgets.
     App\Llm\LlmClient:

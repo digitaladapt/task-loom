@@ -122,7 +122,7 @@ final class EntrypointSupervisorTest extends TestCase
         self::assertStringContainsString('app:run:requeue --startup', $log);
 
         $sweep = strpos($log, 'app:run:requeue --startup');
-        $firstWorker = strpos($log, 'messenger:consume llm');
+        $firstWorker = strpos($log, 'messenger:consume chat llm');
         self::assertNotFalse($sweep);
         self::assertNotFalse($firstWorker, 'the fleet must start at all');
         self::assertLessThan($firstWorker, $sweep, 'the boot sweep must complete before the first worker consumes');
@@ -438,7 +438,7 @@ final class EntrypointSupervisorTest extends TestCase
             $this->stopServe($process);
         }
 
-        self::assertStringContainsString('messenger:consume llm', $this->readPhpLog());
+        self::assertStringContainsString('messenger:consume chat llm', $this->readPhpLog());
         self::assertStringContainsString('--time-limit=120', $this->readPhpLog());
         self::assertStringContainsString('--memory-limit=64M', $this->readPhpLog());
     }
@@ -717,7 +717,11 @@ final class EntrypointSupervisorTest extends TestCase
                 *"migrations:migrate"*) echo "migrated"; exit 0 ;;
                 *"catalog:sync"*) echo "synced"; exit 0 ;;
                 *"app:run:requeue"*) echo "requeued"; exit 0 ;;
-                *"messenger:consume llm"*)
+                *"app:chat:requeue"*) echo "chat requeued"; exit 0 ;;
+                # `chat llm`, in that order: the LLM workers are the fleet's
+                # chat-aware ones (SPEC §15), so the pattern has to name the
+                # lane list rather than just the run lane.
+                *"messenger:consume chat llm"*)
                     echo "LLM WORKER up" >> "$SANDBOX/worker.log"
                     trap 'echo "LLM WORKER got TERM" >> "$SANDBOX/worker.log"; exit 0' TERM
                     if [ -n "${STUB_LLM_CRASH_AFTER:-}" ]; then sleep "$STUB_LLM_CRASH_AFTER"; exit 9; fi

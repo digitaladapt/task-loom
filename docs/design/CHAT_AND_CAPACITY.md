@@ -1,9 +1,22 @@
 # Chat and Capacity
 
-**Status:** design — settled. Nothing here is built. The open questions
-from review are answered (§10.4 lists them); what remains open is listed in
-§10. Once built, the attribution invariant, the chat aggregate, and the
-exchange ledger would land as SPEC §15; the priority lane as a §6.x note.
+**Status:** design — settled, and **§8 steps 1 and 2 are built** (SPEC §15).
+The attribution invariant, the chat aggregate, the exchange ledger, the
+phone-first web surface, and the chat lane as priority head all shipped
+together; this doc is now the record of why they are shaped the way they are,
+not a plan. **§8 steps 3–6 are not built**: the streaming client and cancel
+token (§4.3), alerts (§5), initiation (§9), and task sub-priorities.
+
+The one promise this doc made that turned out to depend on something else:
+at the default `N=1` (§4.4), queue priority buys "chat goes next", and the
+measurement that matters — how long a person actually waits — is one in-flight
+generation. If that proves too slow in use, the streaming work in §4.3 is the
+fix, and nothing about the aggregate or the lane has to move for it.
+
+The open questions from review are answered (§10.4 lists them); what remains
+open is listed in §10 — of which §10.2 (an unbounded transcript and the
+context policy it needs) is now the live one, because the conversation it
+warns about exists.
 
 ## 0. The two problems
 
@@ -570,16 +583,27 @@ one is a real risk, not a checklist item.
 
 ## 8. Phasing
 
-1. **The conversational loop on the web surface.** The smallest thing
-   that sends a message to the model, gets a reply, and records the
-   exchange — on the decided surface (§9, the minimal web chat). **Attribution (§2) and
-   the aggregate shape (§3.3) land with it** — the turn record *is* the
-   chat's data model, so splitting them means writing it twice.
-2. **The chat lane as priority head** + the chat turn handler, reusing the
-   loop and the ledger, and the claim/requeue machinery behind the shared
-   interface. No streaming on the *client* side yet (the lane is a
-   queue-priority change; it does not need the streaming reader). This is
-   the "chat preempts tasks" milestone.
+1. ~~**The conversational loop on the web surface.**~~ **Shipped.** The
+   smallest thing that sends a message to the model, gets a reply, and
+   records the exchange — on the decided surface (§9, the minimal web chat).
+   **Attribution (§2) and the aggregate shape (§3.3) landed with it**, as
+   specified, for the reason given: the turn record *is* the chat's data
+   model, so splitting them would have meant writing it twice.
+
+   One thing the build added that this list did not anticipate, and it is
+   worth recording because it is the shape §3.3's "share the machinery"
+   advice predicts: the claim/reap/requeue protocol became its own class
+   (`App\Claims\ClaimStore`, with a closed `ClaimTarget`) rather than being
+   copied, and `ClaimReaper` now sweeps *every* claimable aggregate. The
+   alternative was a boot sweep that silently covered runs and not
+   conversations — which is the same class of failure this doc spends §6.2's
+   neighbourhood warning about, one level up.
+2. ~~**The chat lane as priority head**~~ **Shipped**, with the chat turn
+   handler, the loop and the ledger reused, and the claim/requeue machinery
+   behind the shared interface exactly as above. No streaming on the *client*
+   side yet, as planned — the lane is a queue-priority change and did not need
+   the streaming reader. This is the "chat preempts tasks" milestone, with the
+   §4.4 caveat intact: *preempts* here means *goes next*, not *goes now*.
 3. **Streaming client + cancel token** → true sub-second preemption, and
    the "watch it type" read path.
    *At the default N=1 this is what makes chat real-time; at N≥2 it is

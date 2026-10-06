@@ -812,3 +812,128 @@ in the zone, instants are what is stored.
 - **Not per-task timezones.** One deployment timezone; TaskLoom v1 is single-tenant.
 - **Not catch-up replay.** A missed window fires once, at the next tick — not once per
   missed occurrence.
+
+## 15. Chat (v1.x) — a conversation, not a task
+
+**Status:** the conversational loop, the attribution invariant, the chat lane
+as priority head, and the phone-first web surface are built. Alerts (§5 of
+`CHAT_AND_CAPACITY.md`), streaming, and the assistant initiating are not.
+
+### 15.1 Three nouns, and no fourth
+
+| task world   | chat world          | what it is                         |
+|--------------|---------------------|------------------------------------|
+| `Task`       | `Chat`              | the durable thing being worked on  |
+| `Run`        | `ChatExchange`      | one execution, triggered, claimable |
+| `RunEvent`   | `ChatExchangeEvent` | one typed row in the ledger        |
+
+**An inbound message is the trigger. Everything from that message until the
+reply concludes is one exchange. Each thing that happens inside it is one
+typed event.** An exchange is a run-shaped execution *over a conversation
+instead of a task* — not a `Run`, and not a `Task`.
+
+**There is no turn table.** The transcript is a filtered read: the
+conversational rows of a conversation's exchanges, in order. A turn *is* an
+event. (A `ChatTurn` table later would be a projection over these rows, not a
+migration of them.)
+
+### 15.2 Attribution is a safety invariant
+
+**Every turn carries its speaker, and the model sees it.** Not "the system
+knows" — the model is handed the attribution. A flattened two-party
+transcript breaks in both directions: the assistant's own past output reads as
+the human's instructions (a prompt-injection surface grown inside her own
+history, in a system where she holds tools), or the human's instructions read
+as her own prior words and may not be followed.
+
+- **Stored, richly, in typed columns:** `speaker` (`andrew` | `nia`), `role`,
+  `origin`, `content`, `reply_to_id`. Typed rather than payload entries
+  because a safety invariant should not live in an untyped blob — nothing
+  enforces a blob's shape, and a reader has to know the convention to find it.
+- **Rendered as roles:** `andrew → user`, `nia → assistant`. That mapping is
+  what tells the model whose opinions are whose, and it is the form a small
+  model is trained on.
+- **The human never types a name.** Attribution is applied by the pipeline at
+  the render layer; "morning" arrives as a turn *from Andrew*. For two
+  participants the prompt shows roles only, with no visible prefix.
+- **The roster does not assume two.** `Participant` is an enum with a display
+  name, so a third participant moves names *inside* a role (`Nia: …` vs
+  `Reviewer: …`) — the same mechanism one rung up.
+
+### 15.3 Capacity: the chat lane is the priority head
+
+`TASKLOOM_LLM_MAX_CONCURRENCY` is the **total** number of requests in flight
+to the model, not a per-lane budget (§6). The schedulable unit is therefore
+one LLM call, and preemption is not "stop the task" — it is **which lane the
+next available worker drains first**.
+
+- The `chat` lane is a transport on the same `messenger_messages` table.
+- The LLM workers consume **`chat llm`**. `messenger:consume` is
+  strict-priority across its receivers — `Worker::run()` iterates them in
+  order and breaks on the first that handled an envelope — so receiver order
+  *is* consume order, and every existing LLM worker becomes chat-aware with no
+  new process, no lock, and no async runtime.
+- **It does not create capacity.** At the default `N=1` a chat goes *next*,
+  never *now*: the worst case is one in-flight generation, and for a reasoning
+  model that is tens of seconds. Sub-second preemption needs a streaming
+  client that can abort mid-generation; the seam for it is not built, and the
+  client is deliberately non-streaming today.
+- **Halt is scoped to each LLM call**, not to the chat's whole duration. A
+  conversation that goes quiet while a human thinks must not leave tasks
+  halted. Waiting for a human occupies nothing.
+
+### 15.4 Failure is loud
+
+A run that throws is visible — it lands in `failed` and the run page shows it.
+A chat turn that throws has **a person staring at it**, so the same treatment
+is not enough. A failed exchange is marked `failed` with a classified reason
+in its ledger, and the surface says so out loud. It is deliberately **not**
+re-dispatched: a model that is down will still be down a second later, and a
+hot retry loop against a single-slot server is how one conversation stops
+every task. The human's next message starts a fresh exchange; that is the
+retry.
+
+### 15.5 Respond-only, with the seam left
+
+v1 answers; it does not open conversations. The seam is that
+`ChatExchange.triggered_by` exists from day one with `inbound` as its only
+value — so the trigger is a *value* on the exchange rather than the presence
+of an inbound turn. The one review rule that must hold: **do not let "an
+exchange always has a triggering inbound turn" harden into a non-null FK with
+no escape.** That is the single decision that would make initiation hard.
+
+The delivery path is already separate: when the assistant initiates, the
+*notification* that tells you to look is an alert, and alerts have their own
+channels. Chat is a place you go; an alert is a thing that reaches you.
+
+### 15.6 What is shared with the run engine, and what is not
+
+**Shared (machinery, not tables):** the ledger row's layout (`LedgerEvent`,
+a Doctrine `MappedSuperclass`, so the two event tables are identical by
+compiler rather than by convention); the claim / checkpoint / requeue protocol
+(`App\Claims\ClaimStore`, written once against a closed set of claimable
+aggregates); the message bus and its lanes; `LlmClientInterface`.
+
+**Not shared:** the `Task → Run → Step` graph, and `RunStatus` as the state
+machine. A chat's states are its own — `queued | running | answered | failed`
+— because a conversation never declares justified completion, and sharing the
+run's enum would drag `paused`/`needs_attention`/`incomplete` into a domain
+with no use for them.
+
+**Why not reuse the tables.** `Run.task_id` is NOT NULL and
+`Run::__construct()` takes a `Task`, so reuse means a synthetic "Internal:
+Chat" task row — a lie at the centre of the schema, appearing in the task
+admin UI. And `findRecent()` / `findAttention()` filter on `parent IS NULL`
+only, so a chat row would **silently** appear in the run history and the
+attention queue, the queue whose entire job is "a run needs a human".
+
+### 15.7 Boot recovery covers chat exchanges too
+
+An exchange abandoned by a fleet that was killed is as stuck as a run is, and
+worse in one respect: a human is waiting for an answer that will not come. So
+`ClaimReaper` (§6.2) sweeps **every** claimable aggregate, and the container's
+boot sequence runs `app:chat:requeue` alongside `app:run:requeue --startup`.
+The reap is written against the shared claim store rather than per table, so a
+third claimable aggregate cannot be added and then quietly left out of boot
+recovery. The boot line reports the split, because "work that stopped" and "a
+person waiting" want different attention.

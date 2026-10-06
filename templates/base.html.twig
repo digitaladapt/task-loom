@@ -64,12 +64,17 @@
                 'app_run_detail': 'runs',
                 'app_attention': 'attention',
                 'app_tool_list': 'tools',
+                'app_chat_list': 'chat',
+                'app_chat_show': 'chat',
+                'app_chat_say': 'chat',
+                'app_chat_new': 'chat',
             } %}
             {% set menu_items = [
                 {section: 'tasks', route: 'app_task_list', label: 'Tasks'},
                 {section: 'runs', route: 'app_run_list', label: 'Runs'},
                 {section: 'attention', route: 'app_attention', label: 'Attention'},
                 {section: 'tools', route: 'app_tool_list', label: 'Tool catalog'},
+                {section: 'chat', route: 'app_chat_list', label: 'Chat'},
                 {section: 'new', route: 'app_task_new', label: 'New task'},
             ] %}
             {% set current_route = app.current_route %}
