@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A conversation's replies render as Markdown, and tool payloads render as
+  readable JSON.** The transcript used `nl2br`, so an answer arrived as asterisks
+  and backticks — worst on a phone, where reading a bulleted reply as prose with
+  punctuation in it is materially harder than reading the list.
+
+  Rendering is `league/commonmark` (`^2.10`, BSD-3, newly approved in SPEC §11),
+  with CommonMark **plus** GitHub-Flavored Markdown — the dialect a model
+  actually emits, so tables, task lists, strikethrough, bare-URL autolinking and
+  nested lists all work. A hand-written converter came first, because the
+  dependency list is Andrew's to approve; he approved the library, which is the
+  better answer: it is maintained and implements the spec rather than an
+  approximation of it.
+
+  The library's defaults assume trusted input, and this text is model output and
+  tool results, so the posture is set explicitly: `html_input` is `escape` (the
+  default is `allow`), `allow_unsafe_links` is off, and nesting is bounded. Two
+  behaviours are overridden rather than accepted. `renderer/soft_break` is
+  `<br>`, because a newline in a chat message is a line break and CommonMark's
+  document semantics would silently reflow every reply. And **images render as
+  their source, not as an image**: honouring `![]()` would make the transcript
+  fetch a model-supplied URL, leaking the reader's IP and the fact that they
+  opened the page, and making a tracking pixel possible in a conversation.
+  Nothing did that before and it is not something to acquire by accident.
+
+  The test states the invariant that actually matters — the only tags and
+  attributes in the output are ones this configuration can produce, with the
+  allowlist derived by exercising every feature rather than copied from a
+  docblock. It deliberately does *not* assert that the output lacks the substring
+  `onerror=`: escaped text legitimately contains it, so that check fails on
+  correct output and pushes toward weakening the escaping to make it green.
+
+  `App\Admin\JsonPresenter` fixes the other half: a tool result's `content` is a
+  **string** (the OpenAI `tool` message shape), and a real MCP server returns
+  structured data in it as JSON text, so the payload printed as JSON on the
+  outside and one long escaped line of JSON on the inside. Nested JSON strings
+  are now decoded, so the payload is one document shown once at each level it was
+  encoded. The stored value is untouched, and so is what the model receives: a
+  `tool` message's content is text, the endpoint's contract says so, and a model
+  reads JSON far better than prose about JSON. Only the page changes.
+
+  The transcript also names each tool once per round rather than once per call —
+  a round can legitimately call the same tool twice, and "used echo, echo" reads
+  like a bug when it is a real second call.
+
+
 - **Chat tools — a conversation can act (SPEC §15.8).** A chat exchange gets a
   toolbox, chosen the same way a task's is (by tag or explicitly, from the
   discovered catalog) and **re-chosen before each message**. Start a chat with

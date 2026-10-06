@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace App\Twig;
 
+use App\Admin\JsonPresenter;
+use App\Admin\MarkdownRenderer;
 use App\Observability\CspNonce;
 use App\Scheduler\SchedulePreset;
+use Twig\Attribute\AsTwigFilter;
 use Twig\Attribute\AsTwigFunction;
 
 /**
@@ -16,6 +19,8 @@ final readonly class AdminExtension
 {
     public function __construct(
         private CspNonce $nonce,
+        private MarkdownRenderer $markdown,
+        private JsonPresenter $json,
     ) {
     }
 
@@ -39,6 +44,36 @@ final readonly class AdminExtension
     public function cspNonce(): string
     {
         return $this->nonce->value();
+    }
+
+    /**
+     * `markdown` — render conversational text as the markup it already is.
+     *
+     * Marked safe for HTML on purpose: the filter's contract is that it escapes
+     * every input before adding any markup of its own, and adds no raw-HTML
+     * pass-through at all (see MarkdownRenderer's class docblock for the
+     * argument). A caller that pipes something *else* through this needs to
+     * know it is safe, so `|markdown` should only ever be applied to text.
+     *
+     * Uses Twig's `html` strategy rather than `isSafe: true`, which is the same
+     * guarantee stated for the new syntax (`isSafe` is deprecated in Twig 4).
+     */
+    #[AsTwigFilter('markdown', isSafe: ['html'])]
+    public function markdown(string $text): string
+    {
+        return $this->markdown->render($text);
+    }
+
+    /**
+     * `pretty_json` — a payload a human can read, with JSON-in-a-string decoded
+     * so it is shown once rather than twice-escaped (see JsonPresenter).
+     *
+     * Display only: it never touches what the model is sent.
+     */
+    #[AsTwigFilter('pretty_json', isSafe: ['html'])]
+    public function prettyJson(mixed $value): string
+    {
+        return htmlspecialchars($this->json->pretty($value), \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
     }
 
     /**

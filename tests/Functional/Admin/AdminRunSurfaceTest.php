@@ -51,6 +51,61 @@ final class AdminRunSurfaceTest extends WebTestCase
         $em->clear();
     }
 
+    /**
+     * A tool result's `content` is a STRING — that is the OpenAI `tool` message
+     * shape, and the MCP layer joins its text parts into it. When the tool is a
+     * real one that returns structured data, that string IS JSON.
+     *
+     * So the timeline used to print JSON on the outside and one long escaped
+     * line of JSON on the inside: the outer structure readable and the part you
+     * actually wanted to read not. `pretty_json` decodes it, so the payload is
+     * one document shown once, at every level it was encoded.
+     *
+     * This asserts the rendered page, because the *rendering* is the fix — the
+     * stored payload is deliberately untouched, and so is what the model
+     * receives (see JsonPresenter: this is display only).
+     */
+    public function testAToolResultWithJsonContentRendersAsReadableJson(): void
+    {
+        $task = $this->enabledTask('JSON showcase');
+        $run = new Run($task);
+        $run->markStarted();
+
+        $call = $run->appendEvent(new RunEvent(RunEventType::ToolCall));
+        $call->setPayload(['tool' => 'read_email', 'arguments' => ['uid' => 3236], 'attempt' => 1]);
+
+        $result = $run->appendEvent(new RunEvent(RunEventType::ToolResult));
+        $result->setPayload([
+            'tool' => 'read_email',
+            'content' => '{"uid":3236,"subject":"Water bill","unread":true}',
+            'isError' => false,
+        ]);
+
+        $run->markSucceeded();
+        $this->em()->persist($run);
+        $this->em()->flush();
+
+        $this->client->request('GET', '/runs/'.$run->getId());
+        self::assertResponseIsSuccessful();
+
+        $content = (string) $this->client->getResponse()->getContent();
+
+        // The signature of the bug: `json_encode` of an array whose value is a
+        // JSON string escapes the inner quotes, so the page contained a
+        // backslash before every one of them. Nothing does that now.
+        self::assertStringNotContainsString(
+            '\&quot;',
+            $content,
+            'the JSON inside `content` should have been decoded, not left as an escaped string',
+        );
+
+        // And the positive form: pretty-printing puts a space after the colon,
+        // which only happens if the inner object was decoded into structure.
+        self::assertStringContainsString('&quot;uid&quot;: 3236', $content);
+        self::assertStringContainsString('&quot;subject&quot;: &quot;Water bill&quot;', $content);
+        self::assertStringContainsString('&quot;unread&quot;: true', $content);
+    }
+
     public function testUnauthenticatedRunSurfaceIsRejected(): void
     {
         static::ensureKernelShutdown();

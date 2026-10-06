@@ -7,6 +7,7 @@ namespace App\Chat;
 use App\Claims\ClaimStore;
 use App\Claims\ClaimTarget;
 use App\Context\Grounding;
+use App\Context\TokenEstimate;
 use App\Entity\Chat;
 use App\Entity\ChatEventType;
 use App\Entity\ChatExchange;
@@ -87,6 +88,19 @@ final readonly class ChatEngine
      * this version gives chat no toolbox at all, so a model that assumes it
      * can act is worse than one that says it cannot.
      */
+    /**
+     * Deployment defaults for the two knobs `capToolResult` reads by name.
+     *
+     * The authoritative values live in `config/services.yaml` as parameters, so
+     * on any real deployment the environment is already resolved and these are
+     * unreachable. They exist because this method reads the environment
+     * *directly* rather than through the container, so it is the one place that
+     * has no fallback of its own — and a wrong fallback here would be a
+     * silently different cap from the run engine's, on the same document.
+     */
+    private const int DEFAULT_CONTEXT_LIMIT = 32768;
+    private const float DEFAULT_MAX_TOOL_OUTPUT_PCT = 15.0;
+
     public const string SYSTEM_PREAMBLE = <<<'TXT'
         You are answering in a conversation. Reply directly to the most recent turn, in your own voice.
         You have no tools in this conversation: if something would require looking it up or taking an
@@ -722,16 +736,24 @@ final readonly class ChatEngine
     /**
      * A tool result, capped so one verbose tool cannot fill the conversation.
      *
-     * The run engine routes this through `ContextWindow::capToolResult`; the
-     * cap is the same knob read the same way, kept local because the chat does
-     * not otherwise need a context window (there is no exchange budget to trim
-     * against — the ceiling in `ChatLoopState` is the bound).
+     * The run engine routes this through `ContextWindow::capToolResult`; this
+     * is the same arithmetic, kept local because the chat does not otherwise
+     * need a context window (there is no exchange budget to trim against — the
+     * ceiling in `ChatLoopState` is the bound).
+     *
+     * Both the limit and the percentage are read by **name**, so the fallbacks
+     * here are dead code in a configured deployment — and were the one place
+     * that could silently disagree with the container's resolved values if they
+     * ever stopped matching. The names are also why this now prints as a
+     * deployment-default parameter in `config/services.yaml`: the two knobs
+     * have app-level defaults, so the `?:` arms below only ever apply to a
+     * build that has no container at all.
      */
     private function capToolResult(string $result): string
     {
-        $limit = (int) (getenv('TASKLOOM_CONTEXT_LIMIT') ?: 32768);
-        $pct = (float) (getenv('TASKLOOM_MAX_TOOL_OUTPUT_PCT') ?: 15);
-        $maxChars = (int) floor($limit * 3.5 * $pct / 100);
+        $limit = (int) (getenv('TASKLOOM_CONTEXT_LIMIT') ?: self::DEFAULT_CONTEXT_LIMIT);
+        $pct = (float) (getenv('TASKLOOM_MAX_TOOL_OUTPUT_PCT') ?: self::DEFAULT_MAX_TOOL_OUTPUT_PCT);
+        $maxChars = (int) floor($limit * TokenEstimate::CHARS_PER_TOKEN * $pct / 100);
 
         if ($maxChars <= 0 || \strlen($result) <= $maxChars) {
             return $result;

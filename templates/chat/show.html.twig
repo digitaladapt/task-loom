@@ -41,18 +41,39 @@
 
     {% for turn in transcript %}
         {% if turn.type.value == 'tool_call' %}
+            {#
+                One line per ROUND, each tool named once.
+
+                A row carries every call of one round, and the model may ask for
+                the same tool twice in that round — so "used echo, echo" was
+                rendering, which reads like a bug when it is a real second call.
+                The distinct names say what the round did; the individual
+                `tool_result` rows are in the ledger for anyone who needs the
+                count.
+
+                No link: the catalog page is the only tool surface the app has,
+                and pointing every name at the same URL would look like it went
+                somewhere tool-specific. If a per-tool page ever exists, this is
+                where the name becomes a link to it.
+            #}
+            {% set names = [] %}
+            {% for call in turn.payload.calls|default([]) %}
+                {% set name = call.name|default('') %}
+                {% if name != '' and name not in names %}{% set names = names|merge([name]) %}{% endif %}
+            {% endfor %}
             <p class="chat-tool muted">
                 used
-                {% for call in turn.payload.calls|default([]) %}<code>{{ call.name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+                {% for name in names %}<code>{{ name }}</code>{% if not loop.last %}<span class="tool-sep">·</span>{% endif %}{% endfor %}
                 <span class="muted">{{ turn.createdAt|date('H:i') }}</span>
             </p>
+
         {% else %}
             <article class="chat-turn chat-turn-{{ turn.speaker.value }}">
                 <p class="chat-speaker">
                     {{ turn.speaker.value == 'nia' ? 'Nia' : 'You' }}
                     <span class="muted">{{ turn.createdAt|date('H:i') }}</span>
                 </p>
-                <div class="chat-bubble">{{ turn.content|nl2br }}</div>
+                <div class="chat-bubble md">{{ turn.content|markdown }}</div>
             </article>
         {% endif %}
     {% endfor %}

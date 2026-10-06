@@ -7,6 +7,45 @@
 # Put parameters here that don't need to change on each machine where the app is deployed
 # https://symfony.com/doc/current/best_practices.html#use-parameters-for-application-configuration
 parameters:
+    #
+    # The app's OWN defaults for the tuning knobs.
+    #
+    # These used to exist only in compose.yaml (`${TASKLOOM_STEP_BUDGET:-50}`),
+    # so "forgetting to set it" worked inside Docker and broke everywhere else —
+    # every real page 500s with `Environment variable not found:
+    # "TASKLOOM_MAX_INPUT_ARTIFACT_PCT"`, while /health stays green, because
+    # services are built lazily and the health route never touches the context
+    # window. That asymmetry is what made it look fine from the outside.
+    #
+    # A deployment default belongs to the deployment, not to one way of
+    # deploying, so the values now live here and compose.yaml's `:-` fallbacks
+    # agree with them. Each is `%env(default:PARAM:...)%` below, so an explicit
+    # environment variable still wins — this changes nothing for a Docker
+    # deployment, which was already getting these numbers.
+    #
+    # The values are deliberately the same as .env.example's, so the three
+    # places a knitter might read (here, compose, the example env file) cannot
+    # state three different numbers.
+    #
+    # NOT defaulted here, on purpose:
+    #   TASKLOOM_TIMEZONE        — a wrong timezone is a silent bug (an 08:00
+    #                              schedule running at 08:00 UTC); its absence
+    #                              is a loud one. Compose defaults it to UTC.
+    #   TASKLOOM_ADMIN_PASSWORD  — no default is the security feature.
+    #   TASKLOOM_MCP_API_KEY     — same.
+    #   TASKLOOM_LLM_BASE_URL    — compose's fallback is a Docker-only hostname
+    #                              (host.docker.internal), so any value chosen
+    #                              here would be wrong off-Docker and confusing
+    #                              on it.
+    TASKLOOM_CONTEXT_LIMIT: 32768
+    TASKLOOM_MAX_TOOL_OUTPUT_PCT: 15
+    TASKLOOM_MAX_INPUT_ARTIFACT_PCT: 50
+    TASKLOOM_WINDOW_TAIL_EXCHANGES: 10
+    TASKLOOM_STEP_BUDGET: 50
+    TASKLOOM_TOOL_RETRIES: 2
+    TASKLOOM_CIRCUIT_BREAKER: 3
+    TASKLOOM_LLM_MODEL: 'qwen3:14b'
+    TASKLOOM_LLM_TIMEOUT: 300
 
 services:
     # default configuration for services in *this* file
@@ -102,9 +141,9 @@ services:
     App\Llm\LlmClient:
         arguments:
             $baseUrl: '%env(TASKLOOM_LLM_BASE_URL)%'
-            $model: '%env(TASKLOOM_LLM_MODEL)%'
+            $model: '%env(default:TASKLOOM_LLM_MODEL:TASKLOOM_LLM_MODEL)%'
             $apiKey: '%env(TASKLOOM_LLM_API_KEY)%'
-            $timeoutSeconds: '%env(int:TASKLOOM_LLM_TIMEOUT)%'
+            $timeoutSeconds: '%env(int:default:TASKLOOM_LLM_TIMEOUT:TASKLOOM_LLM_TIMEOUT)%'
             # Off unless explicitly enabled — see the class. Wrapped in
             # `default::` so an unset variable resolves to null (off)
             # instead of failing the boot.
@@ -141,10 +180,10 @@ services:
 
     App\Context\ContextWindow:
         arguments:
-            $contextLimitTokens: '%env(int:TASKLOOM_CONTEXT_LIMIT)%'
-            $maxToolOutputPct: '%env(float:TASKLOOM_MAX_TOOL_OUTPUT_PCT)%'
-            $windowTailExchanges: '%env(int:TASKLOOM_WINDOW_TAIL_EXCHANGES)%'
-            $maxInputArtifactPct: '%env(float:TASKLOOM_MAX_INPUT_ARTIFACT_PCT)%'
+            $contextLimitTokens: '%env(int:default:TASKLOOM_CONTEXT_LIMIT:TASKLOOM_CONTEXT_LIMIT)%'
+            $maxToolOutputPct: '%env(float:default:TASKLOOM_MAX_TOOL_OUTPUT_PCT:TASKLOOM_MAX_TOOL_OUTPUT_PCT)%'
+            $windowTailExchanges: '%env(int:default:TASKLOOM_WINDOW_TAIL_EXCHANGES:TASKLOOM_WINDOW_TAIL_EXCHANGES)%'
+            $maxInputArtifactPct: '%env(float:default:TASKLOOM_MAX_INPUT_ARTIFACT_PCT:TASKLOOM_MAX_INPUT_ARTIFACT_PCT)%'
 
     # The grounding block (SPEC §4.2 / §5.6). Same required deployment
     # timezone as the scheduler: the block states the wall-clock time the
@@ -181,9 +220,9 @@ services:
     App\RunEngine\RunEngine:
         arguments:
             $budgets:
-                step_budget: '%env(int:TASKLOOM_STEP_BUDGET)%'
-                tool_retries: '%env(int:TASKLOOM_TOOL_RETRIES)%'
-                circuit_breaker: '%env(int:TASKLOOM_CIRCUIT_BREAKER)%'
+                step_budget: '%env(int:default:TASKLOOM_STEP_BUDGET:TASKLOOM_STEP_BUDGET)%'
+                tool_retries: '%env(int:default:TASKLOOM_TOOL_RETRIES:TASKLOOM_TOOL_RETRIES)%'
+                circuit_breaker: '%env(int:default:TASKLOOM_CIRCUIT_BREAKER:TASKLOOM_CIRCUIT_BREAKER)%'
 
     # The step model's run graph (SPEC §13.3): same budgets as the engine —
     # a child run's constitution is frozen with the same knobs a standalone
@@ -191,6 +230,6 @@ services:
     App\RunEngine\RunGraph:
         arguments:
             $budgets:
-                step_budget: '%env(int:TASKLOOM_STEP_BUDGET)%'
-                tool_retries: '%env(int:TASKLOOM_TOOL_RETRIES)%'
-                circuit_breaker: '%env(int:TASKLOOM_CIRCUIT_BREAKER)%'
+                step_budget: '%env(int:default:TASKLOOM_STEP_BUDGET:TASKLOOM_STEP_BUDGET)%'
+                tool_retries: '%env(int:default:TASKLOOM_TOOL_RETRIES:TASKLOOM_TOOL_RETRIES)%'
+                circuit_breaker: '%env(int:default:TASKLOOM_CIRCUIT_BREAKER:TASKLOOM_CIRCUIT_BREAKER)%'
