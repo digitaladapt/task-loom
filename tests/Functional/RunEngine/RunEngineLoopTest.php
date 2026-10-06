@@ -379,6 +379,66 @@ final class RunEngineLoopTest extends KernelTestCase
         self::assertStringContainsString('step budget exhausted', $payload['reason']);
     }
 
+    /**
+     * The bug this fixes, end to end: a run whose tail cannot fit the
+     * budget used to fail closed with `context_exhausted`. Now the window
+     * sheds the oldest exchanges and the run completes — and the shedding
+     * is recorded as a `context_trim` ledger row rather than happening
+     * silently.
+     */
+    public function testContextTrimIsRecordedWhenTheWindowShedsTail(): void
+    {
+        $this->catalogTool('get_weather');
+        $task = $this->enabledTask(toolbox: ['get_weather'], mode: ToolboxMode::Explicit);
+
+        $this->llm->method('chat')->willReturnCallback(
+            fn (): LlmResponse => ++$this->chatCount <= 3
+                ? $this->response(toolCalls: [['id' => 'c'.$this->chatCount, 'name' => 'get_weather', 'arguments' => ['location' => 'X']]])
+                : $this->response(content: 'Done, with the weather.'),
+        );
+        $this->chatCount = 0;
+
+        $this->executor->method('validate')->willReturn([]);
+        $this->executor->method('execute')->willReturn(['tool' => 'get_weather', 'content' => str_repeat('w', 200), 'isError' => false, 'durationMs' => 1]);
+
+        $container = static::getContainer();
+        $compiler = $container->get(PromptCompiler::class);
+        $tools = $container->get(ToolboxResolver::class)->resolve($task);
+        $head = $compiler->compile($task, $tools);
+
+        // A budget that the head + tool definitions fit but no exchange can:
+        // the window must shed every exchange and still send a valid request.
+        $fixedChars = \strlen($head['system']) + \strlen($head['user'])
+            + \strlen((string) json_encode($compiler->toolsToOpenAi($tools)));
+        $window = new ContextWindow(
+            contextLimitTokens: (int) ceil($fixedChars / 3.5) + 5,
+            maxToolOutputPct: 15.0,
+            windowTailExchanges: 10,
+        );
+
+        $engine = new RunEngine(
+            $this->llm,
+            $compiler,
+            $container->get(ToolboxResolver::class),
+            $this->executor,
+            $window,
+            $container->get(RunRepository::class),
+            $this->em,
+            new NullLogger(),
+            $container->get(RunGraph::class),
+            ['step_budget' => 50, 'tool_retries' => 2, 'circuit_breaker' => 3],
+        );
+
+        $run = $engine->run($task);
+
+        self::assertSame(RunStatus::Succeeded, $run->getStatus(), 'a run that used to die on its tail now completes');
+        self::assertContains(RunEventType::ContextTrim, $this->eventTypes($run));
+
+        $trim = $this->eventPayload($run, RunEventType::ContextTrim);
+        self::assertSame(0, $trim['keptExchanges']);
+        self::assertGreaterThanOrEqual(1, $trim['droppedExchanges']);
+    }
+
     public function testLlmFailureFailsRun(): void
     {
         $this->catalogTool('get_weather');

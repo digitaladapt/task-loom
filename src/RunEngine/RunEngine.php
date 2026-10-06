@@ -6,6 +6,7 @@ namespace App\RunEngine;
 
 use App\Context\ContextExhaustedException;
 use App\Context\ContextWindow;
+use App\Context\ContextWindowResult;
 use App\Entity\ErrorClass;
 use App\Entity\Run;
 use App\Entity\RunEvent;
@@ -523,9 +524,17 @@ final class RunEngine
         $tools = ToolboxSnapshot::toTools($run->getToolboxSnapshot());
         $state->promptHead ??= $this->prompts->compile($run->getTask(), $tools);
 
+        // The tool definitions travel on the same request as the messages,
+        // so the budget has to see both: the window is asked to fit the
+        // conversation around them, not the conversation alone. (Nothing is
+        // compiled twice — the descriptors are built once and handed to
+        // both the budget and the client.)
+        $toolDescriptors = $this->prompts->toolsToOpenAi($tools);
+
         try {
-            $messages = $this->context->buildMessages($state->promptHead, $state->exchanges);
-            $response = $this->llm->chat($messages, $this->prompts->toolsToOpenAi($tools));
+            $fit = $this->context->buildMessages($state->promptHead, $state->exchanges, $toolDescriptors);
+            $this->recordTrim($run, $fit);
+            $response = $this->llm->chat($fit->messages, $toolDescriptors);
         } catch (ContextExhaustedException $e) {
             return $this->failRun($run, $e->errorClass, $e->getMessage(), $async);
         } catch (LlmRequestException $e) {
@@ -1128,6 +1137,34 @@ final class RunEngine
         }
 
         return (string) json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    }
+
+    /**
+     * Record that the context window had to shed part of its tail to fit
+     * the budget (SPEC §5.3, §5.6). The adaptive trim means a run can now
+     * proceed with a shorter window instead of failing closed — so the
+     * shedding must be visible: a `context_trim` row says how many of the
+     * newest exchanges were kept and how many were dropped, which is the
+     * difference between "this run was near the limit" and "this run is
+     * quietly losing its early tool results". Absent a trim it writes
+     * nothing, so the common path gains no ledger row.
+     *
+     * Flushed with the turn's next commit (this rides the same unit of
+     * work as the LLM response): a trim that is not persisted because the
+     * process died mid-request is a diagnostic that was never owed.
+     */
+    private function recordTrim(Run $run, ContextWindowResult $fit): void
+    {
+        if (!$fit->trimmed()) {
+            return;
+        }
+
+        $this->appendEvent($run, RunEventType::ContextTrim, [
+            'keptExchanges' => $fit->keptExchanges,
+            'droppedExchanges' => $fit->droppedExchanges,
+            'estimatedTokens' => $fit->estimatedTokens,
+            'limitTokens' => $fit->limitTokens,
+        ]);
     }
 
     /**
