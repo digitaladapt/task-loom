@@ -261,6 +261,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The toolbox picker works on a chat page, and a new conversation opens on the
+  tags panel.** Three defects behind one report from production, all invisible
+  to PHPUnit and only reproducible in a browser:
+
+  The widget's behaviour — which of the two panels is showing — lived in
+  `task-editor.js`, which is the *task editor's* entrypoint. The toolbox widget
+  is also rendered by both chat pages, and those load only the shell (`app`), so
+  on `/chat` and `/chat/{id}` the mode radios did nothing at all. Worse, the
+  panel the server had already marked `hidden` was never corrected, so a picker
+  whose mode was `tags` could sit showing the explicit-tools panel indefinitely.
+  The behaviour now lives in its own module (`assets/toolbox.js`), imported by
+  the shell entrypoint, so every page rendering the widget has it — and a page
+  that clones widgets into existence (the task editor's step builder) announces
+  the insertion instead of owning the switcher.
+
+  `/chat` also opened the picker on **explicit**, not tags: the template passed
+  the widget a hardcoded mode while the widget's own default is `tags`, so the
+  same widget behaved differently on two pages for no reason anyone intended.
+
+  And the reason the report arrived as a security error: the CSP header on a
+  response that renders no template advertised an **empty nonce** —
+  `script-src 'self' 'nonce-'` — because the guard tested for `''` while
+  `CspNonce::current()` returns `null`, and PHP renders null as the empty
+  string. An unmatched source admits nothing, so the policy stayed correct by
+  accident, but it is not valid CSP, it put "contains an invalid source:
+  ''nonce-''" in every console, and it is the kind of thing a strict proxy
+  rejects. Both spellings of "no nonce" now reach the same branch.
+
 - **A run that reads many items no longer dies on its own context tail** (SPEC
   §5.6). The context window kept a fixed count of the newest tool-call exchanges
   and required the result to fit the budget, failing closed with

@@ -226,6 +226,41 @@ final class ChatToolSurfaceTest extends WebTestCase
     }
 
     /**
+     * Starting a conversation opens the picker on the **tags** panel, like
+     * every other picker in the app.
+     *
+     * This said `explicit` in the template while the widget's own default is
+     * `tags`, so a new conversation opened on the tool-name panel — a different
+     * panel from the one the same widget shows on the task editor, for no
+     * reason anyone could have intended. The mode is not cosmetic: it decides
+     * which panel's checkboxes and free-text companion the human sees first.
+     */
+    public function testANewConversationOpensOnTheTagsPanel(): void
+    {
+        $this->seedTool('get_weather', ['weather']);
+
+        $crawler = $this->client->request('GET', '/chat');
+        self::assertResponseIsSuccessful();
+
+        $checked = $crawler->filter('input[name="toolbox_mode"][checked]')->attr('value');
+        self::assertSame('tags', $checked);
+
+        // And the panel the server leaves visible is the same one the radio
+        // says is active, so a browser with the script is not correcting a
+        // contradiction — there is nothing to correct.
+        self::assertSame(
+            0,
+            $crawler->filter('div[data-toolbox-panel="tags"][hidden]')->count(),
+            'the tags panel is the visible one',
+        );
+        self::assertSame(
+            1,
+            $crawler->filter('div[data-toolbox-panel="explicit"][hidden]')->count(),
+            'the explicit panel is the hidden one',
+        );
+    }
+
+    /**
      * While a reply is pending the picker and the box are DISABLED — the
      * toolbox froze when that exchange started, so a control that accepted a
      * change would be a control that silently did nothing.

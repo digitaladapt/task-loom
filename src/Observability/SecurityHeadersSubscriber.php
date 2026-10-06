@@ -50,6 +50,22 @@ final class SecurityHeadersSubscriber
      * already present on the request — i.e. the renderer asked for one — so
      * responses that emit no inline scripts keep the plain `'self'` policy and
      * do not advertise a nonce nobody used.
+     *
+     * `current()` returns **null** when nothing asked for a nonce, and that
+     * null is the case this method has to get right. Testing only for `''`
+     * missed it: PHP renders null as the empty string, so the branch that was
+     * supposed to emit nothing emitted `'nonce-'` instead — a source expression
+     * that can never match, on every response that renders no template
+     * (`/health`, the JSON endpoints, anything a healthcheck polls). Browsers
+     * report it as:
+     *
+     *   The source list for the Content Security Policy directive 'script-src'
+     *   contains an invalid source: ''nonce-''. It will be ignored.
+     *
+     * The policy stays correct by accident — an unmatched source admits
+     * nothing — but it is noise in every console, it is not valid CSP, and a
+     * strict proxy in front of the app may reject it. Both spellings of
+     * "no nonce" must reach the same branch.
      */
     private function policy(): string
     {
@@ -57,7 +73,7 @@ final class SecurityHeadersSubscriber
 
         return str_replace(
             '{NONCE}',
-            '' === $nonce ? '' : " 'nonce-{$nonce}'",
+            null === $nonce || '' === $nonce ? '' : " 'nonce-{$nonce}'",
             self::CSP_TEMPLATE,
         );
     }
