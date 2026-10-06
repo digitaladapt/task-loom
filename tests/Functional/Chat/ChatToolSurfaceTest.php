@@ -134,18 +134,95 @@ final class ChatToolSurfaceTest extends WebTestCase
     }
 
     /**
-     * Choosing nothing is the ordinary case and freezes nothing — leaving the
-     * columns NULL, exactly as a pre-tools exchange's are.
+     * Choosing nothing freezes the *empty choice* — not nothing at all.
+     *
+     * This is the guard that was wrong first time round, and it is worth
+     * stating as a contract rather than an implementation detail. `[]` (a
+     * deliberate empty selection) and `NULL` (no selection recorded) must not
+     * be the same bytes, or a tool you switched off becomes indistinguishable
+     * from one you never mentioned — and the next message turns it back on.
+     *
+     * NULL is reserved for rows that genuinely predate chat tools.
      */
-    public function testChoosingNoToolsFreezesNothing(): void
+    public function testChoosingNoToolsFreezesTheEmptyChoiceRatherThanNothing(): void
     {
         $this->seedTool('get_weather', ['weather']);
 
-        $this->startChatWithTools(['toolbox_mode' => 'tags', 'toolbox_tags' => []]);
+        $this->startChatWithTools(['toolbox_mode' => 'explicit', 'toolbox_tools' => []]);
 
         $exchange = $this->onlyExchange();
-        self::assertNull($exchange->getToolboxSnapshot());
-        self::assertNull($exchange->getToolboxDeclaration());
+        self::assertSame([], $exchange->getToolboxSnapshot(), 'the resolution is empty...');
+        self::assertSame(
+            ['mode' => 'explicit', 'declared' => []],
+            $exchange->getToolboxDeclaration(),
+            '...but the choice is recorded, because "none" is a choice',
+        );
+    }
+
+    /**
+     * THE EDGE CASE, at the surface: turn a tool ON, then OFF, and the third
+     * form must still show it off.
+     *
+     * (Note the submission shape: `KernelBrowser` takes *nested* params, so a
+     * checkbox array is `['toolbox_tags' => ['weather']]`. Passing a flat
+     * `'toolbox_tags[]'` key makes PHP see a key of that literal name, the
+     * parser reads no tags — correctly — and the test measures its own
+     * harness. The same trap in a different harness as the Python
+     * `urlencode` one.)
+     *
+     * The failure this guards against is a specific one: if "off" were stored
+     * as no record, the picker would fall back to its default on the third
+     * visit and the tool would come back on by itself. So the assertion is not
+     * about the database — it is about what the *form* shows, which is what a
+     * person actually experiences.
+     */
+    public function testTurningAToolOffStaysOffOnTheNextMessage(): void
+    {
+        $this->seedTool('get_weather', ['weather']);
+
+        // Round 1: on.
+        $chat = $this->startChatWithTools(['toolbox_mode' => 'tags', 'toolbox_tags' => ['weather']]);
+        $this->settleLastExchange($chat);
+        self::assertSame(
+            ['weather'],
+            $this->checkedTags($chat),
+            'round 1: the picker offers the tool, ticked',
+        );
+
+        // Round 2: turned off — an empty submission, exactly as the browser
+        // sends when every box is unticked.
+        $this->say($chat, 'actually, not this time', ['toolbox_mode' => 'tags']);
+        $this->settleLastExchange($chat);
+
+        // Round 3: still off.
+        self::assertSame(
+            [],
+            $this->checkedTags($chat),
+            'round 3: turning it off must not quietly turn it back on',
+        );
+        self::assertSame(
+            ['mode' => 'tags', 'declared' => []],
+            $this->latestExchange($chat)->getToolboxDeclaration(),
+            'the off choice is stored as a choice',
+        );
+    }
+
+    /**
+     * And the same edge case for turning something back ON after it was off —
+     * the carry must not be sticky in the other direction either.
+     */
+    public function testTurningAToolBackOnCarriesToo(): void
+    {
+        $this->seedTool('get_weather', ['weather']);
+
+        $chat = $this->startChatWithTools(['toolbox_mode' => 'tags']);
+        $this->settleLastExchange($chat);
+        self::assertSame([], $this->checkedTags($chat));
+
+        $this->say($chat, 'on second thought', ['toolbox_mode' => 'tags', 'toolbox_tags' => ['weather']]);
+        $this->settleLastExchange($chat);
+
+        self::assertSame(['weather'], $this->checkedTags($chat));
     }
 
     /**
@@ -271,6 +348,65 @@ final class ChatToolSurfaceTest extends WebTestCase
         self::assertInstanceOf(Chat::class, $chat);
 
         return $chat;
+    }
+
+    /**
+     * Answer the newest exchange so the picker is live again.
+     *
+     * The picker is inert while a reply is pending, so a multi-round test has
+     * to move the exchange to a settled state — the same thing a worker would
+     * do — or it would be asserting on a disabled form.
+     */
+    private function settleLastExchange(Chat $chat): void
+    {
+        $em = $this->em();
+        $exchange = $em->getRepository(ChatExchange::class)->findOneBy(['chat' => $chat], ['id' => 'DESC']);
+        self::assertInstanceOf(ChatExchange::class, $exchange);
+        $exchange->markAnswered();
+        $em->flush();
+    }
+
+    /**
+     * The tags the picker actually shows ticked, read off the rendered page.
+     *
+     * Deliberately not read from the database: the bug being guarded against
+     * is one where the *record* is right and the *form* loses it (or the
+     * reverse), so the assertion has to be about what a person sees.
+     *
+     * @return list<string>
+     */
+    private function checkedTags(Chat $chat): array
+    {
+        $crawler = $this->client->request('GET', '/chat/'.$chat->getId());
+        self::assertResponseIsSuccessful();
+
+        return $crawler->filter('input[name="toolbox_tags[]"][checked]')->each(
+            static fn (\Symfony\Component\DomCrawler\Crawler $node): string => (string) $node->attr('value'),
+        );
+    }
+
+    private function latestExchange(Chat $chat): ChatExchange
+    {
+        $em = $this->em();
+        $em->clear();
+        $exchange = $em->getRepository(ChatExchange::class)->findOneBy(['chat' => $chat], ['id' => 'DESC']);
+        self::assertInstanceOf(ChatExchange::class, $exchange);
+
+        return $exchange;
+    }
+
+    /** @param array<string, mixed> $extra */
+    private function say(Chat $chat, string $message, array $extra = []): void
+    {
+        $crawler = $this->client->request('GET', '/chat/'.$chat->getId());
+        $token = $crawler->filter('form[action$="/say"] input[name="_token"]')->attr('value');
+        self::assertNotNull($token);
+
+        $this->client->request('POST', '/chat/'.$chat->getId().'/say', $extra + [
+            '_token' => $token,
+            'message' => $message,
+        ]);
+        self::assertTrue($this->client->getResponse()->isRedirect(), 'the message was accepted');
     }
 
     private function onlyExchange(): ChatExchange

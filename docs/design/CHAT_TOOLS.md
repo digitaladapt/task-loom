@@ -77,22 +77,35 @@ sentence.
 
 ### 2.1 The snapshot is the exchange's, not the run's
 
-Deliberately: the exchange's toolbox is **not carried across exchanges**. If
-you enable a tool in exchange 3 and say nothing more, exchange 4 asks you
-again.
+**Every exchange freezes its own toolbox.** Exchange 3's choice does not
+silently become exchange 4's — the *authority* is always the exchange it
+belongs to, and an exchange's behaviour never depends on a later one.
 
-That is not laziness; it is the safer of two designs that differ in what a
-forgotten toolbox *means*. Carrying forward means the state is invisible —
-you'd have to remember what you ticked three exchanges ago to know whether the
-assistant can currently send mail. Re-choosing means the answer to "what can
-she do right now?" is always on screen, above the box you are typing in. The
-cost is a click you were going to make anyway; the benefit is that the
-permission surface is never a thing you have to remember.
+But the *picker* reopens showing your last answer, so the default is "same as
+last time" while still being visibly, deliberately re-chosen. The two halves
+are what make the permission surface safe **and** cheap:
 
-**One refinement worth leaving as a seam:** a *later* version could pre-select
-the previous exchange's toolbox so the default is "same as last time" while
-still being visibly re-chosen. That is an addition to the form, not to the
-freeze rule, and nothing here forecloses it.
+- Safe, because what she could see is recorded per exchange rather than
+  inferred from a mutable preference, so "why could she do that?" is answered
+  by the exchange that did it.
+- Cheap, because what she can do *right now* is always on screen rather than a
+  thing you have to remember — which is the property that made the original
+  no-carry-forward rule worth choosing.
+
+**Turning everything off is an answer, and it carries like any other.** The
+subtle failure this avoids is real and easy to write by accident: if "nothing
+chosen" were stored as *no record*, then `[]` (a deliberate empty selection)
+and `NULL` (no selection recorded) would be the same bytes, and a tool you
+switched off would quietly come back on at the next message. So the empty
+declaration is written as the positive fact it is, and the column stays NULL
+only for rows that genuinely predate chat tools:
+
+    columns NULL                 this row predates chat tools
+    declared [], no snapshot     this exchange ran with no tools, chosen
+    declared […], snapshot […]   this exchange ran with these
+
+Three states, three readings, no ambiguity — and the "pre-select last time"
+refinement this section used to defer is now simply what the picker does.
 
 ## 3. Two claims the run engine could make and chat cannot
 

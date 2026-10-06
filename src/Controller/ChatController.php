@@ -11,6 +11,7 @@ use App\Entity\Chat;
 use App\Entity\ChatExchangeStatus;
 use App\Entity\ChatOrigin;
 use App\Entity\Tool;
+use App\Entity\ToolboxMode;
 use App\Repository\ChatExchangeEventRepository;
 use App\Repository\ChatExchangeRepository;
 use App\Repository\ChatRepository;
@@ -126,24 +127,36 @@ final class ChatController extends AbstractController
         $current = $this->exchanges->findLatestForChat($chat);
         $pending = null !== $current && !$current->isTerminal();
 
-        // The picker reopens on the *current* exchange's declaration, so what
-        // you see ticked is what she can actually use right now — and while a
-        // reply is pending, that is the frozen set rather than a suggestion.
-        $currentToolbox = null !== $current ? ChatToolbox::fromExchange($current) : null;
+        // The picker reopens on the last exchange's declaration, always — so
+        // what you see ticked is what you chose last time, and the answer to
+        // "what can she do right now?" stays a thing on screen rather than a
+        // thing to remember.
+        //
+        // Two cases fold into one line, and it is worth naming why. While a
+        // reply is pending this is the *running* exchange, so the ticks show
+        // the frozen set she is actually using. When nothing is pending it is
+        // the last answered one, which pre-fills the next message.
+        //
+        // **Turning everything off is a choice, and it carries like any
+        // other.** If the previous exchange ran with no tools, this renders
+        // nothing ticked — which is the correct pre-fill, and is only
+        // possible because the engine freezes an empty declaration rather
+        // than leaving the column NULL (`ChatEngine::ask()`). A `null` here
+        // would mean "no preference recorded", and the picker would fall back
+        // to the template default rather than to your last answer.
+        $toolboxValues = null !== $current
+            ? ChatToolbox::fromExchange($current)->forPicker()
+            : ChatToolbox::none(ToolboxMode::Tags)->forPicker();
 
         return $this->render('chat/show.html.twig', [
             'chat' => $chat,
             'transcript' => $this->events->findTranscript($chat),
             'pending' => $pending,
             'lastError' => $this->lastFailure($chat),
-            'used_tools' => null !== $current ? $currentToolbox?->toolNames() ?? [] : [],
+            'used_tools' => null !== $current ? ChatToolbox::fromExchange($current)->toolNames() : [],
             'known_tags' => $this->knownTags(),
             'catalog_tools' => $this->catalogTools(),
-            // The picker's values: the exchange's own declaration while one is
-            // live (so the frozen set is visible), otherwise empty — the next
-            // message starts from "no tools", which is the deliberate
-            // no-carry-forward rule (`CHAT_TOOLS.md` §2.1).
-            'toolbox_values' => $pending ? $currentToolbox?->forPicker() : null,
+            'toolbox_values' => $toolboxValues,
         ]);
     }
 
@@ -205,7 +218,10 @@ final class ChatController extends AbstractController
     private function resolve(ToolboxSelection $selection, Request $request): ChatToolbox
     {
         if ([] === $selection->declared) {
-            return ChatToolbox::none();
+            // Nothing ticked, which is an answer — and the *mode* is part of
+            // it, so the picker reopens on the panel you were using rather
+            // than on whichever one this class happens to default to.
+            return ChatToolbox::none($selection->mode);
         }
 
         $resolved = $this->toolboxes->resolveChat($selection->mode, $selection->declared);

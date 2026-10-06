@@ -160,20 +160,24 @@ final readonly class ChatEngine
             // so the record of what the model could see is in place before
             // anything could have acted on it.
             //
-            // An exchange where nothing was *chosen* freezes nothing: the
-            // columns stay NULL, which is exactly what every exchange written
-            // before chat had a toolbox carries. One representation of "no
-            // tools" rather than two that mean the same thing.
+            // **Always**, including when the choice was "no tools". A row can
+            // be read in three ways and they must not be confusable:
             //
-            // But a choice that resolved to *nothing* still freezes its
-            // declaration. Those are genuinely different states — "I picked no
-            // tools" and "I picked tsak-tools and it matched nothing" — and the
-            // second one is exactly why the declaration is stored separately
-            // from the resolution: the picker reopens showing what was typed,
-            // rather than quietly forgetting it.
-            if ([] !== $toolbox->declared) {
-                $exchange->freezeToolbox($toolbox->toDeclaration(), $toolbox->snapshot);
-            }
+            //   columns NULL          this row predates chat tools
+            //   declared [], no snap.  this exchange ran with no tools, chosen
+            //   declared […], snapshot […]  this exchange ran with these
+            //
+            // The tempting shortcut — freeze nothing when nothing was chosen,
+            // on the grounds that NULL already means "no tools" — throws away
+            // the difference between *nothing chosen* and *nothing chosen
+            // deliberately*, and the second is the one the picker has to
+            // remember. Turn a tool off for one exchange and, with the shortcut,
+            // the next form has no way to tell that you turned it off rather
+            // than never chose: `[]` silently becomes indistinguishable from
+            // "unset", and the tool you switched off comes back on. So the
+            // empty declaration is frozen as the positive fact it is, and NULL
+            // is left to mean what only it can mean — an old row.
+            $exchange->freezeToolbox($toolbox->toDeclaration(), $toolbox->snapshot);
 
             $exchange->appendEvent(ChatExchangeEvent::turn(
                 ChatEventType::Message,

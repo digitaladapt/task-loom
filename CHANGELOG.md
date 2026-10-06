@@ -23,11 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatches, exactly as in a run. It is also why "configurable before sending
   each message" costs nothing: a message *starts* the exchange.
 
-  It deliberately does **not** carry forward: the next message starts from no
-  tools unless you choose again. Carrying forward is cheaper and worse — the
-  answer to "what can she do right now?" would be something you have to
-  remember rather than something on screen. The picker is inert while a reply
-  is pending, rather than accepting a change it could not apply.
+  **Every exchange freezes its own toolbox, and the picker reopens on your
+  last answer** — so the choice carries forward *visibly* rather than
+  invisibly. Turn a tool off for one message and it stays off; the answer to
+  "what can she do right now?" is a thing on screen rather than a thing to
+  remember, and "why could she do that?" is answered by the exchange that did
+  it. The picker is inert while a reply is pending, rather than accepting a
+  change it could not apply.
+
+  Turning everything off is an answer, and it carries like any other. The
+  subtle failure that avoids: if "nothing chosen" were stored as *no record*,
+  then `[]` (a deliberate empty selection) and `NULL` (no record) would be the
+  same bytes, and a tool you switched off would quietly come back on at the
+  next message. So the empty declaration is written as the positive fact it
+  is, and the column stays NULL only for rows that predate chat tools — three
+  states, three readings, no ambiguity.
 
   **A failing tool does not lose your reply.** The error is recorded, fed back
   to the model in the structured shape a run uses, and the conversation
