@@ -178,6 +178,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A run that reads many items no longer dies on its own context tail** (SPEC
+  §5.6). The context window kept a fixed count of the newest tool-call exchanges
+  and required the result to fit the budget, failing closed with
+  `context exhausted` otherwise. That is fine until a run reads a lot in one
+  step — a digest step reading 50 messages, one exchange per tool round-trip —
+  and the retained tail alone exceeds the limit, even though every exchange in
+  it is under the per-result cap. The failure was the one shape an operator
+  could neither see coming nor tune out, because the number that overflowed was
+  the tail itself, not the fixed head.
+
+  The tail is now *fitted* rather than counted into: the window takes the
+  newest exchanges that fit and sheds the oldest whole ones (never a single
+  message — a `tool` result without its `tool_calls` is a malformed request),
+  recording a `context_trim` event that says how many were kept and dropped. It
+  is still deterministic static trimming — not the LLM-driven compaction
+  `DESIGN_CONSIDERATIONS` §2.3 rejects — and it still fails closed: only a
+  prompt head plus tool definitions that cannot fit at all ends the run, and the
+  message now names that limit precisely.
+
+  Two related corrections ride along, because the budget has to describe the
+  *request*, not just its message array: the **tool definitions** (sent on every
+  call) and the **assistant tool-call arguments** are now counted, and the token
+  estimate moved from 4 to **3.5 chars ≈ 1 token**, since a prompt of markdown
+  headers, JSON results, uids and identifiers tokenizes finer than prose. Both
+  changes make the guard stricter, which is its job: under-counting does not
+  avoid the limit, it moves the failure to the wire as a hard provider error.
+
 - **A task that has run is now immutable, so disabling it no longer re-opens
   it for editing (SPEC §4.4, §13).** The rule was always "once a task is
   enabled it is a record", but the write gate asked `isEnabled()`, and

@@ -264,12 +264,28 @@ the full, honest record — only what's sent to the model is trimmed.
   constitution: grounding + task brief + toolbox schemas always travel at the head of
   every request, in full. Pruning it would silently change the task mid-run.
 - **Only excessively old assistant messages from the LLM itself are pruned:** prior
-  thinking/reasoning blocks are never re-sent, and only the last
+  thinking/reasoning blocks are never re-sent, and only the newest
   `window_tail_exchanges` tool-call exchanges (assistant tool-call turn + its tool
   results) are kept after the prompt head.
+- **The tail is fitted to the budget, not counted into it.** A run that reads many
+  items — one exchange per tool round-trip, each under the per-result cap — can
+  accumulate a tail that exceeds the limit on its own while every exchange in it is
+  individually fine. Rather than fail such a run closed for a reason the operator
+  cannot tune out, the window sheds its oldest whole exchanges (never a single
+  message: a `tool` result without its `tool_calls` is a malformed request) until what
+  remains fits, and records a `context_trim` event saying how many were kept and
+  dropped. The whole-exchange drop is deterministic static trimming, not the
+  LLM-driven compaction of DESIGN_CONSIDERATIONS §2.3.
 - Cap every tool result to `max_tool_output_percentage` of the context limit.
-- If pruning still can't fit the budget: fail with
-  `context exhausted: estimated tokens N > limit M`. Never summarize-to-continue.
+- The budget counts the **whole request**, including the tool definitions (which travel
+  beside the messages on every call) and the assistant tool-call arguments. The token
+  estimate is deliberately conservative (3.5 chars ≈ 1 token, not 4): it is a guard
+  rail, and under-counting would let a request overflow the model's real window, where
+  the failure is a hard provider error rather than this clean one.
+- The prompt head is never truncated, so if the head and tool definitions alone cannot
+  fit, the run still fails with
+  `context exhausted: the prompt head and tool definitions alone are an estimated N tokens > limit M`.
+  Never summarize-to-continue.
 
 ---
 
