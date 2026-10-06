@@ -79,7 +79,21 @@ final class GroundingWiringTest extends KernelTestCase
         self::assertInstanceOf(PromptTemplate::class, $template);
         self::assertStringContainsString('You are an autonomous task executor.', $template->preamble());
         self::assertStringContainsString('NO tool calls', $template->completion());
+        // The two duplicate-rendering toggles are pinned OFF in .env.test, so
+        // this asserts the wiring resolves them, not the built-in default.
         self::assertTrue($template->listsTools());
+    }
+
+    /**
+     * The default (unset) really is off, on a bare template — the built-in
+     * behavior, independent of any .env pin a test harness may set.
+     */
+    public function testTheBuiltInDefaultsDoNotDuplicate(): void
+    {
+        $template = new PromptTemplate();
+
+        self::assertFalse($template->listsTools());
+        self::assertFalse($template->includesTaskBriefInSystem());
     }
 
     /**
