@@ -4,13 +4,17 @@ declare(strict_types=1);
 
 namespace App\Controller;
 
+use App\Admin\ToolboxSelection;
 use App\Chat\ChatEngine;
+use App\Chat\ChatToolbox;
 use App\Entity\Chat;
 use App\Entity\ChatExchangeStatus;
 use App\Entity\ChatOrigin;
+use App\Entity\Tool;
 use App\Repository\ChatExchangeEventRepository;
 use App\Repository\ChatExchangeRepository;
 use App\Repository\ChatRepository;
+use App\RunEngine\ToolboxResolver;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -19,8 +23,8 @@ use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Security\Http\Attribute\IsGranted;
 
 /**
- * The chat surface (SPEC §15, §8): the conversation list, one conversation,
- * and saying something in it.
+ * The chat surface (SPEC §15, §8): the conversation list, one conversation, and
+ * saying something in it.
  *
  * ## Why a web page, and not ntfy or a bridge
  *
@@ -51,6 +55,14 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
  * a run that fails is visible in the run history, and a chat that fails is a
  * person watching a blank space. So a failed exchange renders as a failure,
  * out loud.
+ *
+ * ## The toolbox, and why the form is inert while a reply is pending
+ *
+ * Before each message the human picks the tools for the exchange that message
+ * starts (`CHAT_TOOLS.md` §2). The picker is disabled while one is pending
+ * rather than accepting a change it would have to ignore: the toolbox freezes
+ * when the exchange starts, so a change mid-turn could not take effect, and a
+ * control that silently does nothing is worse than one that is visibly off.
  */
 #[IsGranted('ROLE_ADMIN')]
 final class ChatController extends AbstractController
@@ -60,6 +72,7 @@ final class ChatController extends AbstractController
         private readonly ChatRepository $chats,
         private readonly ChatExchangeRepository $exchanges,
         private readonly ChatExchangeEventRepository $events,
+        private readonly ToolboxResolver $toolboxes,
     ) {
     }
 
@@ -68,6 +81,8 @@ final class ChatController extends AbstractController
     {
         return $this->render('chat/list.html.twig', [
             'chats' => $this->chats->findRecent(),
+            'known_tags' => $this->knownTags(),
+            'catalog_tools' => $this->catalogTools(),
         ]);
     }
 
@@ -86,7 +101,19 @@ final class ChatController extends AbstractController
             return $this->redirectToRoute('app_chat_list');
         }
 
-        $chat = $this->engine->start($message, ChatOrigin::Web);
+        $selection = ToolboxSelection::parse($request->request->all());
+
+        if (null !== $selection->error) {
+            // Refused rather than defaulted: the toolbox is a permission
+            // decision, and a submission nobody can parse is not one to guess
+            // at. (The editor re-renders with the problem anchored; here the
+            // safe reading is "you did not make a valid choice".)
+            $this->addFlash('error', \sprintf('Toolbox: %s', $selection->error));
+
+            return $this->redirectToRoute('app_chat_list');
+        }
+
+        $chat = $this->engine->start($message, ChatOrigin::Web, $this->resolve($selection, $request));
 
         return $this->redirectToRoute('app_chat_show', ['id' => $chat->getId()]);
     }
@@ -97,12 +124,26 @@ final class ChatController extends AbstractController
         $chat = $this->requireChat($id);
 
         $current = $this->exchanges->findLatestForChat($chat);
+        $pending = null !== $current && !$current->isTerminal();
+
+        // The picker reopens on the *current* exchange's declaration, so what
+        // you see ticked is what she can actually use right now — and while a
+        // reply is pending, that is the frozen set rather than a suggestion.
+        $currentToolbox = null !== $current ? ChatToolbox::fromExchange($current) : null;
 
         return $this->render('chat/show.html.twig', [
             'chat' => $chat,
             'transcript' => $this->events->findTranscript($chat),
-            'pending' => null !== $current && !$current->isTerminal(),
+            'pending' => $pending,
             'lastError' => $this->lastFailure($chat),
+            'used_tools' => null !== $current ? $currentToolbox?->toolNames() ?? [] : [],
+            'known_tags' => $this->knownTags(),
+            'catalog_tools' => $this->catalogTools(),
+            // The picker's values: the exchange's own declaration while one is
+            // live (so the frozen set is visible), otherwise empty — the next
+            // message starts from "no tools", which is the deliberate
+            // no-carry-forward rule (`CHAT_TOOLS.md` §2.1).
+            'toolbox_values' => $pending ? $currentToolbox?->forPicker() : null,
         ]);
     }
 
@@ -123,9 +164,81 @@ final class ChatController extends AbstractController
             return $this->redirectToRoute('app_chat_show', ['id' => $id]);
         }
 
-        $this->engine->ask($chat, $message, ChatOrigin::Web);
+        $selection = ToolboxSelection::parse($request->request->all());
+
+        if (null !== $selection->error) {
+            $this->addFlash('error', \sprintf('Toolbox: %s', $selection->error));
+
+            return $this->redirectToRoute('app_chat_show', ['id' => $id]);
+        }
+
+        $pending = $this->exchanges->findLatestForChat($chat);
+        if (null !== $pending && !$pending->isTerminal()) {
+            // The picker is disabled in this state, but a hand-rolled POST can
+            // still arrive. Refusing is the honest answer: the toolbox froze
+            // when the pending exchange started, so accepting a new one here
+            // would be accepting a change that cannot take effect.
+            $this->addFlash('error', 'She is still answering — the toolbox is fixed until this reply lands.');
+
+            return $this->redirectToRoute('app_chat_show', ['id' => $id]);
+        }
+
+        $this->engine->ask($chat, $message, ChatOrigin::Web, $this->resolve($selection, $request));
 
         return $this->redirectToRoute('app_chat_show', ['id' => $id]);
+    }
+
+    /**
+     * Turn a parsed selection into a frozen toolbox.
+     *
+     * Resolution reuses the run engine's resolver, so a chat's tags resolve
+     * against the same catalog the same way a task's do — and, importantly, a
+     * declaration that resolves to nothing is *not* an error here the way it is
+     * for a task. A task with no tools cannot do the thing it exists for; a
+     * conversation with no tools is the ordinary case, and one whose tags
+     * match nothing today is most likely a tag about to be applied.
+     *
+     * A name the catalog does not carry is reported to the human rather than
+     * silently dropped, because "I enabled the task tools" and "I typed
+     * 'tsk-tools' and got nothing" should not look the same.
+     */
+    private function resolve(ToolboxSelection $selection, Request $request): ChatToolbox
+    {
+        if ([] === $selection->declared) {
+            return ChatToolbox::none();
+        }
+
+        $resolved = $this->toolboxes->resolveChat($selection->mode, $selection->declared);
+
+        if ([] === $resolved) {
+            $this->addFlash(
+                'error',
+                \sprintf(
+                    'Nothing in the catalog matches %s — this exchange has no tools.',
+                    $this->describe($selection),
+                ),
+            );
+
+            // The declaration is kept even though it resolved to nothing.
+            // "I chose no tools" and "I chose these and they matched nothing"
+            // are different states, and the second one is why the declaration
+            // is stored at all: the picker reopens showing what was typed
+            // rather than quietly forgetting it.
+            return ChatToolbox::of($selection->mode, $selection->declared, []);
+        }
+
+        return ChatToolbox::of(
+            $selection->mode,
+            $selection->declared,
+            \App\RunEngine\ToolboxSnapshot::fromTools($resolved),
+        );
+    }
+
+    private function describe(ToolboxSelection $selection): string
+    {
+        $quoted = array_map(static fn (string $entry): string => \sprintf('"%s"', $entry), $selection->declared);
+
+        return \sprintf('%s %s', $selection->mode->value, implode(', ', $quoted));
     }
 
     private function requireChat(int $id): Chat
@@ -162,5 +275,40 @@ final class ChatController extends AbstractController
         }
 
         return 'the reply could not be produced';
+    }
+
+    /**
+     * Tags the catalog carries, alphabetically — the picker's tag list. The
+     * same source the task editor uses, so both offer the same vocabulary.
+     *
+     * @return list<string>
+     */
+    private function knownTags(): array
+    {
+        $tags = [];
+        foreach ($this->catalogTools() as $tool) {
+            foreach ($tool->getTags() as $tag) {
+                $tags[$tag] = true;
+            }
+        }
+
+        $tags = array_keys($tags);
+        sort($tags);
+
+        return $tags;
+    }
+
+    /**
+     * Every tool in the catalog, in the canonical order the catalog page uses.
+     *
+     * @return list<Tool>
+     */
+    private function catalogTools(): array
+    {
+        // Via the resolver's repository rather than a second dependency: the
+        // catalog has one definition (enabled tools on enabled servers, in
+        // canonical order), and a picker that read it differently from a
+        // resolution would offer choices that resolve to something else.
+        return $this->toolboxes->catalog();
     }
 }

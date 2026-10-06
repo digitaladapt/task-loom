@@ -953,3 +953,47 @@ The reap is written against the shared claim store rather than per table, so a
 third claimable aggregate cannot be added and then quietly left out of boot
 recovery. The boot line reports the split, because "work that stopped" and "a
 person waiting" want different attention.
+
+### 15.8 Chat tools — a conversation can act (v1.x)
+
+**Status:** built. Design: `docs/design/CHAT_TOOLS.md`.
+
+**The toolbox is chosen before each message and frozen for the exchange it
+starts.** That is the whole rule, and it is what keeps the run engine's tool
+safety intact in a place the run engine never assumed it would need to defend:
+the model sees one tool set for the entire turn, the tool definitions on the
+wire match the toolbox in the prompt match the map dispatch consults, and a
+tool outside the frozen set never dispatches — the same `tool_not_found` path,
+in the same words (SPEC §4.1).
+
+- **Two columns on `chat_exchange`.** `toolbox_declaration` is what the human
+  chose (so the picker reopens showing *their* choice, including an entry the
+  catalog no longer carries); `toolbox_snapshot` is the resolved set, in the
+  run engine's own snapshot shape. Null means "no tools" — which is also what
+  every pre-tools exchange means, so those rows behave exactly as they did.
+- **It does not carry forward.** The next message starts from no tools unless
+  the human chooses again. Carrying forward is cheaper and worse: the answer
+  to "what can she do right now?" would be something you have to remember
+  rather than something on screen.
+- **The picker is inert while a reply is pending**, because the toolbox froze
+  when that exchange started and a control that silently does nothing is worse
+  than one that is visibly off.
+- **Tool turns ride the existing `tools` lane.** A tool turn is I/O-bound on
+  somebody else's server and must not hold the model — as true for a
+  conversation as for a run. A second lane would buy another lane to reason
+  about and another co-located requirement for the boot sweep.
+- **A failing tool is not a failing exchange.** The error is recorded, fed back
+  to the model in the same structured shape a run uses, and the conversation
+  continues — a person should not lose their reply because an argument was
+  wrong. The exchange fails only when the model cannot produce an answer at
+  all: transport failure, empty reply, or the ceiling.
+- **`TASKLOOM_CHAT_TOOL_ROUNDS` (default 6)** caps tool round-trips in one
+  reply. This is a *capacity* bound as much as a correctness one (§15.3).
+  0 disables chat tools.
+
+**Two properties the run engine gets for free and a conversation does not**,
+kept as recorded facts rather than inferences: every dispatch writes a
+`tool_call` row (the evidence that only the model issued calls — a chat
+transcript is long and half written by the model), and a `tool` role message
+may only be rendered from a `tool_result`/`tool_error` row the executor wrote,
+never from prose that happens to be in the ledger.

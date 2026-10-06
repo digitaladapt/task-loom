@@ -80,12 +80,22 @@ services:
     # table less than the system has.
     App\RunEngine\ClaimReaper: ~
 
-    # The chat turn loop (SPEC §15). The bus is passed explicitly and is
-    # nullable, exactly as the run engine's is: the enqueue has to happen
-    # inside the committing transaction, so it is a constructor dependency
-    # rather than a call the caller makes afterwards.
+    # The chat turn loop (SPEC §15).
+    #
+    # `$bus` is passed explicitly and is nullable, exactly as the run engine's
+    # is: the enqueue has to happen inside the committing transaction, so it is
+    # a constructor dependency rather than a call the caller makes afterwards.
+    #
+    # `$executor`, `$prompts` and `$toolboxSnapshotTools` are named for a
+    # sharper reason: this constructor has optional parameters *after* required
+    # ones, and naming only `$bus` lets the container wire the remaining
+    # arguments positionally — which quietly handed the message bus to the tool
+    # executor and only failed at request time. Naming them makes the wiring
+    # explicit and the failure impossible.
     App\Chat\ChatEngine:
         arguments:
+            $executor: '@App\RunEngine\ToolExecutor'
+            $prompts: '@App\RunEngine\PromptCompiler'
             $bus: '@messenger.default_bus'
 
     # Run engine (SPEC §3, §5): loop, prompt compiler, budgets.

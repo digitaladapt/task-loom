@@ -1,9 +1,17 @@
 {#
-    The toolbox declaration widget (SPEC §4.1), as a macro — shared by the
-    task's own declaration and every step's, because they are the same
-    declaration at different scopes. Import with:
+    The toolbox declaration widget (SPEC §4.1, §15), as a macro — shared by
+    the task's own declaration, every step's, and a conversation's, because
+    they are the same declaration at different scopes and in different
+    places. Import with:
 
-        {% import 'task/_toolbox.html.twig' as toolbox_ui %}
+        {% import '_toolbox.html.twig' as toolbox_ui %}
+
+    Lives at the template root rather than under `task/` for that reason: it
+    is no longer only the task editor's widget. A chat is the third caller,
+    and the reason it is one macro and not three is the same either way —
+    the field names it posts are the contract the parser reads
+    (`App\Admin\ToolboxSelection`), so a second copy of this markup would be
+    a second chance to post something the parser does not understand.
 
     Two pickers, one active: `tags` resolves against the discovered catalog
     (task.tags ∩ tool.tags), `explicit` names tools exactly. The inactive

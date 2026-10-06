@@ -177,4 +177,115 @@ class ChatExchangeEvent extends LedgerEvent
 
         return ['role' => $this->role->value, 'content' => $this->content];
     }
+
+    /**
+     * This event as the messages it becomes on the wire — one for a turn, two
+     * for a tool exchange (the assistant's `tool_calls` message, then the
+     * results).
+     *
+     * **A tool message may only be built here, from this row.** That is the
+     * attestation the design note asks for: the `tool` role message the model
+     * sees is rendered from a `tool_result` event the *executor* wrote, never
+     * from prose that happens to be in the ledger and never by the model's own
+     * say-so. In a run the equivalent is free (results only ever come from the
+     * executor); in a conversation, whose transcript grows for years and is
+     * half written by the model, it is worth making structural.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function toWireMessages(): array
+    {
+        if ($this->type->isConversational()) {
+            return [$this->toMessage()];
+        }
+
+        if (ChatEventType::ToolCall !== $this->type) {
+            // A tool result renders on its own, as a `tool` message keyed by
+            // the call it answers — and a *refusal* renders identically,
+            // because from the endpoint's point of view it is the same thing:
+            // the answer to a call. (It is also what the model needs: an
+            // assistant `tool_calls` message with no matching `tool` result is
+            // a malformed request, and a refusal the model never receives is
+            // not feedback.)
+            return \in_array($this->type, [ChatEventType::ToolResult, ChatEventType::ToolError], true)
+                ? [$this->toolResultMessage()]
+                : [];
+        }
+
+        $payload = $this->getPayload();
+        $calls = $payload['calls'] ?? [];
+
+        if (!\is_array($calls) || [] === $calls) {
+            return [];
+        }
+
+        // One row per ROUND, carrying every call of it — not one row per call.
+        // That is what makes the wire shape reconstructible at all: the
+        // endpoint requires the assistant's `tool_calls` message to list every
+        // call whose result follows, so the set has to live together
+        // somewhere. The per-call rows that remain (`tool_result`,
+        // `tool_error`) are per call because they are per outcome.
+
+        // The assistant message that announced the calls, followed by one
+        // `tool` message per result. The endpoint requires this shape exactly:
+        // a `tool` message whose `tool_call_id` does not appear in a preceding
+        // assistant `tool_calls` is a malformed request.
+        $messages = [[
+            'role' => 'assistant',
+            'content' => $payload['assistantContent'] ?? null,
+            'tool_calls' => array_map(
+                static fn (array $call): array => [
+                    'id' => (string) ($call['id'] ?? ''),
+                    'type' => 'function',
+                    'function' => [
+                        'name' => (string) ($call['name'] ?? ''),
+                        'arguments' => (string) json_encode($call['arguments'] ?? [], \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE),
+                    ],
+                ],
+                array_filter($calls, \is_array(...)),
+            ),
+        ]];
+
+        foreach ($payload['results'] ?? [] as $result) {
+            if (!\is_array($result)) {
+                continue;
+            }
+            $messages[] = [
+                'role' => 'tool',
+                'tool_call_id' => (string) ($result['toolCallId'] ?? ''),
+                'content' => (string) ($result['content'] ?? ''),
+            ];
+        }
+
+        return $messages;
+    }
+
+    /**
+     * An attested tool result, as the single `tool` message it becomes.
+     *
+     * @return array<string, mixed>
+     */
+    private function toolResultMessage(): array
+    {
+        $payload = $this->getPayload();
+
+        return [
+            'role' => 'tool',
+            'tool_call_id' => (string) ($payload['toolCallId'] ?? ''),
+            'content' => (string) ($payload['content'] ?? $payload['detail'] ?? ''),
+        ];
+    }
+
+    /**
+     * Whether this event should appear in the conversation the human reads.
+     *
+     * The page shows what was *said*, plus — deliberately — a readable line
+     * for each tool the assistant used, because "she checked the weather" is
+     * part of the exchange from the person's point of view. The raw result is
+     * not shown: it is already reflected in the reply, and it is often long.
+     */
+    public function isShownInTranscript(): bool
+    {
+        return $this->type->isConversational() || ChatEventType::ToolCall === $this->type;
+    }
 }

@@ -12,7 +12,7 @@
     unique and in display order — not dense.
 #}
 {% macro step_card(levelIndex, stepIndex, values, errors, tags, tools, disabled = false) %}
-{% import 'task/_toolbox.html.twig' as toolbox_ui %}
+{% import '_toolbox.html.twig' as toolbox_ui %}
 {% set prefix = 'steps[' ~ levelIndex ~ '][' ~ stepIndex ~ ']' %}
 {% set scope = 'steps.' ~ levelIndex ~ '.' ~ stepIndex %}
 <div class="step-card" data-step-card>
