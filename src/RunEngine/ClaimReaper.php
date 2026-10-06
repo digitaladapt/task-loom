@@ -4,11 +4,12 @@ declare(strict_types=1);
 
 namespace App\RunEngine;
 
-use Doctrine\ORM\EntityManagerInterface;
+use App\Claims\ClaimStore;
+use App\Claims\ClaimTarget;
 
 /**
  * Clears execution claims that a booting fleet can prove are nobody's
- * (SPEC §6.2).
+ * (SPEC §6.2, §15).
  *
  * ## The two wrong answers this replaced
  *
@@ -50,6 +51,16 @@ use Doctrine\ORM\EntityManagerInterface;
  * documented deployment (SPEC §6: one container) and every claim in the table
  * is therefore the previous run's.
  *
+ * ## Every claimable aggregate, or the sweep is a lie
+ *
+ * This reaps *every* `ClaimTarget`, not just runs. A chat exchange abandoned by
+ * a fleet that was killed is as stuck as a run is, and worse in one respect: a
+ * human is sitting in front of it waiting for an answer that will never come.
+ * The mechanism is therefore written against the shared `ClaimStore` rather
+ * than copy-pasted per table, so a third claimable aggregate cannot be added
+ * and then quietly left out of boot recovery — which is exactly the failure
+ * this sweep exists to stop repeating, one level up.
+ *
  * ## The one deployment where the default is wrong
  *
  * If you run **more than one fleet against the same database** — a workers-only
@@ -73,7 +84,7 @@ use Doctrine\ORM\EntityManagerInterface;
  * checkpoint, or anything else the interrupted turn committed, because a turn
  * commits nothing until it returns: the committed state is already where the
  * work resumes from. Enabling the re-delivery is this class's job; deriving and
- * dispatching the owed work is `app:run:requeue`'s.
+ * dispatching the owed work is each aggregate's requeue command.
  */
 final readonly class ClaimReaper
 {
@@ -89,7 +100,7 @@ final readonly class ClaimReaper
 
     public const int DEFAULT_GRAB_AFTER_SECONDS = 0;
 
-    public function __construct(private EntityManagerInterface $em)
+    public function __construct(private ClaimStore $claims)
     {
     }
 
@@ -115,14 +126,16 @@ final readonly class ClaimReaper
     /**
      * Clear every claim the booting fleet can prove is nobody's.
      *
-     * @return int the number of claims cleared
+     * @return array{runs: int, chat_exchanges: int} how many were cleared per aggregate
      */
-    public function reap(): int
+    public function reap(): array
     {
-        return $this->em->getConnection()->executeStatement(
-            'UPDATE run SET lock_version = lock_version + 1, claimed_at = NULL, claim_fleet = NULL WHERE claimed_at IS NOT NULL AND claimed_at <= :cutoff',
-            ['cutoff' => time() - $this->grabAfterSeconds()],
-        );
+        $grabAfter = $this->grabAfterSeconds();
+
+        return [
+            'runs' => $this->claims->reap(ClaimTarget::Run, $grabAfter),
+            'chat_exchanges' => $this->claims->reap(ClaimTarget::ChatExchange, $grabAfter),
+        ];
     }
 
     /**
@@ -142,36 +155,20 @@ final readonly class ClaimReaper
      * on age, not on the label — but it tells you whether the label is doing
      * anything and where the remaining unattributable rows are.
      *
-     * @return array{clearable: int, leased: int, unowned: int}
+     * @return array{clearable: int, leased: int, unowned: int, chat_exchanges: array{clearable: int, leased: int, unowned: int}}
      */
     public function survey(): array
     {
-        $connection = $this->em->getConnection();
-        $cutoff = time() - $this->grabAfterSeconds();
+        $grabAfter = $this->grabAfterSeconds();
+
+        $runs = $this->claims->survey(ClaimTarget::Run, $grabAfter);
+        $chats = $this->claims->survey(ClaimTarget::ChatExchange, $grabAfter);
 
         return [
-            'clearable' => $this->count(
-                'SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claimed_at <= :cutoff',
-                ['cutoff' => $cutoff],
-            ),
-            'leased' => $this->count(
-                'SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claimed_at > :cutoff',
-                ['cutoff' => $cutoff],
-            ),
-            'unowned' => $this->count(
-                'SELECT COUNT(*) FROM run WHERE claimed_at IS NOT NULL AND claimed_at <= :cutoff AND claim_fleet IS NULL',
-                ['cutoff' => $cutoff],
-            ),
+            'clearable' => $runs['clearable'] + $chats['clearable'],
+            'leased' => $runs['leased'] + $chats['leased'],
+            'unowned' => $runs['unowned'] + $chats['unowned'],
+            'chat_exchanges' => $chats,
         ];
-    }
-
-    /**
-     * @param array<string, mixed> $params
-     */
-    private function count(string $sql, array $params = []): int
-    {
-        $value = $this->em->getConnection()->fetchOne($sql, $params);
-
-        return \is_numeric($value) ? (int) $value : 0;
     }
 }

@@ -1,0 +1,73 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ chat.title }} — TaskLoom{% endblock %}
+
+{% block body %}
+<header class="page-header">
+    <h1>{{ chat.title }}</h1>
+    <p class="muted">started {{ chat.createdAt|date('Y-m-d H:i') }}</p>
+</header>
+
+{% for label, messages in app.flashes %}
+    {% for message in messages %}
+        <p class="flash flash-{{ label }}" role="status">{{ message }}</p>
+    {% endfor %}
+{% endfor %}
+
+{#
+    The transcript, rendered from the ledger. Each turn carries its speaker as
+    a typed column (not a payload entry), so this loop is a plain read of the
+    conversational events — which is the whole point of having no separate
+    turn table (SPEC §15).
+
+    The human is labelled "You" and the assistant "Nia" here, in the UI. That
+    is the *reader's* view; the model's view is roles, with no visible name
+    prefix (SPEC §15 §2.5) — the two are deliberately different renderings of
+    the same stored turn.
+#}
+<section aria-labelledby="transcript-heading" class="chat-transcript">
+    <h2 id="transcript-heading" class="visually-hidden">Transcript</h2>
+
+    {% if transcript is empty %}
+        <p class="muted">Nothing said yet.</p>
+    {% endif %}
+
+    {% for turn in transcript %}
+        <article class="chat-turn chat-turn-{{ turn.speaker.value }}">
+            <p class="chat-speaker">
+                {{ turn.speaker.value == 'nia' ? 'Nia' : 'You' }}
+                <span class="muted">{{ turn.createdAt|date('H:i') }}</span>
+            </p>
+            <div class="chat-bubble">{{ turn.content|nl2br }}</div>
+        </article>
+    {% endfor %}
+</section>
+
+{% if pending %}
+    <p class="notice" role="status">Nia is thinking… <a href="{{ path('app_chat_show', {id: chat.id}) }}">refresh</a></p>
+{% endif %}
+
+{#
+    A failed exchange says so, out loud.
+
+    This is the one failure the run lanes have no precedent for: a run that
+    dies is visible in the run history, and a chat turn that dies is a person
+    watching an empty space where a reply should be. The classified reason is
+    recorded in the ledger, so it can be shown rather than guessed at.
+#}
+{% if lastError is not null %}
+    <p class="flash flash-error" role="alert">
+        I couldn't get a turn: {{ lastError }}
+    </p>
+{% endif %}
+
+<form method="post" action="{{ path('app_chat_say', {id: chat.id}) }}" class="chat-compose">
+    <input type="hidden" name="_token" value="{{ csrf_token('chat-say-' ~ chat.id) }}">
+    <label for="say-message" class="visually-hidden">Message</label>
+    <textarea id="say-message" name="message" rows="3" required
+              placeholder="Say something…" autocomplete="off"></textarea>
+    <button type="submit">Send</button>
+</form>
+
+<p class="page-back"><a href="{{ path('app_chat_list') }}">← All conversations</a></p>
+{% endblock %}

@@ -815,3 +815,62 @@ fieldset legend {
     /* Compact by padding, never by font-size (§3.3a). */
     padding: 0.4rem 0.75rem;
 }
+
+/*
+ * The chat surface (SPEC §15).
+ *
+ * Turn bubbles, not a table: the transcript is read on a phone in short
+ * bursts, and the speaker distinction has to survive at a glance. The
+ * alignment carries it (the human's turns sit right, the assistant's left)
+ * and the colour reinforces it — never colour alone, since the label above
+ * each turn states the speaker in text.
+ */
+.chat-compose {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin: 1rem 0;
+}
+
+.chat-compose textarea {
+    width: 100%;
+    resize: vertical;
+}
+
+.chat-transcript {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin: 1rem 0;
+}
+
+.chat-turn {
+    max-width: 90%;
+}
+
+.chat-turn-andrew {
+    align-self: flex-end;
+    text-align: right;
+}
+
+.chat-turn-nia {
+    align-self: flex-start;
+}
+
+.chat-speaker {
+    margin: 0 0 0.25rem;
+    font-size: 0.875rem;
+    color: var(--muted);
+}
+
+.chat-bubble {
+    background: var(--surface);
+    border-radius: 12px;
+    padding: 0.6rem 0.85rem;
+    text-align: left;
+    overflow-wrap: anywhere;
+}
+
+.chat-turn-andrew .chat-bubble {
+    border: 1px solid var(--accent);
+}

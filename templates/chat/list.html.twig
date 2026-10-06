@@ -1,0 +1,52 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Chat — TaskLoom{% endblock %}
+
+{% block body %}
+<header class="page-header">
+    <h1>Chat</h1>
+</header>
+
+{% for label, messages in app.flashes %}
+    {% for message in messages %}
+        <p class="flash flash-{{ label }}" role="status">{{ message }}</p>
+    {% endfor %}
+{% endfor %}
+
+{#
+    Starting a conversation is one field. The title is derived from the first
+    message rather than asked for separately — naming a conversation before
+    you can speak in it is friction for no gain, and the first thing you say
+    is usually the better name anyway.
+#}
+<section aria-labelledby="new-chat-heading">
+    <h2 id="new-chat-heading">Start a conversation</h2>
+    <form method="post" action="{{ path('app_chat_new') }}" class="chat-compose">
+        <input type="hidden" name="_token" value="{{ csrf_token('chat-new') }}">
+        <label for="new-message" class="visually-hidden">First message</label>
+        <textarea id="new-message" name="message" rows="3" required
+                  placeholder="Say something…" autocomplete="off"></textarea>
+        <button type="submit">Send</button>
+    </form>
+</section>
+
+<section aria-labelledby="chats-heading">
+    <h2 id="chats-heading">Conversations</h2>
+
+    {% if chats is empty %}
+        <p class="muted">Nothing said yet.</p>
+    {% else %}
+        <ul class="cards">
+        {% for chat in chats %}
+            <li class="card">
+                <div class="card-title"><a href="{{ path('app_chat_show', {id: chat.id}) }}">{{ chat.title }}</a></div>
+                <p class="muted">
+                    {{ chat.exchanges|length }} exchange{{ chat.exchanges|length == 1 ? '' : 's' }}
+                    · last activity {{ chat.updatedAt|date('Y-m-d H:i') }}
+                </p>
+            </li>
+        {% endfor %}
+        </ul>
+    {% endif %}
+</section>
+{% endblock %}

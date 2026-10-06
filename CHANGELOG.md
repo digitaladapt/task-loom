@@ -9,6 +9,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Chat — conversations (SPEC §15).** The first cut of the thing the capacity
+  design was for: you can hold a conversation with the assistant, and it goes
+  to the front of the queue to answer you.
+
+  Three nouns, and no fourth: `Chat` (the conversation), `ChatExchange` (one
+  execution over it — the run-analog), `ChatExchangeEvent` (one row in its
+  ledger). An inbound message is the trigger; everything until the reply
+  concludes is one exchange; each thing inside it is one typed event. There is
+  deliberately no turn table — the transcript is a filtered read over the
+  ledger, so a turn *is* an event.
+
+  **Attribution is a safety invariant, not a formatting choice.** Every turn
+  carries its speaker in typed columns and reaches the model on the role the
+  roster assigns (`andrew → user`, `nia → assistant`). Flatten a two-party
+  transcript and it breaks in both directions: the assistant's own past output
+  reads as instructions she then follows (a prompt-injection surface grown
+  inside her own history, in a system where she holds tools), or the human's
+  instructions read as her own prior words and may not be followed. You never
+  type your name — "morning" arrives as a turn *from Andrew*, attributed by
+  the pipeline at the render layer.
+
+  **The chat lane is the priority head** (SPEC §15.3). The LLM workers now
+  consume `chat llm`, and `messenger:consume` is strict-priority across its
+  receivers — it drains them in the order listed, every iteration — so a
+  queued reply is taken before any task turn the same worker could have taken.
+  No new process, no lock, no async runtime. It is worth being precise about
+  what this does *not* buy: `TASKLOOM_LLM_MAX_CONCURRENCY` is the **total** in
+  flight, so at the default of 1 a chat goes *next*, never *now*, and waits
+  out at most one generation. Sub-second preemption needs a streaming client
+  that can abort mid-generation — that is not built, and the client is still
+  deliberately non-streaming.
+
+  **A failure is loud.** A run that throws lands in `failed` and the run page
+  shows it; a chat turn that throws has a person staring at it. So a failed
+  exchange is classified in its ledger and the surface says so out loud —
+  "I couldn't get a turn" with the reason. It is deliberately not
+  re-dispatched: the human's next message is the retry.
+
+  **Shared machinery, not shared tables.** The ledger row is a
+  `MappedSuperclass` both event tables extend, so they are layout-identical by
+  compiler rather than by convention; the claim protocol is written once
+  against a closed set of claimable aggregates (`App\Claims\ClaimStore`). The
+  run tables are *not* reused, and §15.6 records why: `Run.task_id` is NOT NULL
+  and a synthetic "Internal: Chat" task would be a lie at the centre of the
+  schema, while `findRecent()`/`findAttention()` filter on `parent IS NULL`
+  only, so chat rows would appear in the run history and the attention queue
+  *silently*.
+
+  **Boot recovery covers chat too.** `ClaimReaper` sweeps every claimable
+  aggregate and `serve` runs `app:chat:requeue` beside `app:run:requeue
+  --startup`. An abandoned exchange is worse than an abandoned run in one
+  respect — a human is waiting for an answer that will not come — so the boot
+  line reports the split.
+
+  Respond-only, with the seam left: `ChatExchange.triggered_by` exists now
+  with `inbound` as its only value, so the assistant opening a conversation
+  later is a new enum case rather than a migration. Alerts, streaming, and
+  initiation are not built (`docs/design/CHAT_AND_CAPACITY.md` §8).
+
 - **Boot recovery: a restart no longer costs an hour of recovery latency**
   (SPEC §6.2). A fleet that is *killed* rather than *stopped* — SIGKILL, OOM,
   power loss, or the shutdown-window escalation described in

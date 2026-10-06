@@ -24,6 +24,21 @@ framework:
             #   tools — executes the pending tool calls of a turn. A slow
             #           tool never blocks the llm lane and vice versa.
             #
+            #   chat  — one reply turn of a conversation (SPEC §15). Same
+            #           table, same workers, drained FIRST: the LLM workers
+            #           consume `chat llm` and messenger:consume is
+            #           strict-priority across receivers, so a queued reply
+            #           is taken before any task turn the same worker could
+            #           have taken. That is the whole preemption mechanism —
+            #           no new process, no lock, no async runtime. See
+            #           docs/design/CHAT_AND_CAPACITY.md §4.
+            #
+            #           What this does NOT do is create capacity. The unit of
+            #           scheduling is one LLM call and
+            #           TASKLOOM_LLM_MAX_CONCURRENCY is the *total* in flight,
+            #           so at the default of 1 a chat goes next, never now,
+            #           and waits out at most one in-flight generation.
+            #
             # queue_name is passed as a transport option, not appended to
             # the DSN, so it composes with whatever query params the DSN
             # already carries (e.g. auto_setup).
@@ -57,6 +72,21 @@ framework:
                     redeliver_timeout: 7200
                 retry_strategy:
                     max_retries: 0
+            # The chat lane (SPEC §15): identical options to the run lanes on
+            # purpose. redeliver_timeout must match, for the same reason — a
+            # redelivery has to be able to take over a dead worker's claim,
+            # which needs the claim to have gone stale first. max_retries: 0
+            # for the same reason too: the engine owns failure semantics, and
+            # a Messenger retry would be a second, invisible one. A chat turn
+            # that cannot be answered lands `failed` in front of a human
+            # rather than retrying silently.
+            chat:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+                options:
+                    queue_name: chat
+                    redeliver_timeout: 7200
+                retry_strategy:
+                    max_retries: 0
             failed:
                 dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
                 options:
@@ -66,6 +96,7 @@ framework:
         routing:
             App\Message\LlmTurnMessage: llm
             App\Message\ToolTurnMessage: tools
+            App\Message\ChatReplyMessage: chat
 
 when@test:
     framework:
@@ -78,6 +109,8 @@ when@test:
                 llm:
                     dsn: 'in-memory://'
                 tools:
+                    dsn: 'in-memory://'
+                chat:
                     dsn: 'in-memory://'
                 failed:
                     dsn: 'in-memory://'
