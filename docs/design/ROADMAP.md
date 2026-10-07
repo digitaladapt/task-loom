@@ -126,7 +126,10 @@ job; arithmetic is the harness's.
 ## v1.x (each needs its own design note before build)
 
 - Chat + LLM priority — design note: `docs/design/CHAT_AND_CAPACITY.md`
-- `session` tasks: workspace, compaction contract, milestone semantics
+- `session` tasks — design note: `docs/design/SESSION_TASKS.md`
+  (the note resolves all three: **compaction is refused**, the workspace is an
+  optional MCP server, and resumption is the memory aggregate; it also adds the
+  `session` lane below `llm`)
 - `request_tool` escape hatch for mid-run pivots (still gated)
 - Per-task priority / queue jumping (lane scheme sketched in
   `CHAT_AND_CAPACITY.md` §8)
