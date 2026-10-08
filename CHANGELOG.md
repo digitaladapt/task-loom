@@ -306,6 +306,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `session`-kind task can no longer mis-run as an ordinary single-pass
+  run.** The kind has existed since v1 and the MCP tool schemas advertise it,
+  but nothing branched on kind: a task created with `kind: "session"` was
+  dispatched as an ordinary run wearing a session's label. Until the slice
+  engine lands (`docs/design/SESSION_TASKS.md`, build order step 1), the kind
+  is refused at every gate instead — the write path (`create` and `update`),
+  enable/approve, the editor's form (a field error beside the kind select,
+  which re-renders as submitted), and dispatch (Run now on both paths, the
+  admin UI's Run action, and the scheduler — the last as a classified failed
+  run, loud rather than a silent skip). Every refusal names the reason,
+  `TaskKind::isImplemented()` is the single switch behind all of them, and
+  the switch and its callers go away together in the change that builds the
+  engine.
+
 - **The toolbox picker works on a chat page, and a new conversation opens on the
   tags panel.** Three defects behind one report from production, all invisible
   to PHPUnit and only reproducible in a browser:

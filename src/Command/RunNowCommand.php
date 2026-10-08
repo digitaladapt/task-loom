@@ -7,6 +7,7 @@ namespace App\Command;
 use App\Entity\Run;
 use App\Entity\RunRole;
 use App\Entity\RunStatus;
+use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
 use App\Repository\RunRepository;
 use App\Repository\TaskRepository;
@@ -94,7 +95,15 @@ final class RunNowCommand extends Command
             return $this->dispatch($task, $output);
         }
 
-        $run = $this->engine->run($task);
+        try {
+            $run = $this->engine->run($task);
+        } catch (SessionKindUnsupportedException $e) {
+            // docs/design/SESSION_TASKS.md, build order step 1: the engine
+            // refuses the kind before any run row exists.
+            $output->writeln(\sprintf('<error>%s</error>', $e->getMessage()));
+
+            return self::FAILURE;
+        }
 
         if (RunRole::Parent === $run->getRole()) {
             $children = $this->runs->findChildren($run);
@@ -127,7 +136,7 @@ final class RunNowCommand extends Command
     {
         try {
             $launch = $this->launcher->launch($task);
-        } catch (ToolboxResolutionException|RunLaunchException $e) {
+        } catch (ToolboxResolutionException|RunLaunchException|SessionKindUnsupportedException $e) {
             $output->writeln(\sprintf('<error>%s</error>', $e->getMessage()));
 
             return self::FAILURE;

@@ -263,6 +263,45 @@ final class TaskSchedulerTickTest extends KernelTestCase
         self::assertSame($now->modify('+30 minutes')->getTimestamp(), $task->getNextRunAt());
     }
 
+    /**
+     * docs/design/SESSION_TASKS.md, build order step 1: every authoring
+     * gate refuses the session kind, but a row can still reach the store
+     * out of band (a restored backup, a direct DB edit). The tick must then
+     * fail LOUDLY — a classified failed run, the occurrence consumed —
+     * never a silent skip and never a retry storm.
+     */
+    public function testASessionKindTaskFailsLoudlyAtDispatch(): void
+    {
+        $task = new Task('Long haul', 'Keep going.', TaskKind::Session, ToolboxMode::Explicit, ['echo'], TaskAuthor::User);
+        $task->setSchedule('*/15 * * * *');
+        $this->em->persist($task);
+        $this->em->flush();
+        // enable() via raw update: the lifecycle gate refuses it, which is
+        // exactly why the out-of-band row is the shape this test covers.
+        $this->em->getConnection()->executeStatement('UPDATE task SET enabled = 1 WHERE id = ?', [$task->getId()]);
+        $this->em->clear();
+
+        $now = $this->at('2026-09-28 12:00:00');
+        $this->scheduler->tick($now); // arm
+
+        $result = $this->scheduler->tick($now->modify('+15 minutes'));
+
+        self::assertCount(1, $result->failed);
+        $run = $result->failed[0]['run'];
+        $this->em->refresh($run);
+
+        self::assertSame(RunTrigger::Scheduled, $run->getTriggeredBy());
+        self::assertSame(RunStatus::Failed, $run->getStatus());
+
+        $types = array_map(static fn ($e): RunEventType => $e->getType(), $run->getEvents()->toArray());
+        self::assertContains(RunEventType::Failure, $types);
+
+        // The occurrence was consumed: the cursor advanced, no retry storm.
+        $task = $this->em->find(Task::class, $task->getId());
+        self::assertInstanceOf(Task::class, $task);
+        self::assertSame($now->modify('+30 minutes')->getTimestamp(), $task->getNextRunAt());
+    }
+
     public function testSteppedTaskFiresAsAGraphThroughTheSameQueuePath(): void
     {
         $task = $this->draftTask('Stepped schedule', '*/15 * * * *');

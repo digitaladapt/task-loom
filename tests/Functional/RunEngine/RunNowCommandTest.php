@@ -124,6 +124,38 @@ final class RunNowCommandTest extends KernelTestCase
         self::assertCount(0, $runs);
     }
 
+    /**
+     * docs/design/SESSION_TASKS.md, build order step 1: the engine refuses a
+     * kind with no engine behind it before any run row exists, and the
+     * command reports it as a clean non-zero exit.
+     */
+    public function testRunNowRefusesASessionKindTask(): void
+    {
+        $this->catalogTool('get_weather');
+        $this->llm->expects($this->never())->method('chat');
+
+        $task = new Task(
+            title: 'Long haul',
+            brief: 'Keep going.',
+            kind: TaskKind::Session,
+            toolboxMode: ToolboxMode::Tags,
+            toolbox: ['test-server'],
+            createdBy: TaskAuthor::User,
+        );
+        $task->enable();
+        $this->em->persist($task);
+        $this->em->flush();
+
+        $tester = $this->tester();
+        $exit = $tester->execute(['task-id' => (string) $task->getId()]);
+
+        self::assertSame(1, $exit);
+        self::assertStringContainsString('not built yet', $tester->getDisplay());
+
+        $runs = $this->em->createQuery('SELECT r FROM App\Entity\Run r')->getResult();
+        self::assertCount(0, $runs, 'the refusal happens before any run row is created');
+    }
+
     public function testRunNowNonSucceededRunFailsExitCode(): void
     {
         $this->catalogTool('get_weather');

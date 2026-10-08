@@ -7,6 +7,7 @@ namespace App\Tests\Functional\Mcp\Server;
 use App\Entity\Run;
 use App\Entity\RunRole;
 use App\Entity\RunStatus;
+use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
 use App\Entity\TaskAuthor;
 use App\Entity\TaskKind;
@@ -58,6 +59,23 @@ final class TaskCrudGatingTest extends KernelTestCase
 
         self::assertFalse($task->isEnabled());
         self::assertSame(TaskAuthor::Agent, $task->getCreatedBy());
+    }
+
+    /**
+     * docs/design/SESSION_TASKS.md, build order step 1: the session-kind
+     * label carries no engine, so the write gate refuses it — the task must
+     * not be persisted at all.
+     */
+    public function testCreateRefusesTheSessionKindUntilItsEngineExists(): void
+    {
+        try {
+            $this->crud->create('Long haul', 'Keep going.', TaskKind::Session, ToolboxMode::Tags, [], null);
+            self::fail('Expected SessionKindUnsupportedException.');
+        } catch (SessionKindUnsupportedException $e) {
+            self::assertStringContainsString('not built yet', $e->getMessage());
+        }
+
+        self::assertCount(0, $this->tasks->findAll(), 'a refused create persists nothing');
     }
 
     public function testCreateAppearsInApprovalQueue(): void

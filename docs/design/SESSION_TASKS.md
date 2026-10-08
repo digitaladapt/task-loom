@@ -14,16 +14,25 @@ SPEC §9 and the deferred items it names; touches SPEC §4.1, §4.4, §5.6, §6.
 > continuation unit; preemption was always the every-turn yield of §7.2, never
 > the slice boundary. §14 records all three.
 
-> **Where this stands.** Nothing in this note is built. Every design question it
-> opened in review is settled (§14); what remains is to build it in the order in
-> §12. One piece is *half*-built and is worth naming as a trap: `App\Entity\TaskKind`
-> already carries `case Session = 'session'` ("designed-for and deferred to
-> v1.x"), and `TaskCrud::coerceKind()` already accepts `"run" or "session"` — but
-> the engine does not branch on kind. Today a task created with `kind: "session"`
-> is dispatched as an ordinary single-pass run wearing a session's label. The
-> engine behind the label does not exist yet; **until it does, `session` is
-> refused at the write gate, at enable/approve, and at dispatch** rather than
-> silently mis-run — that refusal is build order step 1.
+> **Where this stands.** Build order step 1 has **landed**: the half-built
+> `session` label can no longer mis-run. `App\Entity\TaskKind` carries
+> `case Session = 'session'` and `TaskCrud::coerceKind()` still accepts
+> `"run" or "session"` on the wire, but a new `TaskKind::isImplemented()`
+> predicate is the single switch, and four gates refuse the unimplemented
+> kind before anything can go wrong: the write path (`TaskCrud` create and
+> update), the lifecycle (`TaskAdminService` enable/approve), the editor
+> parser (a field error, beside the kind select), and the engine's dispatch
+> entry points (`RunEngine::run`/`start`, reached by Run now, the admin UI,
+> and the scheduler). Every refusal names the reason
+> (`SessionKindUnsupportedException`), and the scheduler's is a classified
+> failed run — loud, never a silent skip. The predicate and its callers go
+> away in one reviewable change when the engine lands. Steps 2–7 remain
+> **not built**; what remains is to build them in the order of §12.
+>
+> One piece *was* half-built and worth remembering as the trap this gate
+> closed: nothing branched on kind, so a task created with
+> `kind: "session"` was dispatched as an ordinary single-pass run wearing a
+> session's label. That is now impossible at every entrance.
 
 > **What this note refuses.** SPEC §9 says a session needs a design pass over
 > "workspace layout, compaction contract, resumption semantics". It gets one
@@ -658,10 +667,11 @@ matching the existing lanes. Concurrency is the existing
 
 ## 12. Build order
 
-1. **Gate the kind.** Refuse `kind: "session"` at the write gate (create and
-   update), at enable/approve, and at dispatch, until the slice engine behind it
-   exists (step 4) — the half-built label cannot silently mis-run (§ "Where this
-   stands").
+1. ~~**Gate the kind.**~~ **Done** (2026-10-08). `TaskKind::isImplemented()`
+   plus `SessionKindUnsupportedException`, enforced at the write gate (create
+   and update), enable/approve, the editor parser, and dispatch; each caller
+   translates the refusal into its own vocabulary (MCP tool error, field
+   error, lifecycle refusal, CLI error, classified scheduler failure).
 2. **The store + the block.** `SessionMemory` and `SessionMemoryRevision`,
    `SessionMemoryStore`, the read/inject path at `buildMessages`, the caps,
    `## Memories` rendering. *No slices yet* — this is provable against a single

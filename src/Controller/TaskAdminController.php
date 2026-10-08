@@ -9,6 +9,7 @@ use App\Admin\TaskAdminService;
 use App\Admin\TaskLifecycleException;
 use App\Entity\Run;
 use App\Entity\RunRole;
+use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
 use App\Repository\RunRepository;
 use App\Repository\TaskRepository;
@@ -168,7 +169,7 @@ final class TaskAdminController extends AbstractController
             // hold an LLM turn on the wire. The run's progress is followed
             // in the run surface; workers drive it from here.
             $launch = $this->launcher->launch($task);
-        } catch (ToolboxResolutionException $e) {
+        } catch (ToolboxResolutionException|SessionKindUnsupportedException $e) {
             $this->addFlash('error', \sprintf('Run refused at dispatch — %s', $e->getMessage()));
 
             return $this->redirectToRoute('app_task_detail', ['id' => $id]);

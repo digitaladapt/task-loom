@@ -181,6 +181,33 @@ final class AdminTaskEditorTest extends WebTestCase
         ));
     }
 
+    /**
+     * docs/design/SESSION_TASKS.md, build order step 1: a save of the
+     * session kind is refused at the field, nothing persists, and the
+     * human's work survives the re-render.
+     */
+    public function testSavingASessionKindTaskIsRefusedBeforeAnythingPersists(): void
+    {
+        $crawler = $this->client->request('GET', '/tasks/new');
+        self::assertResponseIsSuccessful();
+
+        $form = $crawler->selectButton('Create draft')->form([
+            'title' => 'Long haul',
+            'brief' => 'Keep going.',
+            'kind' => 'session',
+            'toolbox_mode' => 'tags',
+        ]);
+        $this->client->submit($form);
+
+        // A re-render, not a redirect: the human's work is not thrown away.
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+        self::assertStringContainsString('not built yet', $content);
+        self::assertStringContainsString('Long haul', $content, 'the submitted values survive the refusal');
+
+        self::assertCount(0, $this->tasks()->findAll(), 'a refused save persists nothing');
+    }
+
     public function testCreatingASteppedTaskPersistsTheGraphAsAuthored(): void
     {
         $crawler = $this->client->request('GET', '/tasks/new');
