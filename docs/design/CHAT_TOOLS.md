@@ -107,6 +107,20 @@ only for rows that genuinely predate chat tools:
 Three states, three readings, no ambiguity — and the "pre-select last time"
 refinement this section used to defer is now simply what the picker does.
 
+**On the chat pages the picker is folded shut.** It is a `<details>` with no
+`open` attribute, because it sits between the box you type in and the Send
+button and the vocabulary it offers is not what anyone opened the page to read.
+Collapsed and safe-to-collapse are the same property, though, and it is worth
+being precise about which half moves: folding hides the *choosing*, never the
+answer. The summary states the current declaration, and the declaration itself
+travels in hidden inputs inside the disclosure — an unchecked checkbox is not
+submitted and a `disabled` control is not submitted at all, so a folded form
+that carried nothing would read as "you chose no tools" and rewrite her toolbox
+at the next message. The task editor keeps the picker flat (the macro's
+`collapsed` argument defaults to false): there the picker is the page's subject
+rather than something in the way, and it appears once per step as well as once
+for the task.
+
 ## 3. Two claims the run engine could make and chat cannot
 
 This is the part worth writing down, because it is the difference between
