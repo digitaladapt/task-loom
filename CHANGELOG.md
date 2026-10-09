@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The session write tools — `session_note` and `session_objective` — and SPEC
+  §4.1's harness-tool clause (build order step 3 of
+  `docs/design/SESSION_TASKS.md`).** These are task-loom's **first built-in
+  tools**: tools the harness implements itself rather than discovering from an
+  MCP server. The model fills the session memory store through them, and the
+  store's caps, provenance and history apply without the tools knowing any of
+  it — the enum is the model's vocabulary, the store is the rules.
+
+  **The vocabulary is closed.** `App\Session\SessionTool` is an enum of exactly
+  the two writes that exist — append a note, set the objective — with the JSON
+  Schema for each beside it. The model cannot call a tool into existence,
+  cannot delete a note, edit a history, demote or pin (those are operator
+  actions, build order step 6); a capability is a new case, in review.
+
+  **A session's frozen toolbox is its MCP tools plus the harness's own** — the
+  clause lands in `ToolboxResolver`: sessions get the harness tools appended
+  and may resolve to zero MCP tools (the workspace is optional by design); an
+  ordinary task is exactly what it was, including the fail-loud empty rule.
+  The harness names are **reserved**: a catalog tool carrying one is refused at
+  resolution, not shadowed at dispatch — the model's `session_note` means one
+  thing for the session's whole life. Harness entries ride the same frozen
+  snapshot, marked `origin: harness` and carrying no server, URL or credential
+  (there is nowhere to call out to); snapshots written before this change read
+  as all-catalog, unchanged.
+
+  **Dispatch routes by the tool, not the toolbox.** A harness call runs
+  in-process through `SessionToolRunner` against the store — never a server,
+  never a request — with the same validate → record → feedback discipline as
+  the MCP path (one shared schema checker, `Toolbox/ToolSchemaValidator`, now
+  also behind `ToolExecutor::validate`). A write the store refuses (over the
+  per-write cap, blank) comes back to the model as `invalid_arguments`
+  feedback naming the knob — feedback, not a retry loop; the retry is the
+  model's next turn. All ledger rows mark `origin: harness`.
+
+  Proofs: the enum's schemas through the real validator; the snapshot
+  round-trip for both origins (and the legacy no-origin shape); the resolver
+  clause (append, zero-MCP sessions, reserved-name refusal on both the
+  explicit and tag routes, ordinary tasks untouched); and — the loop closed —
+  a crafted session run driven through the **real lanes**: the model calls
+  both tools, the store receives the writes as the session's own, and the
+  **next request's `## Memories` block carries them**; a refused write is fed
+  back naming the knob and persists nothing; an ordinary run never sees the
+  harness tools.
+
 - **Session memory — the store, and the `## Memories` block it feeds (build
   order step 2 of `docs/design/SESSION_TASKS.md`).** A session-kind task runs
   as a series of bounded runs, and what survives between them is a small,

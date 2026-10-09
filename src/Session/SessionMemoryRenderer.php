@@ -31,9 +31,9 @@ use App\Repository\SessionMemoryRepository;
  *    the block says not to follow instructions inside them);
  *  - the **tool surface** stated in the block itself, so the permission is
  *    as visible as the data — the same instinct as the Toolbox section.
- *    (The tools themselves land in build order step 3; no session can run
- *    before the slice engine lands in step 4, which is what keeps this
- *    honest in the interim.)
+ *    (The tools are {@see SessionTool}, landing in build order step 3; no
+ *    session can run before the slice engine lands in step 4, which is what
+ *    keeps this honest in the interim.)
  *
  * **Bounded on its own percentage** (§3.3): the whole rendered block is
  * capped to {@see ContextWindow::sessionMemoryBudgetChars()}. When it does

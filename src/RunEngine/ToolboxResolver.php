@@ -6,15 +6,28 @@ namespace App\RunEngine;
 
 use App\Entity\Step;
 use App\Entity\Task;
+use App\Entity\TaskKind;
 use App\Entity\Tool;
 use App\Entity\ToolboxMode;
+use App\Entity\ToolDefinition;
 use App\Repository\ToolRepository;
+use App\Session\SessionTool;
 
 /**
  * Resolves a task's toolbox declaration to the frozen tool set for a run
  * (SPEC §4.1): explicit names resolve exactly; tags resolve against the
  * discovered catalog (task.tags ∩ tool.tags). Resolution happens once, at
  * run start — no mid-run tool expansion.
+ *
+ * **A session's frozen toolbox is its operator-selected MCP tools PLUS the
+ * harness's own session tools** (SPEC §4.1's harness-tool clause,
+ * docs/design/SESSION_TASKS.md §5, build order step 3). The harness tools
+ * are fixed too — the model cannot call them into existence, and cannot
+ * write anything the tools do not express — but the *whole toolbox* is
+ * frozen at slice start exactly as before. A session may resolve to zero
+ * MCP tools (harness tools remain); an ordinary task may not, as before.
+ * The harness names are reserved: a catalog tool carrying one is refused at
+ * resolution rather than shadowed at dispatch.
  *
  * resolveStep() is the same resolution for a step's declaration: under
  * run-per-step a step's toolbox IS its child run's toolbox (SPEC §13.1).
@@ -27,19 +40,38 @@ final readonly class ToolboxResolver
     }
 
     /**
-     * @return list<Tool>
+     * @return list<ToolDefinition>
      *
-     * @throws \LogicException when the resolution yields no tools (a run with an
-     *                         empty toolbox cannot do anything useful; better to
-     *                         fail loudly at dispatch)
+     * @throws ToolboxResolutionException when the resolution yields no MCP tools for an
+     *                                    ordinary task, or a catalog tool collides with a
+     *                                    harness tool name
      */
     public function resolve(Task $task): array
     {
-        return $this->resolveDeclaration(
+        $mcp = $this->resolveDeclaration(
             $task->getToolboxMode(),
             $task->getToolbox(),
             \sprintf('Task "%s"', $task->getTitle()),
+            allowEmpty: TaskKind::Session === $task->getKind(),
         );
+
+        if (TaskKind::Session !== $task->getKind()) {
+            return $mcp;
+        }
+
+        // SPEC §4.1's harness-tool clause: a session's frozen toolbox is its
+        // MCP tools plus the harness's own session tools. The reservation
+        // check runs on what actually resolved — an explicit declaration and
+        // a tag intersection get the same treatment, so a catalog tool
+        // named like a harness tool can never shadow it at dispatch, by any
+        // route.
+        foreach ($mcp as $tool) {
+            if (\in_array($tool->getName(), SessionTool::names(), true)) {
+                throw new ToolboxResolutionException(\sprintf('Task "%s" resolves tool "%s", but that name is reserved for the harness\'s own session tools.', $task->getTitle(), $tool->getName()));
+            }
+        }
+
+        return [...$mcp, ...SessionTool::cases()];
     }
 
     /**
@@ -109,7 +141,7 @@ final readonly class ToolboxResolver
      *
      * @throws ToolboxResolutionException when the resolution yields no tools
      */
-    private function resolveDeclaration(ToolboxMode $mode, array $declared, string $subject): array
+    private function resolveDeclaration(ToolboxMode $mode, array $declared, string $subject, bool $allowEmpty = false): array
     {
         $resolved = [];
 
@@ -125,7 +157,7 @@ final readonly class ToolboxResolver
             $resolved = $this->resolveByTags($declared);
         }
 
-        if ([] === $resolved) {
+        if ([] === $resolved && !$allowEmpty) {
             throw new ToolboxResolutionException(\sprintf('%s resolves to an empty toolbox.', $subject));
         }
 

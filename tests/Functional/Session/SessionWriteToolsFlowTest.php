@@ -7,9 +7,11 @@ namespace App\Tests\Functional\Session;
 use App\Context\ContextWindow;
 use App\Entity\McpServer;
 use App\Entity\Run;
+use App\Entity\RunEventType;
 use App\Entity\RunStatus;
 use App\Entity\ServerProtocol;
 use App\Entity\SessionMemorySource;
+use App\Entity\SessionMemoryTier;
 use App\Entity\Task;
 use App\Entity\TaskAuthor;
 use App\Entity\TaskKind;
@@ -29,6 +31,7 @@ use App\RunEngine\ToolboxSnapshot;
 use App\RunEngine\ToolExecutorInterface;
 use App\Session\SessionMemoryRenderer;
 use App\Session\SessionMemoryStore;
+use App\Session\SessionToolRunner;
 use Doctrine\ORM\EntityManagerInterface;
 use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -40,28 +43,27 @@ use Symfony\Component\Messenger\Stamp\ReceivedStamp;
 use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
 
 /**
- * The `## Memories` seam end to end (docs/design/SESSION_TASKS.md §4.1,
- * build order step 2): a session's block rides **every** request of the run
- * — after the frozen head, before the kept exchanges — and an operator edit
- * lands on the very next request, with no restart and no slice boundary.
+ * The write tools end to end (docs/design/SESSION_TASKS.md §5, build order
+ * step 3): a session run calls `session_note` and `session_objective` through
+ * the **real lanes**, the writes land in the store, and the very next
+ * request's `## Memories` block carries them — the loop the whole feature
+ * exists for, closed.
  *
- * This is the step's "provable against a single long run", and the shape of
- * the proof matters. The step-1 dispatch gate still (correctly) refuses
- * session-kind tasks at run()/start() until the slice engine lands — so the
- * run is crafted exactly as the slice launcher will craft it, and then
- * driven **through the turn cores via the real lanes**: the first message is
- * dispatched to the in-memory `llm` lane and delivered with the same stamps
- * a worker attaches, after which the run walks `llm → tools → llm` on its
- * own committed state. Nothing calls a private seam.
+ * The run is crafted as the slice launcher will craft it (the step-1 gate
+ * keeps run()/start() refusing the kind until step 4) and driven llm →
+ * tools → llm with worker stamps; nothing calls a private seam. The tool
+ * definitions on the wire are asserted too — a harness tool that is not on
+ * the wire is a tool the model cannot call.
  */
 #[AllowMockObjectsWithoutExpectations]
-final class SessionMemoryInjectionTest extends KernelTestCase
+final class SessionWriteToolsFlowTest extends KernelTestCase
 {
     private EntityManagerInterface $em; // @phpstan-ignore property.uninitialized (assigned in setUp)
     private LlmClientInterface&MockObject $llm; // @phpstan-ignore property.uninitialized (assigned in setUp)
     private ToolExecutorInterface&MockObject $executor; // @phpstan-ignore property.uninitialized (assigned in setUp)
     private RunEngine $engine; // @phpstan-ignore property.uninitialized (assigned in setUp)
     private SessionMemoryStore $store; // @phpstan-ignore property.uninitialized (assigned in setUp)
+    private SessionMemoryRepository $memories; // @phpstan-ignore property.uninitialized (assigned in setUp)
 
     #[\Override]
     protected function setUp(): void
@@ -84,6 +86,9 @@ final class SessionMemoryInjectionTest extends KernelTestCase
         $this->executor = $this->createMock(ToolExecutorInterface::class);
 
         $container = static::getContainer();
+        $this->memories = $container->get(SessionMemoryRepository::class);
+        $this->store = new SessionMemoryStore($this->em, $this->memories, hotCap: 5, coldCap: 25, writeMaxChars: 2000);
+
         $this->engine = new RunEngine(
             $this->llm,
             $container->get(PromptCompiler::class),
@@ -97,105 +102,158 @@ final class SessionMemoryInjectionTest extends KernelTestCase
             ['step_budget' => 50, 'tool_retries' => 2, 'circuit_breaker' => 3],
             $this->bus(),
             $container->get(SessionMemoryRenderer::class),
+            new SessionToolRunner($this->store),
         );
 
         // Install BEFORE anything is dispatched: handlers are built lazily
         // on first delivery and resolve RunEngine through DI.
         $container->set(RunEngine::class, $this->engine);
-
-        $this->store = new SessionMemoryStore($this->em, $container->get(SessionMemoryRepository::class), hotCap: 5, coldCap: 25, writeMaxChars: 2000);
     }
 
-    public function testTheBlockRidesEveryRequestAndAnOperatorEditLandsOnTheNextRequest(): void
+    public function testTheModelWritesThroughTheToolsAndTheNextRequestCarriesTheWrites(): void
     {
-        $this->catalogTool('get_weather');
         $task = $this->sessionTask();
-        $this->store->setObjective($task, 'Steer: the importer only.', SessionMemorySource::Operator);
-        $this->store->addNote($task, 'Migration 0007 adds the store.', SessionMemorySource::Session);
-
         $run = $this->craftRun($task);
-        $this->wireToolRoundTrip();
 
         $chats = [];
         $this->llm->method('chat')->willReturnCallback(
-            function (array $messages) use (&$chats): LlmResponse {
-                $chats[] = $messages;
+            function (array $messages, array $tools) use (&$chats): LlmResponse {
+                $chats[] = [$messages, $tools];
 
-                return 1 === \count($chats)
-                    ? $this->response(toolCalls: [['id' => 'c1', 'name' => 'get_weather', 'arguments' => []]])
-                    : $this->response(content: 'Done, warmed up.');
+                return match (\count($chats)) {
+                    // Turn 1: the model writes both kinds of memory, one call each.
+                    1 => $this->response(toolCalls: [
+                        ['id' => 'c1', 'name' => 'session_note', 'arguments' => ['text' => 'Migration 0007 adds the store; the importer consumes it.']],
+                        ['id' => 'c2', 'name' => 'session_objective', 'arguments' => ['text' => 'Finish the importer, then harden it.']],
+                    ]),
+                    // Turn 2: done.
+                    default => $this->response(content: 'Done with this slice of work.'),
+                };
             },
         );
 
-        // The first turn, delivered exactly as a worker would.
+        // The MCP executor must never be touched by this run: both calls are
+        // harness tools. (No enforcement in the mock — the assertion below on
+        // the events proves dispatch took the in-process route.)
+        $this->executor->expects($this->never())->method('execute');
+        $this->executor->expects($this->never())->method('validate');
+
         $this->bus()->dispatch(new LlmTurnMessage((int) $run->getId(), 1));
-        $this->deliverOne('llm');
-
-        self::assertCount(1, $chats);
-        $first = $chats[0];
-        self::assertCount(3, $first, 'head + memory, nothing else on the first request');
-        self::assertSame('system', $first[0]['role']);
-        self::assertSame('user', $first[1]['role']);
-        self::assertSame('assistant', $first[2]['role'], 'the block rides on the assistant role');
-        self::assertStringContainsString('## Memories', $first[2]['content']);
-        self::assertStringContainsString('**Objective** — set by the operator: Steer: the importer only.', $first[2]['content']);
-        self::assertStringContainsString('- [you] Migration 0007 adds the store.', $first[2]['content']);
-
-        // The operator steers now — mid-run, between requests. No restart,
-        // no slice boundary: the next request must carry the edit (§4.1).
-        $this->store->setObjective($task, 'Steer: the importer and the parser.', SessionMemorySource::Operator);
-        $this->store->addNote($task, 'Operator: keep PRs small.', SessionMemorySource::Operator);
-
         $this->pump();
 
         $this->em->clear();
         $run = $this->runs()[0];
         self::assertSame(RunStatus::Succeeded, $run->getStatus());
-        self::assertCount(2, $chats, 'the run made two requests, one per turn');
+        self::assertCount(2, $chats, 'two requests: one that writes, one that finishes');
 
-        $second = $chats[1];
+        // 1. The harness tools rode the wire as definitions.
+        $firstTools = array_column(array_column($chats[0][1], 'function'), 'name');
+        self::assertContains('session_note', $firstTools);
+        self::assertContains('session_objective', $firstTools);
+
+        // 2. The result the model saw for each call, and the ledger's record
+        //    of dispatch — origin harness, no server anywhere.
+        $results = $this->toolResults($run);
+        self::assertCount(2, $results, 'both calls produced a result');
+        $byTool = [];
+        foreach ($results as $result) {
+            $byTool[$result['tool']] = $result;
+        }
+        self::assertStringContainsString('"saved":true', $byTool['session_note']['content']);
+        self::assertSame('harness', $byTool['session_note']['origin']);
+        self::assertStringContainsString('"revision":1', $byTool['session_objective']['content'], 'a fresh objective reports revision 1');
+
+        // 3. The writes landed in the store, as the session's own.
+        $objective = $this->memories->findObjectiveFor((int) $task->getId());
+        self::assertNotNull($objective);
+        self::assertSame('Finish the importer, then harden it.', $objective->getText());
+        self::assertSame(SessionMemorySource::Session, $objective->getSource(), 'written by the session, rendered [you] — never operator provenance');
+        $hot = $this->memories->findNotesFor((int) $task->getId(), SessionMemoryTier::Hot);
+        self::assertCount(1, $hot);
+        self::assertSame('Migration 0007 adds the store; the importer consumes it.', $hot[0]->getText());
+
+        // 4. The very next request carried them in the ## Memories block —
+        //    the close of the loop: write → store → block → next request.
+        $second = $chats[1][0];
         self::assertSame('assistant', $second[2]['role']);
-        self::assertStringContainsString('**Objective** — set by the operator: Steer: the importer and the parser.', $second[2]['content'], 'the edit lands on the very next request');
-        self::assertStringContainsString('- [operator] Operator: keep PRs small.', $second[2]['content']);
-        self::assertStringContainsString('- [you] Migration 0007 adds the store.', $second[2]['content'], 'the carried note is still there');
-        self::assertStringNotContainsString('Steer: the importer only.', $second[2]['content'], 'the superseded steer is replaced, not accumulated');
-        self::assertSame('c1', $second[3]['tool_calls'][0]['id'], 'the kept exchange still follows the block, whole');
-        self::assertSame('c1', $second[4]['tool_call_id']);
+        self::assertStringContainsString('## Memories', $second[2]['content']);
+        self::assertStringContainsString('**Objective** — set by you: Finish the importer, then harden it.', $second[2]['content']);
+        self::assertStringContainsString('- [you] Migration 0007 adds the store; the importer consumes it.', $second[2]['content']);
     }
 
-    public function testAnOrdinaryRunNeverCarriesTheBlock(): void
+    public function testAnOversizedWriteIsRefusedWithFeedbackAndPersistsNothing(): void
     {
-        $this->catalogTool('get_weather');
-        $task = $this->runKindTask();
-        $this->wireToolRoundTrip();
+        $task = $this->sessionTask();
+        $run = $this->craftRun($task);
 
         $chats = [];
         $this->llm->method('chat')->willReturnCallback(
             function (array $messages) use (&$chats): LlmResponse {
                 $chats[] = $messages;
 
-                return 1 === \count($chats)
-                    ? $this->response(toolCalls: [['id' => 'c1', 'name' => 'get_weather', 'arguments' => []]])
-                    : $this->response(content: 'Done.');
+                return match (\count($chats)) {
+                    1 => $this->response(toolCalls: [
+                        ['id' => 'c1', 'name' => 'session_note', 'arguments' => ['text' => str_repeat('x', 5000)]],
+                    ]),
+                    default => $this->response(content: 'Understood — too long.'),
+                };
             },
         );
 
-        $run = $this->engine->run($task);
+        $this->bus()->dispatch(new LlmTurnMessage((int) $run->getId(), 1));
+        $this->pump();
 
-        self::assertSame(RunStatus::Succeeded, $run->getStatus());
-        self::assertCount(2, $chats);
-        foreach ($chats as $messages) {
-            self::assertStringNotContainsString('## Memories', (string) json_encode($messages), 'memory is a session\'s, attributed to the session alone');
+        $this->em->clear();
+        $run = $this->runs()[0];
+        self::assertSame(RunStatus::Succeeded, $run->getStatus(), 'a refused write is feedback, not a run failure');
+
+        // The refusal is recorded on the ledger (as `detail`, the same shape
+        // an MCP-side failure takes) — and the feedback the model actually
+        // received rides the next request's tool message, read below.
+        $results = $this->toolResults($run);
+        self::assertCount(1, $results);
+        self::assertStringContainsString('TASKLOOM_SESSION_WRITE_MAX_CHARS', (string) $results[0]['detail']);
+        self::assertSame('harness', $results[0]['origin']);
+
+        $feedback = null;
+        foreach ($chats[1] as $message) {
+            if ('tool' === ($message['role'] ?? null) && 'c1' === ($message['tool_call_id'] ?? null)) {
+                $feedback = (string) $message['content'];
+            }
         }
+        self::assertNotNull($feedback, 'the refusal was carried back to the model');
+        self::assertStringContainsString('invalid_arguments', $feedback);
+        self::assertStringContainsString('TASKLOOM_SESSION_WRITE_MAX_CHARS', $feedback);
+
+        // And nothing persisted.
+        self::assertSame([], $this->memories->findNotesFor((int) $task->getId()));
+    }
+
+    public function testARunKindTaskNeverSeesTheHarnessTools(): void
+    {
+        $this->catalogTool('get_weather');
+        $task = $this->runKindTask();
+        $run = $this->craftRun($task);
+
+        $chats = [];
+        $this->llm->method('chat')->willReturnCallback(
+            function (array $messages, array $tools) use (&$chats): LlmResponse {
+                $chats[] = [$messages, $tools];
+
+                return $this->response(content: 'Plain completion.');
+            },
+        );
+
+        $this->bus()->dispatch(new LlmTurnMessage((int) $run->getId(), 1));
+        $this->pump();
+
+        self::assertCount(1, $chats);
+        $names = array_column(array_column($chats[0][1], 'function'), 'name');
+        self::assertSame(['get_weather'], $names, 'the harness vocabulary is a session\'s alone');
+        self::assertStringNotContainsString('session_note', (string) json_encode($chats[0][1]));
     }
 
     // --------------------------------------------------------------- helpers
-
-    private function wireToolRoundTrip(): void
-    {
-        $this->executor->method('validate')->willReturn([]);
-        $this->executor->method('execute')->willReturn(['tool' => 'get_weather', 'content' => 'sunny', 'isError' => false, 'durationMs' => 5]);
-    }
 
     /**
      * The run a session's first slice will create, crafted exactly as
@@ -226,7 +284,7 @@ final class SessionMemoryInjectionTest extends KernelTestCase
 
     private function sessionTask(): Task
     {
-        $task = new Task('Importer session', 'Keep working the importer.', TaskKind::Session, ToolboxMode::Explicit, ['get_weather'], TaskAuthor::User);
+        $task = new Task('Importer session', 'Keep working the importer.', TaskKind::Session, ToolboxMode::Explicit, [], TaskAuthor::User);
         $task->enable();
         $this->em->persist($task);
         $this->em->flush();
@@ -245,11 +303,22 @@ final class SessionMemoryInjectionTest extends KernelTestCase
     }
 
     /**
-     * Drive every lane until it settles — what `messenger:consume llm tools`
-     * does in production, one message at a time, with the stamps a worker
-     * attaches. Mirrors RunEngineAsyncFlowTest, deliberately: the lanes here
-     * ARE the production routing.
+     * The tool_result events' payloads (tool, content, origin), in order.
+     *
+     * @return list<array<string, mixed>>
      */
+    private function toolResults(Run $run): array
+    {
+        $results = [];
+        foreach ($run->getEvents() as $event) {
+            if (RunEventType::ToolResult === $event->getType()) {
+                $results[] = $event->getPayload();
+            }
+        }
+
+        return $results;
+    }
+
     private function pump(int $maxDeliveries = 50): void
     {
         for ($i = 0; $i < $maxDeliveries; ++$i) {

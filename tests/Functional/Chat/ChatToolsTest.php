@@ -547,7 +547,7 @@ final class ChatToolsTest extends KernelTestCase
     {
         $tool = $this->seedTool('get_weather', ['weather']);
 
-        $snapshot = ToolboxSnapshot::fromTools([$tool]);
+        $snapshot = ToolboxSnapshot::fromDefinitions([$tool]);
         $rebuilt = ChatToolbox::of(ToolboxMode::Tags, ['weather'], $snapshot)->tools();
 
         self::assertCount(1, $rebuilt);
@@ -569,7 +569,7 @@ final class ChatToolsTest extends KernelTestCase
         $resolver = static::getContainer()->get(\App\RunEngine\ToolboxResolver::class);
         $tools = $resolver->resolveChat(ToolboxMode::Tags, $tags);
 
-        return ChatToolbox::of(ToolboxMode::Tags, $tags, ToolboxSnapshot::fromTools($tools));
+        return ChatToolbox::of(ToolboxMode::Tags, $tags, ToolboxSnapshot::fromDefinitions($tools));
     }
 
     private function newChat(): Chat

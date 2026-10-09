@@ -487,7 +487,7 @@ final class RunGraph
                 default => $this->prompts->compile($task, $tools),
             };
 
-            $child->setToolboxSnapshot(ToolboxSnapshot::fromTools($tools));
+            $child->setToolboxSnapshot(ToolboxSnapshot::fromDefinitions($tools));
             $child->setCheckpoint((new LoopState(
                 stepBudget: $this->budgets['step_budget'] ?? 50,
                 toolRetries: $this->budgets['tool_retries'] ?? 2,
