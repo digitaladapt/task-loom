@@ -14,8 +14,11 @@ SPEC §9 and the deferred items it names; touches SPEC §4.1, §4.4, §5.6, §6.
 > continuation unit; preemption was always the every-turn yield of §7.2, never
 > the slice boundary. §14 records all three.
 
-> **Where this stands.** Build order step 1 has **landed**: the half-built
-> `session` label can no longer mis-run. `App\Entity\TaskKind` carries
+> **Where this stands.** Build order step 1 has **landed** and step 2 is
+> **landed**: the half-built `session` label can no longer mis-run, and the
+> memory store and its `## Memories` block are built (the store, the caps,
+> the renderer, and the per-request injection seam — see step 2 below).
+> `App\Entity\TaskKind` carries
 > `case Session = 'session'` and `TaskCrud::coerceKind()` still accepts
 > `"run" or "session"` on the wire, but a new `TaskKind::isImplemented()`
 > predicate is the single switch, and four gates refuse the unimplemented
@@ -26,7 +29,7 @@ SPEC §9 and the deferred items it names; touches SPEC §4.1, §4.4, §5.6, §6.
 > and the scheduler). Every refusal names the reason
 > (`SessionKindUnsupportedException`), and the scheduler's is a classified
 > failed run — loud, never a silent skip. The predicate and its callers go
-> away in one reviewable change when the engine lands. Steps 2–7 remain
+> away in one reviewable change when the engine lands. Steps 3–7 remain
 > **not built**; what remains is to build them in the order of §12.
 >
 > One piece *was* half-built and worth remembering as the trap this gate
@@ -672,10 +675,21 @@ matching the existing lanes. Concurrency is the existing
    and update), enable/approve, the editor parser, and dispatch; each caller
    translates the refusal into its own vocabulary (MCP tool error, field
    error, lifecycle refusal, CLI error, classified scheduler failure).
-2. **The store + the block.** `SessionMemory` and `SessionMemoryRevision`,
-   `SessionMemoryStore`, the read/inject path at `buildMessages`, the caps,
-   `## Memories` rendering. *No slices yet* — this is provable against a single
-   long run.
+2. ~~**The store + the block.**~~ **Done** (2026-10-09).
+   `SessionMemory` and `SessionMemoryRevision`, `SessionMemoryRepository`,
+   `SessionMemoryStore` (the single writer, the hot/cold caps, ageing, the
+   per-write cap, the objective singleton with its replacement history), and
+   `SessionMemoryRenderer` (the `## Memories` block: objective first with its
+   source, notes tagged `[operator]`/`[you]`, the percentage backstop
+   dropping oldest notes whole). Injected at `ContextWindow::buildMessages`
+   — after the head, before the kept exchanges, on the `assistant` role,
+   counted in the request's fixed cost — and rebuilt from the store on
+   **every request**, so an operator edit lands on the next one. The
+   dispatch gate stays (it goes away with step 4); the proof drives the
+   real lanes on a crafted run, and no session is dispatchable yet.
+   `TASKLOOM_SESSION_HOT` / `_COLD` / `_WRITE_MAX_CHARS` /
+   `_MAX_MEMORY_PCT` are wired through `config/services.yaml`, both compose
+   files, and `.env.example`.
 3. **The write tools.** `session_note` and `session_objective`, and SPEC §4.1's
    harness-tool clause.
 4. **The slice engine.** `session_declare` and settle-on-declare, the

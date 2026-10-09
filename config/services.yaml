@@ -41,6 +41,14 @@ parameters:
     TASKLOOM_MAX_TOOL_OUTPUT_PCT: 15
     TASKLOOM_MAX_INPUT_ARTIFACT_PCT: 50
     TASKLOOM_WINDOW_TAIL_EXCHANGES: 10
+    # Session memory (docs/design/SESSION_TASKS.md §3.3): the store's four
+    # caps. The block's own percentage is separate from the Inputs cap on
+    # purpose — memory and inputs are different kinds of never-pruned
+    # content, and one knob should not tune the other.
+    TASKLOOM_SESSION_HOT: 5
+    TASKLOOM_SESSION_COLD: 25
+    TASKLOOM_SESSION_WRITE_MAX_CHARS: 2000
+    TASKLOOM_SESSION_MAX_MEMORY_PCT: 10
     TASKLOOM_STEP_BUDGET: 50
     TASKLOOM_TOOL_RETRIES: 2
     TASKLOOM_CIRCUIT_BREAKER: 3
@@ -184,6 +192,21 @@ services:
             $maxToolOutputPct: '%env(float:default:TASKLOOM_MAX_TOOL_OUTPUT_PCT:TASKLOOM_MAX_TOOL_OUTPUT_PCT)%'
             $windowTailExchanges: '%env(int:default:TASKLOOM_WINDOW_TAIL_EXCHANGES:TASKLOOM_WINDOW_TAIL_EXCHANGES)%'
             $maxInputArtifactPct: '%env(float:default:TASKLOOM_MAX_INPUT_ARTIFACT_PCT:TASKLOOM_MAX_INPUT_ARTIFACT_PCT)%'
+            # The rendered `## Memories` block's own percentage
+            # (docs/design/SESSION_TASKS.md §3.3) — the backstop behind the
+            # store's count caps.
+            $maxSessionMemoryPct: '%env(float:default:TASKLOOM_SESSION_MAX_MEMORY_PCT:TASKLOOM_SESSION_MAX_MEMORY_PCT)%'
+
+    # The session memory store (docs/design/SESSION_TASKS.md §3, build order
+    # step 2): the single writer of a session's memory, and the keeper of its
+    # caps. The write-size cap lives here rather than in the tools because it
+    # bounds ONE write — the count caps cannot, and a single unbounded write
+    # is as bad for the singleton objective as for a note (§3.3).
+    App\Session\SessionMemoryStore:
+        arguments:
+            $hotCap: '%env(int:default:TASKLOOM_SESSION_HOT:TASKLOOM_SESSION_HOT)%'
+            $coldCap: '%env(int:default:TASKLOOM_SESSION_COLD:TASKLOOM_SESSION_COLD)%'
+            $writeMaxChars: '%env(int:default:TASKLOOM_SESSION_WRITE_MAX_CHARS:TASKLOOM_SESSION_WRITE_MAX_CHARS)%'
 
     # The grounding block (SPEC §4.2 / §5.6). Same required deployment
     # timezone as the scheduler: the block states the wall-clock time the
@@ -223,6 +246,13 @@ services:
                 step_budget: '%env(int:default:TASKLOOM_STEP_BUDGET:TASKLOOM_STEP_BUDGET)%'
                 tool_retries: '%env(int:default:TASKLOOM_TOOL_RETRIES:TASKLOOM_TOOL_RETRIES)%'
                 circuit_breaker: '%env(int:default:TASKLOOM_CIRCUIT_BREAKER:TASKLOOM_CIRCUIT_BREAKER)%'
+            # The `## Memories` seam (docs/design/SESSION_TASKS.md §4.1,
+            # build order step 2). Named explicitly so the wiring is visible
+            # here rather than inferred: this is the first mutable,
+            # per-request section a run request has ever had, and it should
+            # be a deliberate line in the config, not a side effect of a
+            # type-hint.
+            $sessionMemory: '@App\Session\SessionMemoryRenderer'
 
     # The step model's run graph (SPEC §13.3): same budgets as the engine —
     # a child run's constitution is frozen with the same knobs a standalone

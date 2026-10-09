@@ -14,12 +14,14 @@ use App\Entity\RunEventType;
 use App\Entity\RunStatus;
 use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
+use App\Entity\TaskKind;
 use App\Entity\Tool;
 use App\Llm\LlmClientInterface;
 use App\Llm\LlmRequestException;
 use App\Message\LlmTurnMessage;
 use App\Message\ToolTurnMessage;
 use App\Repository\RunRepository;
+use App\Session\SessionMemoryRenderer;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\EntityNotFoundException;
 use Psr\Log\LoggerInterface;
@@ -97,6 +99,7 @@ final class RunEngine
         private readonly RunGraph $graph,
         private readonly array $budgets = [],
         private readonly ?MessageBusInterface $bus = null,
+        private readonly ?SessionMemoryRenderer $sessionMemory = null,
     ) {
     }
 
@@ -471,6 +474,36 @@ final class RunEngine
     }
 
     /**
+     * The rendered `## Memories` block for a session run, or null for an
+     * ordinary run (docs/design/SESSION_TASKS.md §4.1, build order step 2).
+     *
+     * Rebuilt from the store on EVERY request — that is the point of the
+     * seam: the head is frozen, the memory is not, so an operator edit
+     * lands on the session's next request rather than at a slice boundary.
+     * Only a session-kind task gets a block; a run-kind task's store is
+     * empty by construction (the store refuses writes for it), so the
+     * branch is about attribution, not just cost — a block must never be
+     * attributed to a run that is not a session.
+     *
+     * Note the placement: this is called on the LLM-turn path only. The
+     * block is a request input, not checkpoint state, so nothing about it
+     * is persisted — a crash and resume re-reads the store and rebuilds it.
+     */
+    private function sessionMemoryBlockFor(Run $run): ?string
+    {
+        if (null === $this->sessionMemory) {
+            return null;
+        }
+
+        $task = $run->getTask();
+        if (TaskKind::Session !== $task->getKind()) {
+            return null;
+        }
+
+        return $this->sessionMemory->render($task);
+    }
+
+    /**
      * Create the run with its frozen constitution (SPEC §4.1): resolved
      * toolbox snapshot (enriched, so no turn ever needs the catalog) and
      * the initial checkpoint — budgets, the compiled prompt head, empty
@@ -552,7 +585,7 @@ final class RunEngine
         $toolDescriptors = $this->prompts->toolsToOpenAi($tools);
 
         try {
-            $fit = $this->context->buildMessages($state->promptHead, $state->exchanges, $toolDescriptors);
+            $fit = $this->context->buildMessages($state->promptHead, $state->exchanges, $toolDescriptors, $this->sessionMemoryBlockFor($run));
             $this->recordTrim($run, $fit);
             $response = $this->llm->chat($fit->messages, $toolDescriptors);
         } catch (ContextExhaustedException $e) {
