@@ -16,12 +16,17 @@ use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
 use App\Entity\TaskKind;
 use App\Entity\Tool;
+use App\Entity\ToolDefinition;
 use App\Llm\LlmClientInterface;
 use App\Llm\LlmRequestException;
 use App\Message\LlmTurnMessage;
 use App\Message\ToolTurnMessage;
 use App\Repository\RunRepository;
 use App\Session\SessionMemoryRenderer;
+use App\Session\SessionMemoryWriteException;
+use App\Session\SessionTool;
+use App\Session\SessionToolRunner;
+use App\Toolbox\ToolSchemaValidator;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\EntityNotFoundException;
 use Psr\Log\LoggerInterface;
@@ -100,6 +105,7 @@ final class RunEngine
         private readonly array $budgets = [],
         private readonly ?MessageBusInterface $bus = null,
         private readonly ?SessionMemoryRenderer $sessionMemory = null,
+        private readonly ?SessionToolRunner $sessionToolRunner = null,
     ) {
     }
 
@@ -515,7 +521,7 @@ final class RunEngine
         $tools = $this->resolver->resolve($task);
 
         $run = new Run($task);
-        $run->setToolboxSnapshot(ToolboxSnapshot::fromTools($tools));
+        $run->setToolboxSnapshot(ToolboxSnapshot::fromDefinitions($tools));
 
         $state = new LoopState(
             stepBudget: $this->budgets['step_budget'] ?? 50,
@@ -574,7 +580,7 @@ final class RunEngine
         // The toolbox comes from the run's snapshot, never the catalog: the
         // run's constitution does not move (SPEC §4.1), even mid-run, even
         // if the tool was renamed, re-schematized, or deleted in between.
-        $tools = ToolboxSnapshot::toTools($run->getToolboxSnapshot());
+        $tools = ToolboxSnapshot::toDefinitions($run->getToolboxSnapshot());
         $state->promptHead ??= $this->prompts->compile($run->getTask(), $tools);
 
         // The tool definitions travel on the same request as the messages,
@@ -695,7 +701,7 @@ final class RunEngine
         }
 
         $toolMap = [];
-        foreach (ToolboxSnapshot::toTools($run->getToolboxSnapshot()) as $tool) {
+        foreach (ToolboxSnapshot::toDefinitions($run->getToolboxSnapshot()) as $tool) {
             $toolMap[$tool->getName()] = $tool;
         }
 
@@ -743,7 +749,16 @@ final class RunEngine
      * Execute one tool call: validate → dispatch → result, with retries
      * feeding errors back to the model (§5.1, §5.2).
      *
-     * @param array<string, Tool>                                              $toolMap
+     * Two dispatch routes, told apart by the tool itself (SPEC §4.1's
+     * harness-tool clause, docs/design/SESSION_TASKS.md §5): a catalog tool
+     * goes over the wire through {@see ToolExecutorInterface}; a harness
+     * session tool runs in-process through {@see SessionToolRunner} — never
+     * a server, never a request. The validate → feedback discipline is
+     * shared: the same schema checker, the same error-feedback shape, so a
+     * malformed harness call and a malformed MCP call teach the model the
+     * same lesson.
+     *
+     * @param array<string, ToolDefinition>                                    $toolMap
      * @param array{id: string, name: string, arguments: array<string, mixed>} $call
      *
      * @return array{toolCallId: string, content: string}
@@ -756,7 +771,11 @@ final class RunEngine
 
         $tool = $toolMap[$toolName] ?? null;
 
-        if (null === $tool) {
+        if ($tool instanceof SessionTool) {
+            return $this->executeHarnessToolCall($run, $tool, $call);
+        }
+
+        if (!$tool instanceof Tool) {
             // Prompt-injection mitigation by construction: a tool outside
             // the frozen toolbox never dispatches (SPEC §2.1, §4.1).
             $this->appendEvent(
@@ -858,6 +877,96 @@ final class RunEngine
 
             return ['toolCallId' => $callId, 'content' => $cappedContent];
         }
+    }
+
+    /**
+     * Execute one harness session tool (SPEC §4.1's harness-tool clause,
+     * docs/design/SESSION_TASKS.md §5): validate, run in-process, record —
+     * the MCP path with the transport removed and the memory store
+     * underneath.
+     *
+     * A refusal is the model's to fix, not the harness's to retry: a write
+     * the store refuses (over the per-write cap, blank) comes back as
+     * `invalid_arguments` feedback naming the knob, exactly as a schema
+     * refusal does on the MCP side. The engine's tool-retry loop is not
+     * engaged — the retry is the model's next turn, with the feedback in
+     * hand.
+     *
+     * @param array{id: string, name: string, arguments: array<string, mixed>} $call
+     *
+     * @return array{toolCallId: string, content: string}
+     */
+    private function executeHarnessToolCall(Run $run, SessionTool $tool, array $call): array
+    {
+        $callId = $call['id'];
+        $toolName = $tool->getName();
+        $arguments = $call['arguments'];
+
+        if (null === $this->sessionToolRunner) {
+            throw new \LogicException(\sprintf('The run engine has no session tool runner — harness call "%s" cannot dispatch. Wire App\\Session\\SessionToolRunner in services.yaml.', $toolName));
+        }
+
+        $errors = ToolSchemaValidator::validate($tool->getSchema(), $arguments);
+
+        if ([] !== $errors) {
+            $this->appendEvent(
+                $run,
+                RunEventType::ToolValidationError,
+                ['tool' => $toolName, 'detail' => implode('; ', $errors), 'origin' => 'harness', 'attempt' => 1, 'toolCallId' => $callId],
+                errorClass: ErrorClass::InvalidArguments,
+                attemptNo: 1,
+            );
+            $this->em->flush();
+
+            return [
+                'toolCallId' => $callId,
+                'content' => ToolCallPrimitives::errorFeedbackJson('invalid_arguments', $toolName, implode('; ', $errors), 1),
+            ];
+        }
+
+        $this->appendEvent(
+            $run,
+            RunEventType::ToolCall,
+            ['tool' => $toolName, 'arguments' => $arguments, 'origin' => 'harness', 'attempt' => 1, 'toolCallId' => $callId],
+            attemptNo: 1,
+        );
+
+        $start = microtime(true);
+
+        try {
+            $content = $this->sessionToolRunner->call($tool, $arguments, $run->getTask());
+        } catch (SessionMemoryWriteException $e) {
+            // The store refused the write. Same shape as a schema refusal on
+            // the MCP side: classified, recorded, fed back.
+            $this->appendEvent(
+                $run,
+                RunEventType::ToolResult,
+                ['tool' => $toolName, 'detail' => $e->getMessage(), 'origin' => 'harness', 'attempt' => 1, 'toolCallId' => $callId],
+                errorClass: ErrorClass::InvalidArguments,
+                attemptNo: 1,
+            );
+            $this->em->flush();
+
+            return [
+                'toolCallId' => $callId,
+                'content' => ToolCallPrimitives::errorFeedbackJson('invalid_arguments', $toolName, $e->getMessage(), 1),
+            ];
+        }
+
+        // The same result cap as the MCP side: whatever a harness tool
+        // returns is bounded before it is recorded or sent back.
+        $cappedContent = $this->context->capToolResult($content);
+
+        $this->appendEvent(
+            $run,
+            RunEventType::ToolResult,
+            ['tool' => $toolName, 'content' => $cappedContent, 'isError' => false, 'origin' => 'harness', 'attempt' => 1, 'toolCallId' => $callId],
+            attemptNo: 1,
+            durationMs: (int) round((microtime(true) - $start) * 1000),
+        );
+        $this->em->flush();
+
+        return ['toolCallId' => $callId, 'content' => $cappedContent];
     }
 
     /**

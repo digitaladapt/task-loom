@@ -246,7 +246,7 @@ final class ChatController extends AbstractController
         return ChatToolbox::of(
             $selection->mode,
             $selection->declared,
-            \App\RunEngine\ToolboxSnapshot::fromTools($resolved),
+            \App\RunEngine\ToolboxSnapshot::fromDefinitions($resolved),
         );
     }
 

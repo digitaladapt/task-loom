@@ -9,14 +9,11 @@ use App\Entity\ServerProtocol;
 use App\Entity\Tool;
 use App\Toolbox\CredentialResolutionException;
 use App\Toolbox\CredentialResolver;
-use App\Toolbox\SchemaNormalizer;
+use App\Toolbox\ToolSchemaValidator;
 use Mcp\Client;
 use Mcp\Client\Transport\HttpTransport;
 use Mcp\Schema\Content\TextContent;
 use Mcp\Schema\Result\CallToolResult;
-use Opis\JsonSchema\Errors\ValidationError;
-use Opis\JsonSchema\Exceptions\ParseException as SchemaParseException;
-use Opis\JsonSchema\Validator;
 
 /**
  * Executes one tool call: schema validation, then dispatch over MCP
@@ -43,6 +40,12 @@ final class ToolExecutor implements ToolExecutorInterface
     /**
      * Validate arguments against the tool's JSON Schema (validate-before-dispatch, SPEC §5.1).
      *
+     * The checking itself lives in {@see ToolSchemaValidator} — one
+     * implementation shared with the harness's own tools
+     * (docs/design/SESSION_TASKS.md §5), so the same malformed call cannot
+     * get two different verdicts depending on which side of the toolbox it
+     * landed on.
+     *
      * @param array<string, mixed> $arguments
      *
      * @return list<string> validation errors; empty = valid
@@ -50,43 +53,7 @@ final class ToolExecutor implements ToolExecutorInterface
     #[\Override]
     public function validate(Tool $tool, array $arguments): array
     {
-        $schema = $tool->getSchema();
-
-        if ([] === $schema) {
-            return []; // no schema recorded — nothing to validate against
-        }
-
-        $validator = new Validator();
-
-        try {
-            // SchemaNormalizer repairs the JSON-object members (empty
-            // `properties` and friends) that Doctrine's JSON round-trip
-            // decodes to arrays — a parameterless tool must validate, not
-            // fail.
-            $result = $validator->validate($this->toObject($arguments), $this->toObject(SchemaNormalizer::normalize($schema)));
-        } catch (SchemaParseException $e) {
-            // A schema the validator cannot parse even after normalization
-            // is corrupt catalog data, not an invalid tool call — and it
-            // must never wedge the run by escaping the engine's
-            // classify-and-record discipline. Reject the call loudly as
-            // invalid_arguments so the run records a diagnosis instead of
-            // dying on delivery.
-            return [\sprintf('the tool\'s recorded schema is not a valid JSON Schema (%s); refusing to dispatch', $e->getMessage())];
-        }
-
-        if ($result->isValid()) {
-            return [];
-        }
-
-        $errors = [];
-        $error = $result->error();
-        if (null !== $error) {
-            foreach ($this->flattenValidationError($error) as $sub) {
-                $errors[] = $sub;
-            }
-        }
-
-        return $errors;
+        return ToolSchemaValidator::validate($tool->getSchema(), $arguments);
     }
 
     /**
@@ -136,22 +103,6 @@ final class ToolExecutor implements ToolExecutorInterface
         }
 
         return $this->resultToArray($result, $tool, $start);
-    }
-
-    /**
-     * @return list<string>
-     */
-    private function flattenValidationError(ValidationError $error): array
-    {
-        $errors = [$error->message()];
-
-        foreach ($error->subErrors() as $sub) {
-            foreach ($this->flattenValidationError($sub) as $msg) {
-                $errors[] = $msg;
-            }
-        }
-
-        return $errors;
     }
 
     /**
@@ -211,16 +162,5 @@ final class ToolExecutor implements ToolExecutorInterface
     private function describe(\Throwable $e): string
     {
         return $e::class.': '.$e->getMessage();
-    }
-
-    /**
-     * Convert an associative array to stdClass for opis validation
-     * (opis expects objects at the document root).
-     *
-     * @param array<string, mixed> $data
-     */
-    private function toObject(array $data): \stdClass
-    {
-        return json_decode((string) json_encode($data)) ?: new \stdClass();
     }
 }

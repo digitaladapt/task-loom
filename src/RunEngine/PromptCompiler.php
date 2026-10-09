@@ -8,7 +8,7 @@ use App\Context\ContextWindow;
 use App\Context\Grounding;
 use App\Entity\Step;
 use App\Entity\Task;
-use App\Entity\Tool;
+use App\Entity\ToolDefinition;
 use App\Toolbox\SchemaNormalizer;
 
 /**
@@ -49,7 +49,7 @@ final readonly class PromptCompiler
     }
 
     /**
-     * @param list<Tool> $tools the frozen toolbox
+     * @param list<ToolDefinition> $tools the frozen toolbox
      *
      * @return array{system: string, user: string}
      */
@@ -71,8 +71,8 @@ final readonly class PromptCompiler
      * $inputs are the declared outputs of the step's dependencies (§13.4),
      * labeled and frozen into the head; a root step compiles with none.
      *
-     * @param list<Tool>       $tools  the step's frozen toolbox
-     * @param list<StepOutput> $inputs the dependencies' outputs, in edge order
+     * @param list<ToolDefinition> $tools  the step's frozen toolbox
+     * @param list<StepOutput>     $inputs the dependencies' outputs, in edge order
      *
      * @return array{system: string, user: string}
      */
@@ -94,8 +94,8 @@ final readonly class PromptCompiler
      * outputs, labeled — not just the leaves'. The completion declaration is
      * the task's result, synthesized from those outputs.
      *
-     * @param list<Tool>       $tools  the task's frozen toolbox
-     * @param list<StepOutput> $inputs every step's output, in display order
+     * @param list<ToolDefinition> $tools  the task's frozen toolbox
+     * @param list<StepOutput>     $inputs every step's output, in display order
      *
      * @return array{system: string, user: string}
      */
@@ -111,7 +111,7 @@ final readonly class PromptCompiler
     /**
      * OpenAI tool descriptors for the frozen toolbox.
      *
-     * @param list<Tool> $tools
+     * @param list<ToolDefinition> $tools
      *
      * @return list<array<string, mixed>>
      */
@@ -141,8 +141,8 @@ final readonly class PromptCompiler
     }
 
     /**
-     * @param list<Tool>       $tools
-     * @param list<StepOutput> $inputs
+     * @param list<ToolDefinition> $tools
+     * @param list<StepOutput>     $inputs
      */
     private function compileSystem(string $title, string $brief, array $tools, ?string $note = null, array $inputs = []): string
     {
@@ -196,7 +196,7 @@ final readonly class PromptCompiler
      * still true to the run (the model really does have nothing to call),
      * and an empty section reads as a formatting bug.
      *
-     * @param list<Tool> $tools
+     * @param list<ToolDefinition> $tools
      */
     private function compileToolbox(array $tools): string
     {

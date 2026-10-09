@@ -19,7 +19,7 @@ use Doctrine\ORM\Mapping as ORM;
 #[ORM\Entity(repositoryClass: ToolRepository::class)]
 #[ORM\UniqueConstraint(name: 'uniq_tool_server_name', columns: ['server_id', 'name'])]
 #[ORM\HasLifecycleCallbacks]
-class Tool
+class Tool implements ToolDefinition
 {
     #[ORM\Id]
     #[ORM\GeneratedValue]
@@ -100,11 +100,13 @@ class Tool
         return $this->server;
     }
 
+    #[\Override]
     public function getName(): string
     {
         return $this->name;
     }
 
+    #[\Override]
     public function getDescription(): ?string
     {
         return $this->description;
@@ -129,6 +131,7 @@ class Tool
     /**
      * @return array<string, mixed>
      */
+    #[\Override]
     public function getSchema(): array
     {
         return $this->schema;

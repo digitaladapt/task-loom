@@ -118,6 +118,17 @@ except the process.
   discovered catalog (`task.tags ∩ tool.tags`).
 - Resolution happens once, at run start. **No mid-run tool expansion** — deliberate.
   There is no `request_tool` escape hatch in v1.
+- **A session's toolbox also carries the harness's own session tools** — the first
+  built-in tools (`session_note`, `session_objective`; build order steps 3–4 of
+  `docs/design/SESSION_TASKS.md` add `session_declare` with the slice engine). A
+  session's frozen toolbox is its operator-selected MCP tools **plus** the harness
+  tools; the harness tools are fixed too — the model cannot call them into existence,
+  and cannot write anything the tools do not express — but the *whole toolbox* is
+  frozen at slice start exactly as before. A session may resolve to zero MCP tools
+  (the harness tools remain); an ordinary task may not. The harness tool names are
+  reserved: a catalog tool carrying one is refused at resolution, not shadowed at
+  dispatch. Harness entries ride the same frozen snapshot, marked `origin: harness`
+  and carrying no server or credential — there is nowhere to call out to.
 - The prompt contains: preamble + the task (title, and optionally the brief) + toolbox
   schemas + completion instruction + grounding block + trimmed window. Nothing else.
   Nothing a tool returns is ever treated as instructions.

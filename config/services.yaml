@@ -253,6 +253,13 @@ services:
             # be a deliberate line in the config, not a side effect of a
             # type-hint.
             $sessionMemory: '@App\Session\SessionMemoryRenderer'
+            # The in-process dispatch of the harness's own session tools
+            # (docs/design/SESSION_TASKS.md §5, build order step 3). A
+            # harness call never crosses the wire — it lands in the same
+            # memory store the block renders from — so the runner is a
+            # separate collaborator from the MCP executor on purpose:
+            # "which transport" is decided by the tool, not the toolbox.
+            $sessionToolRunner: '@App\Session\SessionToolRunner'
 
     # The step model's run graph (SPEC §13.3): same budgets as the engine —
     # a child run's constitution is frozen with the same knobs a standalone
