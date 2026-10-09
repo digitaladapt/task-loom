@@ -485,7 +485,13 @@ final class EntrypointSupervisorTest extends TestCase
             'TASKLOOM_TOOL_MAX_CONCURRENCY' => '1',
         ]);
 
-        $this->waitFor(fn (): bool => 2 === $this->countLines('LLM WORKER up') && 1 === $this->countLines('TOOLS WORKER up'));
+        $this->waitFor(fn (): bool => 2 === $this->countLines('LLM WORKER up')
+            && 1 === $this->countLines('TOOLS WORKER up')
+            // The scheduler is spawned after the workers, but asserted on
+            // below like the rest of the fleet: signal only once every
+            // process the test asserts about has announced itself (and, by
+            // the stub's trap-then-echo ordering, is ready for TERM).
+            && 1 === $this->countLines('SCHEDULER up'));
 
         $process->signal(\SIGTERM);
         $process->wait();
@@ -722,17 +728,24 @@ final class EntrypointSupervisorTest extends TestCase
                 # chat-aware ones (SPEC §15), so the pattern has to name the
                 # lane list rather than just the run lane.
                 *"messenger:consume chat llm"*)
-                    echo "LLM WORKER up" >> "$SANDBOX/worker.log"
+                    # Trap before announcing: "up" is the test's cue that this
+                    # process is ready to receive TERM, so the handler must
+                    # already be installed when it prints — a signal landing
+                    # in the gap between the echo and the trap would kill the
+                    # process with no "got TERM" line and flake shutdown
+                    # assertions. (A real worker installs its handler at boot,
+                    # before it does any work.)
                     trap 'echo "LLM WORKER got TERM" >> "$SANDBOX/worker.log"; exit 0' TERM
+                    echo "LLM WORKER up" >> "$SANDBOX/worker.log"
                     if [ -n "${STUB_LLM_CRASH_AFTER:-}" ]; then sleep "$STUB_LLM_CRASH_AFTER"; exit 9; fi
                     while :; do sleep 0.2; done ;;
                 *"messenger:consume tools"*)
-                    echo "TOOLS WORKER up" >> "$SANDBOX/worker.log"
                     trap 'echo "TOOLS WORKER got TERM" >> "$SANDBOX/worker.log"; exit 0' TERM
+                    echo "TOOLS WORKER up" >> "$SANDBOX/worker.log"
                     while :; do sleep 0.2; done ;;
                 *"app:schedule:run"*)
-                    echo "SCHEDULER up" >> "$SANDBOX/worker.log"
                     trap 'echo "SCHEDULER got TERM" >> "$SANDBOX/worker.log"; exit 0' TERM
+                    echo "SCHEDULER up" >> "$SANDBOX/worker.log"
                     if [ -n "${STUB_SCHEDULER_CRASH_AFTER:-}" ]; then sleep "$STUB_SCHEDULER_CRASH_AFTER"; exit 9; fi
                     while :; do sleep 0.2; done ;;
                 *) echo "unexpected php call: $*" >&2; exit 3 ;;
@@ -741,13 +754,14 @@ final class EntrypointSupervisorTest extends TestCase
 
         $this->write($this->bin.'/frankenphp', <<<'SH'
             #!/usr/bin/env bash
-            echo "WEB up" >> "$SANDBOX/web.log"
-
+            # Trap before announcing, same reason as the php stub: "WEB up" is
+            # the readiness cue startServe() waits on.
             if [ -n "${STUB_WEB_WEDGE:-}" ]; then
                 trap '' TERM
             else
                 trap 'echo "WEB got TERM" >> "$SANDBOX/web.log"; exit 0' TERM
             fi
+            echo "WEB up" >> "$SANDBOX/web.log"
 
             if [ -n "${STUB_WEB_EXIT_AFTER:-}" ]; then
                 sleep "$STUB_WEB_EXIT_AFTER"
