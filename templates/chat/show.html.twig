@@ -114,6 +114,14 @@
     exchange's choice, pre-filling the next message. So what you see ticked is
     what you chose, and what she can do is never a thing you have to remember.
 
+    COLLAPSED, the same as the new-conversation picker (`_toolbox.html.twig`
+    explains the `collapsed` argument): the form is a message box with a
+    permission panel folded above the Send button, not the other way round.
+    The disclosure is legitimate alongside the `disabled` flag above — a shut
+    drawer still carries the frozen toolbox in its summary and its hidden
+    inputs, so nothing is lost by folding it, and a hand-rolled POST that tries
+    to change the toolbox mid-reply is refused by the controller either way.
+
     That includes *unticking everything*: if the last exchange ran with no
     tools, this renders nothing ticked. That is a real answer being carried,
     not an absence of one — which is why the engine freezes an empty
@@ -129,7 +137,8 @@
         catalog_tools,
         errors|default({}),
         'chat_toolbox',
-        pending
+        pending,
+        true
     ) }}
 
     <label for="say-message" class="visually-hidden">Message</label>
