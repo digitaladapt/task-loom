@@ -43,8 +43,117 @@
     and never the other way round. Seeding both from the same stored list is
     how a tags task used to arrive with its tags pasted into the tool-name
     field, ready to be saved as tool names by an accidental mode switch.
+
+    ## `collapsed` — the picker behind a disclosure
+
+    `collapsed` wraps the whole picker in a `<details>` and **defaults to
+    false**, so this is a no-op for every caller that does not ask for it (the
+    task editor still shows the picker flat, because there the picker *is* the
+    point of the page). The two chat pages ask for it: there the picker is a
+    permission panel sitting between the box you type in and the Send button,
+    and a screenful of tool vocabulary you did not come to read is the one
+    thing in the way of the conversation.
+
+    Folding it hides the *choosing*, not the answer. The summary states the
+    current declaration, and the declaration itself travels in hidden inputs
+    inside the `<details>` — read the block below the summary before changing
+    either, because "the summary is a report and the inputs are the answer" is
+    the whole reason this is safe.
+
+    `open` is deliberately absent: nothing remembers that it was open, and a
+    server-side default of "open" would un-collapse it for everyone. That also
+    decides where the `errors[group]` message goes — it is rendered *outside*
+    the `<details>`, as a sibling, so a refused submission can never slide its
+    complaint into a shut drawer and leave the page looking as though it
+    silently did nothing. (The chat pages do not populate `errors` at all; the
+    task editor does, and does not collapse, so this holds for both.)
 #}
-{% macro toolbox(prefix, values, tags, tools, errors, group, disabled = false) %}
+{% macro toolbox(prefix, values, tags, tools, errors, group, disabled = false, collapsed = false) %}
+{% if collapsed %}
+{#
+    The summary is what makes a collapsed picker usable: without it, shutting
+    the drawer would hide the answer to "what can she do right now?", which is
+    the property the whole permission surface was designed around.
+
+    The names come from copies taken here rather than from the `{% set %}`s
+    further down. Twig scopes a `set` to the body of the block it appears in,
+    and those assignments sit at macro scope *after* this branch — so reading
+    them here would be reading a variable that does not exist yet (and trips
+    `strict_variables`, which the test environment turns on). `values` and
+    `errors` are arguments, so they are in scope, and neither is `|default`ed
+    on purpose: a default would silently paper over a caller that forgot one.
+
+    Only the ACTIVE mode's list is reported. The inactive one is an artefact
+    of keeping both panels in the DOM, not part of the answer, and
+    `ToolboxSelection` does not read it — the summary says what was chosen,
+    not what is lying around.
+#}
+{% set summary_mode = values.toolbox_mode|default('tags') %}
+{% set summary_declared = values.toolbox|default([]) %}
+{% set summary_is_tag = summary_mode == 'tags' %}
+{% set summary_catalog_names = tools|map(t => t.name) %}
+{# A declaration the catalog no longer carries still counts as declared. #}
+{% set summary_known = summary_is_tag
+    ? summary_declared|filter(v => v in tags)
+    : summary_declared|filter(v => v in summary_catalog_names) %}
+{% set summary_unknown = summary_is_tag
+    ? summary_declared|filter(v => v not in tags)
+    : summary_declared|filter(v => v not in summary_catalog_names) %}
+{# Known first, then the ones the catalog has dropped; at most three, then a count. #}
+{% set summary_all = summary_known|merge(summary_unknown) %}
+{% set summary_shown = summary_all|length > 3 ? summary_all|slice(0, 3) : summary_all %}
+<details class="toolbox-disclosure">
+    <summary>
+        Toolbox
+        <span class="muted">{{ summary_is_tag ? 'by tag' : 'by name' }}</span>
+        {% if summary_shown is empty %}
+            <span class="muted">— none</span>
+        {% else %}
+            <span class="tool-set">·</span>
+            {% for entry in summary_shown %}<code>{{ entry }}</code>{% if not loop.last %}<span class="tool-set">·</span>{% endif %}{% endfor %}
+            {% if summary_all|length > 3 %}<span class="muted">+{{ summary_all|length - 3 }}</span>{% endif %}
+        {% endif %}
+    </summary>
+
+    {#
+        The hidden inputs below carry the declaration while the drawer is shut,
+        and this is the comment to read before touching them.
+
+        A `disabled` control is not submitted at all. The chat passes
+        `disabled` while a reply is pending, and it *opens* the drawer in that
+        state — so without these, saving that page would submit no mode and no
+        declaration, and the picker would reopen on its defaults rather than on
+        the toolbox she is actually running with.
+
+        Only the two array-valued fields appear here. `mode` is flat, so the
+        last one wins — which is correct: it is the same value the radios carry
+        — but the free-text companions are flat too, and emitting one entry per
+        unknown tag would collapse them to whichever came last and silently
+        truncate a declaration the catalog does not carry. Those are already
+        carried by the fieldset's own text inputs, seeded with exactly the
+        entries the catalog does not offer as a checkbox, so they are left
+        alone here.
+
+        The values match the boxes they twin: a tag that IS in the catalog goes
+        to the checkbox array, and one that is not goes to the companion — the
+        same split the fieldset makes, so `ToolboxSelection` reads a submission
+        that is identical whether the drawer was open or shut. A checked box
+        and its twin submit the same value under an array name, and the parser
+        collapses duplicates by key, so the declaration survives the round trip
+        unchanged.
+
+        They are omitted when `disabled`, and only for the reason the contents
+        below are: a page with no enabled control has no submission to carry
+        anything into. That is the chat's pending state and nothing else — the
+        task editor's `disabled` (an immutable, already-run task) is never
+        collapsed — so the pair of guards describe the same situation rather
+        than two different ones.
+    #}
+    {% if not disabled %}
+        <input type="hidden" name="{{ prefix }}toolbox_mode" value="{{ summary_is_tag ? 'tags' : 'explicit' }}">
+        {% for entry in summary_known %}<input type="hidden" name="{{ prefix }}{{ summary_is_tag ? 'toolbox_tags' : 'toolbox_tools' }}[]" value="{{ entry }}">{% endfor %}
+    {% endif %}
+{% endif %}
 {% set open = prefix == '' ? '' : prefix ~ '[' %}
 {% set close = prefix == '' ? '' : ']' %}
 {% set name_mode = open ~ 'toolbox_mode' ~ close %}
@@ -128,4 +237,7 @@
         <p class="field-error" role="alert">{{ errors[group] }}</p>
     {% endif %}
 </fieldset>
+{% if collapsed %}
+</details>
+{% endif %}
 {% endmacro %}

@@ -481,6 +481,50 @@ fieldset {
     margin: 0.75rem 0;
 }
 
+/*
+ * The folded toolbox picker on the chat pages (SPEC §15.8).
+ *
+ * The widget is a `<fieldset>` that is already styled, so its own frame stays;
+ * only the disclosure around it needs a look. The summary is the whole reason
+ * a collapsed picker is safe to use, so it is an announcement rather than a
+ * label: full-width, a real tap target (GUIDING-LIGHT §8.8 wants 44px, and a
+ * `<summary>` is a control like any other), and it carries the accent that
+ * says "this is the thing you can open".
+ *
+ * `display` is deliberately NOT set. The summary's disclosure triangle comes
+ * from the UA's `display: list-item`, and setting `display: block` — let alone
+ * `flex`, which is how a summary like this would normally be laid out —
+ * removes the marker in Chrome and Firefox. The marker is the only piece of
+ * this control a reader already recognises, so the contents stay inline and
+ * wrap on their own; a left accent border and `cursor: pointer` carry the
+ * affordance the marker cannot.
+ */
+.toolbox-disclosure {
+    margin: 0.75rem 0;
+}
+
+.toolbox-disclosure > summary {
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--muted);
+    border-left: 4px solid var(--accent);
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.toolbox-disclosure > summary::marker {
+    color: var(--accent);
+}
+
+/*
+ * The fieldset is the drawer's contents, so inside the disclosure it loses the
+ * margin that separated it from its siblings — the summary already sits above
+ * it, and a second gap would read as a separate section rather than as one
+ * control's body.
+ */
+.toolbox-disclosure > .toolbox {
+    margin: 0.5rem 0 0;
+}
+
 fieldset legend {
     padding: 0 0.35rem;
     color: var(--muted);

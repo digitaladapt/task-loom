@@ -342,6 +342,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The toolbox picker is folded shut on the chat pages.** On `/chat` and
+  `/chat/{id}` the picker is a permission panel sitting between the box you type
+  in and the Send button, and the tools it offers are the one thing on those
+  pages nobody came to read — so it is now a `<details>` that starts collapsed,
+  where before it was a screenful of tag and tool checkboxes above Send.
+
+  It is the same widget, gained rather than replaced: `_toolbox.html.twig` takes
+  a `collapsed` argument that **defaults to false**, so the task editor still
+  renders the picker flat. There the picker *is* the point of the page, and at
+  three scopes (the task's own declaration and every step's) a disclosure per
+  fieldset would be three extra taps for the thing you went there to do.
+
+  Folding it hides the *choosing*, not the answer, which is the property the
+  whole permission surface rests on (`CHAT_TOOLS.md` §2.1 — what she can do
+  right now is a thing on screen, not a thing to remember). The summary states
+  the current declaration — "Toolbox by tag · weather · email +1" — and the
+  declaration itself travels in hidden inputs inside the disclosure, so
+  submitting the form while it is shut carries the same toolbox a checked box
+  would have. Both are deliberate:
+
+  - The **summary** is why a collapsed picker is usable at all. A drawer that
+    hid the answer along with the checkboxes would make the page quieter and the
+    permission surface worse, trading the one property this design was built
+    around for tidiness.
+  - The **hidden inputs** are unforgiving, in the way forms always are: an
+    unchecked checkbox is not submitted, a cancelled radio is not submitted,
+    and a `disabled` control is not submitted — so a page that renders the
+    choice from stored data and submits nothing reads as *"you chose no tools"*,
+    quietly rewriting her toolbox at the next message. They are omitted when the
+    picker is `disabled` (a pending reply), because leaving them in would make
+    that the one page where a message *could* change a frozen toolbox.
+
+  The free-text companions keep their single-valued field: several hidden
+  inputs sharing that name would collapse to the last one and silently truncate
+  a declaration the catalog does not carry, and the fieldset's own text inputs
+  are already seeded with exactly those entries.
+
+  A refused save re-renders collapsed, which would have put the complaint
+  inside a shut drawer — so the `errors[group]` message is a sibling of the
+  `<details>` rather than a child, where a page that looks like it silently did
+  nothing is not possible.
+
 - **The toolbox picker is one widget, and the parsing is one class.** It moved
   to `templates/_toolbox.html.twig` (out of `task/`, because it is no longer
   only the task editor's) and the form fields are now read by

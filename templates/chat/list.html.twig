@@ -26,6 +26,12 @@
     conversation with no tools and enabling them once you have talked the
     problem through is the intended shape: ask first, act second.
 
+    COLLAPSED, so what the page offers first is the box you type in rather than
+    a screenful of tool vocabulary — the picker is a permission panel, and it
+    is the one thing here nobody came to read. It is the same widget with the
+    same field names, and the summary still states the choice; see
+    `_toolbox.html.twig` for why the declaration travels in hidden inputs.
+
     (From the second message onward the picker follows the *previous*
     exchange's choice, so turning a tool off stays off until you turn it back
     on.)
@@ -49,7 +55,9 @@
             known_tags,
             catalog_tools,
             errors|default({}),
-            'chat_toolbox'
+            'chat_toolbox',
+            false,
+            true
         ) }}
 
         <label for="new-message" class="visually-hidden">First message</label>
