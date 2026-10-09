@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Admin;
 
+use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
 use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
@@ -51,6 +52,8 @@ final class TaskAdminService
     {
         $task = $this->findOrThrow($taskId);
 
+        $this->guardKind($task, 'enable');
+
         if (null !== $task->getReplacementFor()) {
             throw new TaskLifecycleException(\sprintf('Task %d is a replacement draft — approve it instead (SPEC §4.4).', $taskId));
         }
@@ -80,6 +83,7 @@ final class TaskAdminService
     {
         $task = $this->findOrThrow($taskId);
 
+        $this->guardKind($task, 'approve');
         $this->guardStepGraph($task, 'approve');
         $this->guardSchedule($task, 'approve');
 
@@ -175,6 +179,20 @@ final class TaskAdminService
         $this->em->flush();
 
         return $task;
+    }
+
+    /**
+     * Session-kind gate (docs/design/SESSION_TASKS.md, build order step 1):
+     * the slice engine behind the kind is not built, so a session-kind task
+     * never becomes enabled — the same discipline as the step graph and the
+     * schedule. Runs before the enable/approve flip; a failure leaves the
+     * rows untouched (nothing was flushed yet).
+     */
+    private function guardKind(Task $task, string $action): void
+    {
+        if (!$task->getKind()->isImplemented()) {
+            throw new TaskLifecycleException(SessionKindUnsupportedException::sentence(\sprintf('Cannot %s task %d (kind "%s")', $action, $task->getId(), $task->getKind()->value)));
+        }
     }
 
     /**

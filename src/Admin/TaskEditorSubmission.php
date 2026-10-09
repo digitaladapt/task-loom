@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Admin;
 
+use App\Entity\SessionKindUnsupportedException;
 use App\Entity\TaskKind;
 use App\Scheduler\ScheduleExpression;
 use App\Scheduler\ScheduleFormatException;
@@ -92,9 +93,17 @@ final readonly class TaskEditorSubmission
         }
 
         $kind = self::text($input['kind'] ?? TaskKind::Run->value);
-        if (null === TaskKind::tryFrom($kind)) {
+        $enum = TaskKind::tryFrom($kind);
+        if (null === $enum) {
             $errors['kind'] = \sprintf('Unknown task kind "%s".', $kind);
             $kind = TaskKind::Run->value;
+        } elseif (!$enum->isImplemented()) {
+            // docs/design/SESSION_TASKS.md, build order step 1: the slice
+            // engine behind the kind is not built, so the save is refused
+            // here, beside the field — the same discipline as an invalid
+            // schedule (§14.5). The submitted value survives so the select
+            // re-renders as the human left it.
+            $errors['kind'] = SessionKindUnsupportedException::sentence(\sprintf('Cannot save a "%s"-kind task', $kind));
         }
 
         // The picker's fields -> a declaration. One implementation, shared

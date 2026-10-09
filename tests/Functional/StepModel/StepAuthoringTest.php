@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional\StepModel;
 
+use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Step;
+use App\Entity\Task;
 use App\Entity\TaskKind;
 use App\Entity\ToolboxMode;
 use App\Mcp\Server\TaskCrud;
@@ -213,12 +215,35 @@ final class StepAuthoringTest extends KernelTestCase
         $task = $this->crud->create('T', 'B.', TaskKind::Run, ToolboxMode::Tags, [], null);
 
         $updated = $this->crud->update($task->getId(), [
-            'kind' => 'session',
+            'kind' => 'run',
             'toolbox_mode' => 'explicit',
         ]);
 
-        self::assertSame(TaskKind::Session, $updated->getKind());
+        self::assertSame(TaskKind::Run, $updated->getKind());
         self::assertSame(ToolboxMode::Explicit, $updated->getToolboxMode());
+    }
+
+    /**
+     * docs/design/SESSION_TASKS.md, build order step 1: the enum carries
+     * "session", the wire accepts it, and nothing branches on it — so the
+     * write gate refuses it rather than persisting a label the engine
+     * would silently mis-run.
+     */
+    public function testUpdateRefusesTheSessionKindUntilItsEngineExists(): void
+    {
+        $task = $this->crud->create('T', 'B.', TaskKind::Run, ToolboxMode::Tags, [], null);
+
+        try {
+            $this->crud->update($task->getId(), ['kind' => 'session']);
+            self::fail('Expected SessionKindUnsupportedException.');
+        } catch (SessionKindUnsupportedException $e) {
+            self::assertStringContainsString('not built yet', $e->getMessage());
+        }
+
+        // Nothing moved: the update rolled back and the task is still a run.
+        $fresh = $this->em()->find(Task::class, $task->getId());
+        self::assertInstanceOf(Task::class, $fresh);
+        self::assertSame(TaskKind::Run, $fresh->getKind());
     }
 
     public function testUpdateRejectsUnknownEnumStrings(): void

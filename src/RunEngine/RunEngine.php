@@ -12,6 +12,7 @@ use App\Entity\Run;
 use App\Entity\RunEvent;
 use App\Entity\RunEventType;
 use App\Entity\RunStatus;
+use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
 use App\Entity\Tool;
 use App\Llm\LlmClientInterface;
@@ -111,6 +112,8 @@ final class RunEngine
      */
     public function run(Task $task): Run
     {
+        $this->guardKind($task);
+
         $graph = $this->graphFor($task);
         if (null !== $graph) {
             return $this->runGraph($task, $graph);
@@ -241,6 +244,8 @@ final class RunEngine
      */
     public function start(Task $task): Run
     {
+        $this->guardKind($task);
+
         $graph = $this->graphFor($task);
         if (null !== $graph) {
             return $graph->beginGraph($task, async: true);
@@ -447,6 +452,21 @@ final class RunEngine
             return $this->performToolTurn($run, $state, async: true, claimToken: $token);
         } finally {
             $this->release($run, $token);
+        }
+    }
+
+    /**
+     * docs/design/SESSION_TASKS.md, build order step 1: the two dispatch
+     * entry points (run() and start()) refuse a task whose kind has no
+     * engine behind it, before any run row is created. Callers — the CLI
+     * trigger, the admin Run-now action, the scheduler — each translate the
+     * refusal into their own vocabulary; nothing may create a run for such
+     * a task.
+     */
+    private function guardKind(Task $task): void
+    {
+        if (!$task->getKind()->isImplemented()) {
+            throw SessionKindUnsupportedException::refused(\sprintf('Cannot start a run for task %d (kind "%s")', $task->getId(), $task->getKind()->value));
         }
     }
 

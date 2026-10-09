@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Mcp\Server;
 
+use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Step;
 use App\Entity\Task;
 use App\Entity\TaskAuthor;
@@ -78,6 +79,8 @@ final class TaskCrud
      *
      * @throws \App\StepModel\StepFormatException     when the steps input is malformed
      * @throws \App\Scheduler\ScheduleFormatException when the schedule is not a valid cron expression
+     * @throws SessionKindUnsupportedException        when the kind has no engine behind it yet
+     *                                                (docs/design/SESSION_TASKS.md, build order step 1)
      */
     public function create(
         string $title,
@@ -89,6 +92,14 @@ final class TaskCrud
         mixed $steps = null,
         TaskAuthor $author = TaskAuthor::Agent,
     ): Task {
+        // docs/design/SESSION_TASKS.md, build order step 1: the session
+        // slice engine does not exist yet, and nothing branches on kind —
+        // so the label is refused here, at the single write path, rather
+        // than persisted for the engine to silently mis-run.
+        if (!$kind->isImplemented()) {
+            throw SessionKindUnsupportedException::refused(\sprintf('Cannot create a "%s"-kind task', $kind->value));
+        }
+
         $specs = $this->codec->parse($steps);
 
         // SPEC §14: refuse an invalid schedule at authoring time — the same
@@ -127,6 +138,8 @@ final class TaskCrud
      *
      * @throws \App\StepModel\StepFormatException     when the steps input is malformed
      * @throws \App\Scheduler\ScheduleFormatException when the schedule is not a valid cron expression
+     * @throws SessionKindUnsupportedException        when the kind change has no engine behind it yet
+     *                                                (docs/design/SESSION_TASKS.md, build order step 1)
      */
     public function update(int $taskId, array $changes, TaskAuthor $author = TaskAuthor::Agent): Task
     {
@@ -411,7 +424,12 @@ final class TaskCrud
             $task->setBrief($changes['brief']);
         }
         if (\array_key_exists('kind', $changes)) {
-            $task->setKind($this->coerceKind($changes['kind']));
+            $kind = $this->coerceKind($changes['kind']);
+            if (!$kind->isImplemented()) {
+                throw SessionKindUnsupportedException::refused(\sprintf('Cannot change a task to the "%s" kind', $kind->value));
+            }
+
+            $task->setKind($kind);
         }
         if (\array_key_exists('toolbox_mode', $changes)) {
             $task->setToolboxMode($this->coerceToolboxMode($changes['toolbox_mode']));

@@ -436,6 +436,61 @@ final class TaskMcpServerEndToEndTest extends WebTestCase
     }
 
     /**
+     * docs/design/SESSION_TASKS.md, build order step 1: the kind is in the
+     * schema enum, but no engine is behind it — a create must surface the
+     * refusal as a tool error, and persist nothing.
+     */
+    public function testToolsCallTaskCreateWithSessionKindIsRefused(): void
+    {
+        $created = $this->callTool('task_create', [
+            'title' => 'E2E Long haul',
+            'brief' => 'Keep going.',
+            'kind' => 'session',
+            'toolboxMode' => 'tags',
+            'toolbox' => ['weather'],
+        ]);
+
+        self::assertTrue($created['error'], 'a session-kind create must be refused on the wire');
+        self::assertStringContainsString('not built yet', $created['raw']);
+
+        // And nothing persisted: the gate sits below the tool contract, in
+        // the single write path.
+        $this->bootKernel();
+        $tasks = static::getContainer()->get(TaskRepository::class)->findAll();
+        self::assertCount(0, $tasks);
+    }
+
+    /**
+     * The update path refuses the kind change the same way — the enum is
+     * coercible, the gate is not.
+     */
+    public function testToolsCallTaskUpdateToSessionKindIsRefused(): void
+    {
+        $created = $this->callTool('task_create', [
+            'title' => 'E2E Run',
+            'brief' => 'B.',
+            'kind' => 'run',
+            'toolboxMode' => 'tags',
+            'toolbox' => ['weather'],
+        ]);
+        self::assertFalse($created['error'], $created['raw']);
+        $taskId = $created['result']['id'];
+
+        $updated = $this->callTool('task_update', [
+            'taskId' => $taskId,
+            'changes' => ['kind' => 'session'],
+        ]);
+
+        self::assertTrue($updated['error'], 'a change to the session kind must be refused');
+        self::assertStringContainsString('not built yet', $updated['raw']);
+
+        $this->bootKernel();
+        $task = static::getContainer()->get(TaskRepository::class)->find($taskId);
+        self::assertNotNull($task);
+        self::assertSame('run', $task->getKind()->value, 'the refused update rolled back');
+    }
+
+    /**
      * One tools/call returning the decoded tool payload plus the raw text.
      *
      * @param array<string, mixed> $arguments

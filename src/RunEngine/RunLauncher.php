@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\RunEngine;
 
 use App\Entity\RunRole;
+use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
 use App\Message\LlmTurnMessage;
 use App\Message\ToolTurnMessage;
@@ -33,8 +34,10 @@ final readonly class RunLauncher
     }
 
     /**
-     * @throws RunLaunchException         when the created run owes no turn to dispatch
-     * @throws ToolboxResolutionException when a standalone task's toolbox does not resolve
+     * @throws RunLaunchException              when the created run owes no turn to dispatch
+     * @throws ToolboxResolutionException      when a standalone task's toolbox does not resolve
+     * @throws SessionKindUnsupportedException when the task's kind has no engine behind it yet
+     *                                         (docs/design/SESSION_TASKS.md, build order step 1)
      */
     public function launch(Task $task): RunLaunch
     {

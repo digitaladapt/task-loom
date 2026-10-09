@@ -96,7 +96,7 @@
             <span>Kind</span>
             <select name="kind">
                 <option value="run" {{ values.kind != 'session' ? 'selected' }}>run — completes in one pass</option>
-                <option value="session" {{ values.kind == 'session' ? 'selected' }}>session — long-lived (not implemented yet)</option>
+                <option value="session" {{ values.kind == 'session' ? 'selected' }}>session — long-lived (not built yet — saving is refused)</option>
             </select>
         </label>
         {% if errors['kind'] is defined %}<p class="field-error" role="alert">{{ errors['kind'] }}</p>{% endif %}
