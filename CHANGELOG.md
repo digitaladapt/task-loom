@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Session memory — the store, and the `## Memories` block it feeds (build
+  order step 2 of `docs/design/SESSION_TASKS.md`).** A session-kind task runs
+  as a series of bounded runs, and what survives between them is a small,
+  model-authored, editable store rather than a summarized transcript. This
+  lands the store and the seam that carries it into the prompt; the tools
+  that write it (step 3), the slice engine (step 4), the lane (step 5) and
+  the UI (step 6) follow. No session is dispatchable yet — the step-1 gate
+  still refuses the kind until the slice engine lands.
+
+  **The store** (`SessionMemory` + `SessionMemoryRevision`) holds two shapes,
+  told apart by `kind`: a singular **objective** — always injected, never
+  aged, changed by replacement — and plural, accumulating **notes**. It is
+  scoped by the session's task id alone, with **no key**: a key namespaces a
+  store that serves many topics, and this store serves one session. The
+  store is the single writer (both the coming tools and the coming UI go
+  through it), which is what makes "one objective row per session" a
+  property rather than a hope. Two writers mean provenance is a typed
+  `source` column, not a sentence in the text: `[operator]` entries are
+  directives, `[you]` entries are recollections, and every write keeps the
+  text it replaced — so steering is visible and reversible, and the rendered
+  objective line says who set it.
+
+  **The block** rides *after* the frozen head and *before* the kept
+  exchanges, on the `assistant` role, and is rebuilt from the store on
+  **every request** — the first mutable, per-request section a run request
+  has ever had. An operator edit therefore lands on the session's next
+  request: no restart, no slice boundary. It is counted in the request's
+  fixed cost (it is not an exchange, so the adaptive trim cannot shed it),
+  and bounded on its own percentage — `TASKLOOM_SESSION_MAX_MEMORY_PCT`,
+  deliberately separate from the Inputs cap — which drops the oldest notes
+  whole with a visible marker and never the objective.
+
+  The store is bounded on four axes (notes injected / retained, one write's
+  size, the rendered block), and one write over its cap is refused with
+  feedback — the same discipline as the tool-result cap on the other side
+  of the head. No per-write gate and no LLM compaction: the transparency and
+  the caps are the defense (`CHAT_TOOLS.md` §3's bet, extended).
+
+  Four new knobs — `TASKLOOM_SESSION_HOT` (5), `TASKLOOM_SESSION_COLD` (25),
+  `TASKLOOM_SESSION_WRITE_MAX_CHARS` (2000), `TASKLOOM_SESSION_MAX_MEMORY_PCT`
+  (10) — wired through `config/services.yaml`, both compose files, and
+  `.env.example`, with the deployment-defaults and env-contract tests
+  extended so a deployment that omits one is a loud failure, not a silently
+  inert knob.
+
+  Proofs: the store against the real database (singleton objective with
+  replacement history; hot→cold ageing oldest-first with pinned notes
+  skipped; cold overflow dropping the oldest note *and its history*; the
+  write cap and blank refusals persisting nothing; the objective surviving
+  hot 0 / cold 0); the renderer (objective first with its source,
+  provenance tags, cold notes not injected, the percentage backstop dropping
+  whole notes and never the objective, pins-overflow still bounded); the
+  seam unit-tested on the window; and — the step's "single long run" — a
+  crafted session run driven through the **real lanes** (`llm → tools →
+  llm`), asserting the block on both requests, the mid-run operator edit
+  landing on the second, and an ordinary run never carrying a block at all.
+
 - **A conversation's replies render as Markdown, and tool payloads render as
   readable JSON.** The transcript used `nl2br`, so an answer arrived as asterisks
   and backticks — worst on a phone, where reading a bulleted reply as prose with

@@ -102,6 +102,13 @@ x-taskloom-env: &taskloom-env
   # artifact gets an equal share, so a wide task cannot pin its runs' floor.
   TASKLOOM_MAX_INPUT_ARTIFACT_PCT: ${TASKLOOM_MAX_INPUT_ARTIFACT_PCT:-50}
   TASKLOOM_WINDOW_TAIL_EXCHANGES: ${TASKLOOM_WINDOW_TAIL_EXCHANGES:-10}
+  # Session memory (docs/design/SESSION_TASKS.md §3.3): the store's hot/cold
+  # count caps, the per-write size cap, and the rendered block's own
+  # percentage (independent of the Inputs cap on purpose).
+  TASKLOOM_SESSION_HOT: ${TASKLOOM_SESSION_HOT:-5}
+  TASKLOOM_SESSION_COLD: ${TASKLOOM_SESSION_COLD:-25}
+  TASKLOOM_SESSION_WRITE_MAX_CHARS: ${TASKLOOM_SESSION_WRITE_MAX_CHARS:-2000}
+  TASKLOOM_SESSION_MAX_MEMORY_PCT: ${TASKLOOM_SESSION_MAX_MEMORY_PCT:-10}
   # Absolute URLs in non-HTTP contexts (CLI, workers): the public address of
   # this deployment, as users and agents reach it.
   DEFAULT_URI: ${DEFAULT_URI:-http://localhost:8080}

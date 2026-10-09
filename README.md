@@ -398,6 +398,9 @@ inline. Key knobs:
 | `TASKLOOM_STEP_BUDGET` | Max tool-call exchanges per run (fail closed) |
 | `TASKLOOM_CONTEXT_LIMIT` | Context window for the fail-closed token budget |
 | `TASKLOOM_MAX_INPUT_ARTIFACT_PCT` | Cap on the whole Inputs block (a stepped run's dependency outputs), split evenly across the inputs (default `50`) |
+| `TASKLOOM_SESSION_HOT` / `TASKLOOM_SESSION_COLD` | Session memory: notes injected per request / notes retained beyond that (defaults `5` / `25`; build order step 2 of `docs/design/SESSION_TASKS.md`) |
+| `TASKLOOM_SESSION_WRITE_MAX_CHARS` | Session memory: per-write size cap for a note or the objective (default `2000`) |
+| `TASKLOOM_SESSION_MAX_MEMORY_PCT` | Session memory: cap on the rendered `## Memories` block, as % of the context limit (default `10`) |
 | `MESSENGER_TRANSPORT_DSN` | Doctrine-backed lane table; `auto_setup=0` — create it with `doctrine:migrations:migrate` |
 
 ## Development

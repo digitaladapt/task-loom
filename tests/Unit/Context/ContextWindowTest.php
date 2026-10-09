@@ -184,6 +184,85 @@ final class ContextWindowTest extends TestCase
         self::assertCount(2, $fit->messages);
     }
 
+    /**
+     * The `## Memories` block rides after the head and before the kept
+     * exchanges, on the `assistant` role — the seam
+     * docs/design/SESSION_TASKS.md §4.1 describes. Position matters: the
+     * block is not an exchange (the trim cannot shed it), and it must not
+     * read as part of the constitution or the instruction.
+     */
+    public function testSessionMemoryBlockRidesAfterTheHeadBeforeTheExchanges(): void
+    {
+        $window = new ContextWindow(contextLimitTokens: 100000, maxToolOutputPct: 15.0, windowTailExchanges: 10);
+        $block = "## Memories\n\n**Objective** — set by the operator: ship it.\n";
+
+        $fit = $window->buildMessages(
+            ['system' => 'SYS', 'user' => 'TASK PROMPT'],
+            [$this->exchange('c1', 'result 1')],
+            [],
+            $block,
+        );
+
+        self::assertSame('system', $fit->messages[0]['role']);
+        self::assertSame('user', $fit->messages[1]['role']);
+        self::assertSame('assistant', $fit->messages[2]['role']);
+        self::assertSame($block, $fit->messages[2]['content']);
+        self::assertSame('c1', $fit->messages[3]['tool_calls'][0]['id'], 'the kept exchange follows the block, whole');
+        self::assertSame('c1', $fit->messages[4]['tool_call_id']);
+    }
+
+    /**
+     * No block (an ordinary run, or a session with nothing stored) means no
+     * extra message: the request is exactly the shape it has always been.
+     */
+    public function testNoSessionMemoryMeansNoExtraMessage(): void
+    {
+        $window = new ContextWindow(contextLimitTokens: 100000, maxToolOutputPct: 15.0, windowTailExchanges: 10);
+
+        foreach ([null, ''] as $absent) {
+            $fit = $window->buildMessages(['system' => 'S', 'user' => 'U'], [$this->exchange('c1', 'r')], [], $absent);
+
+            self::assertCount(4, $fit->messages);
+            self::assertSame('c1', $fit->messages[2]['tool_calls'][0]['id']);
+            self::assertStringNotContainsString('## Memories', (string) json_encode($fit->messages));
+        }
+    }
+
+    /**
+     * The block counts toward the request's fixed cost: it is not an
+     * exchange, so the adaptive trim cannot shed it, and a request whose
+     * head + tools + block overflow must fail closed naming the block —
+     * silently dropping it would lose the session's carried state without
+     * saying so.
+     */
+    public function testSessionMemoryBlockCountsTowardTheFixedCost(): void
+    {
+        $window = new ContextWindow(contextLimitTokens: 40, maxToolOutputPct: 15.0, windowTailExchanges: 10);
+        $tools = [['type' => 'function', 'function' => ['name' => 't', 'description' => 'd']]];
+
+        // Without the block this request fits (and has nothing to trim).
+        $fits = $window->buildMessages(['system' => 'SYS', 'user' => 'U'], [], $tools);
+        self::assertFalse($fits->trimmed());
+
+        $this->expectException(ContextExhaustedException::class);
+        $this->expectExceptionMessage('session memory block');
+
+        $window->buildMessages(['system' => 'SYS', 'user' => 'U'], [], $tools, str_repeat('m', 400));
+    }
+
+    /**
+     * The block's percentage is its own knob — deliberately independent of
+     * the Inputs cap — and it converts through the shared token estimate.
+     */
+    public function testSessionMemoryBudgetIsItsOwnPercentage(): void
+    {
+        $window = new ContextWindow(contextLimitTokens: 1000, maxToolOutputPct: 15.0, windowTailExchanges: 10, maxInputArtifactPct: 50.0, maxSessionMemoryPct: 10.0);
+        $wider = new ContextWindow(contextLimitTokens: 1000, maxToolOutputPct: 15.0, windowTailExchanges: 10, maxInputArtifactPct: 50.0, maxSessionMemoryPct: 20.0);
+
+        self::assertSame((int) floor(1000 * 3.5 * 10 / 100), $window->sessionMemoryBudgetChars());
+        self::assertSame(2 * $window->sessionMemoryBudgetChars(), $wider->sessionMemoryBudgetChars());
+    }
+
     public function testGroundingRenderShape(): void
     {
         $grounding = new Grounding(

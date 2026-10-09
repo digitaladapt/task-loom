@@ -37,6 +37,16 @@ namespace App\Context;
  * real failure (a task brief too large for the model) and is reported as
  * such rather than silently mangled.
  *
+ * **The session memory block is part of the fixed cost, since build order
+ * step 2** (`docs/design/SESSION_TASKS.md` §4). A session run's
+ * `## Memories` block is rebuilt from the store on every request and rides
+ * between the head and the kept exchanges — the first mutable, per-request
+ * section a run request has ever had. It is bounded separately
+ * ({@see sessionMemoryBudgetChars()}) and counted here like the head: it is
+ * not an exchange, so the adaptive trim cannot shed it piece by piece, and
+ * the fit must account for it up front. A request whose head, tool
+ * definitions, and memory block alone cannot fit still fails closed.
+ *
  * **The Inputs block is capped, since it cannot be pruned.** A head is
  * usually bounded — the brief, the toolbox, the grounding — but the Inputs
  * block (SPEC §13.4) grows with the task's width, and the final consumer
@@ -67,7 +77,24 @@ final readonly class ContextWindow
         private float $maxToolOutputPct = 15.0,
         private int $windowTailExchanges = 10,
         private float $maxInputArtifactPct = 50.0,
+        private float $maxSessionMemoryPct = 10.0,
     ) {
+    }
+
+    /**
+     * The character budget of a rendered `## Memories` block.
+     *
+     * Its own percentage, deliberately independent of the input-artifact cap
+     * (SESSION_TASKS.md §3.3): memory and inputs are different kinds of
+     * never-pruned content with different justifications (state vs.
+     * dependency outputs), so tying them to one figure would mean tuning one
+     * to fix the other. The renderer
+     * ({@see \App\Session\SessionMemoryRenderer}) enforces this by dropping
+     * the oldest notes whole; the objective is never dropped.
+     */
+    public function sessionMemoryBudgetChars(): int
+    {
+        return (int) floor($this->contextLimitTokens * self::CHARS_PER_TOKEN * $this->maxSessionMemoryPct / 100);
     }
 
     /**
@@ -125,25 +152,40 @@ final readonly class ContextWindow
      * conversation has to stay whole.
      *
      * @param array{system: string, user: string} $promptHead
-     * @param list<array<string, mixed>>          $exchanges  completed exchanges, oldest first
-     * @param list<array<string, mixed>>          $tools      OpenAI tool descriptors sent on the same request
+     * @param list<array<string, mixed>>          $exchanges     completed exchanges, oldest first
+     * @param list<array<string, mixed>>          $tools         OpenAI tool descriptors sent on the same request
+     * @param ?string                             $sessionMemory the rendered `## Memories` block for a
+     *                                                           session run, or null for an ordinary run — it rides
+     *                                                           after the head, before the kept exchanges
      *
-     * @throws ContextExhaustedException when the head + tool definitions alone exceed the budget
+     * @throws ContextExhaustedException when the head + tool definitions + session memory alone exceed the budget
      */
-    public function buildMessages(array $promptHead, array $exchanges, array $tools = []): ContextWindowResult
+    public function buildMessages(array $promptHead, array $exchanges, array $tools = [], ?string $sessionMemory = null): ContextWindowResult
     {
-        // The fixed cost of every request: the head, plus the tool
-        // definitions that travel beside the messages. Both count — the
+        $memoryBlock = null !== $sessionMemory && '' !== trim($sessionMemory) ? $sessionMemory : null;
+
+        // The fixed cost of every request: the head, the tool definitions
+        // that travel beside the messages, and — for a session run — the
+        // memory block, which is rebuilt per request but is not an exchange
+        // and therefore cannot be shed piece by piece. All count: the
         // estimate must describe the request, not just its message array.
         $headMessages = [
             ['role' => 'system', 'content' => $promptHead['system']],
             ['role' => 'user', 'content' => $promptHead['user']],
         ];
 
+        if (null !== $memoryBlock) {
+            $headMessages[] = ['role' => 'assistant', 'content' => $memoryBlock];
+        }
+
         $fixedChars = $this->messagesChars($headMessages) + \strlen((string) json_encode($tools, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
 
         if ($this->tokensFor($fixedChars) > $this->contextLimitTokens) {
-            throw new ContextExhaustedException(\sprintf('context exhausted: the prompt head and tool definitions alone are an estimated %d tokens > limit %d (the head is never truncated)', $this->tokensFor($fixedChars), $this->contextLimitTokens));
+            $fixed = null === $memoryBlock
+                ? 'the prompt head and tool definitions'
+                : 'the prompt head, tool definitions, and session memory block';
+
+            throw new ContextExhaustedException(\sprintf('context exhausted: %s alone are an estimated %d tokens > limit %d (the head is never truncated)', $fixed, $this->tokensFor($fixedChars), $this->contextLimitTokens));
         }
 
         // The candidate tail, newest-first, oldest dropped until it fits.

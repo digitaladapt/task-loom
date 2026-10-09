@@ -39,6 +39,10 @@ final class DeploymentDefaultsTest extends WebTestCase
         'TASKLOOM_MAX_TOOL_OUTPUT_PCT' => 15,
         'TASKLOOM_MAX_INPUT_ARTIFACT_PCT' => 50,
         'TASKLOOM_WINDOW_TAIL_EXCHANGES' => 10,
+        'TASKLOOM_SESSION_HOT' => 5,
+        'TASKLOOM_SESSION_COLD' => 25,
+        'TASKLOOM_SESSION_WRITE_MAX_CHARS' => 2000,
+        'TASKLOOM_SESSION_MAX_MEMORY_PCT' => 10,
         'TASKLOOM_STEP_BUDGET' => 50,
         'TASKLOOM_TOOL_RETRIES' => 2,
         'TASKLOOM_CIRCUIT_BREAKER' => 3,
@@ -85,6 +89,7 @@ final class DeploymentDefaultsTest extends WebTestCase
             'maxToolOutputPct' => (float) $container->getParameter('TASKLOOM_MAX_TOOL_OUTPUT_PCT'),
             'maxInputArtifactPct' => (float) $container->getParameter('TASKLOOM_MAX_INPUT_ARTIFACT_PCT'),
             'windowTailExchanges' => (int) $container->getParameter('TASKLOOM_WINDOW_TAIL_EXCHANGES'),
+            'maxSessionMemoryPct' => (float) $container->getParameter('TASKLOOM_SESSION_MAX_MEMORY_PCT'),
         ];
 
         foreach ($expected as $property => $value) {
