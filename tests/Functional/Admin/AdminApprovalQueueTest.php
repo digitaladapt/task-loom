@@ -126,6 +126,24 @@ final class AdminApprovalQueueTest extends WebTestCase
         self::assertTrue($task->isEnabled());
     }
 
+    /**
+     * docs/design/SESSION_TASKS.md, build order step 1: a session-kind draft
+     * still offers Enable on its page, and the action refuses it — the gate
+     * is the service, not just the button — with the reason stated.
+     */
+    public function testEnableRefusesASessionKindDraft(): void
+    {
+        $task = new Task('Long haul', 'Keep going.', TaskKind::Session, ToolboxMode::Tags, ['core'], TaskAuthor::User);
+        $this->tasks()->save($task);
+
+        $this->postAction($task, 'enable');
+
+        self::assertResponseRedirects();
+        $this->client->followRedirect();
+        self::assertStringContainsString('not built yet', (string) $this->client->getResponse()->getContent());
+        self::assertFalse($this->refetch($task)->isEnabled(), 'the refused enable flips nothing');
+    }
+
     public function testEnableFailsWithoutCsrfToken(): void
     {
         $task = $this->makeDraft('No csrf', 'b', TaskAuthor::Agent);
@@ -404,6 +422,39 @@ final class AdminApprovalQueueTest extends WebTestCase
         $this->client->followRedirect();
         self::assertStringContainsString('not enabled', (string) $this->client->getResponse()->getContent());
         self::assertFalse($this->refetch($task)->isEnabled(), 'the refused run does not resume the task');
+    }
+
+    /**
+     * docs/design/SESSION_TASKS.md, build order step 1: a session-kind task
+     * that reached the store out of band may even be enabled out of band —
+     * Run now must still refuse it at dispatch, loudly, with the reason.
+     */
+    public function testRunNowRefusesASessionKindTaskAtDispatch(): void
+    {
+        $task = new Task('Long haul', 'Keep going.', TaskKind::Session, ToolboxMode::Tags, ['core'], TaskAuthor::User);
+        $this->tasks()->save($task);
+        $this->em()->getConnection()->executeStatement('UPDATE task SET enabled = 1 WHERE id = ?', [$task->getId()]);
+
+        // Mint a valid task-run token from a different enabled task's page.
+        $other = $this->enabledTask('Runnable sibling');
+        $crawler = $this->client->request('GET', '/tasks/'.$other->getId());
+        self::assertResponseIsSuccessful();
+        $token = $crawler->filter('form[action*="/run"] input[name="_token"]')->attr('value');
+        self::assertNotNull($token);
+
+        $this->client->request('POST', '/tasks/'.$task->getId().'/run', ['_token' => $token]);
+
+        self::assertResponseRedirects('/tasks/'.$task->getId());
+        $this->client->followRedirect();
+        $content = (string) $this->client->getResponse()->getContent();
+        self::assertStringContainsString('Run refused at dispatch', $content);
+        self::assertStringContainsString('not built yet', $content);
+
+        // And no run row was created for the refused task.
+        $runs = $this->em()->createQuery('SELECT r FROM App\Entity\Run r WHERE r.task = :task')
+            ->setParameter('task', $this->refetch($task))
+            ->getResult();
+        self::assertCount(0, $runs);
     }
 
     /**

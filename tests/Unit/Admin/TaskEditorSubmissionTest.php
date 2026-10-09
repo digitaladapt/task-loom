@@ -100,6 +100,21 @@ final class TaskEditorSubmissionTest extends TestCase
     }
 
     /**
+     * docs/design/SESSION_TASKS.md, build order step 1: the enum carries
+     * "session", but no engine does — the save is refused beside the field,
+     * and the submitted value survives so the select re-renders as chosen.
+     */
+    public function testTheSessionKindIsRefusedUntilItsEngineExists(): void
+    {
+        $submission = TaskEditorSubmission::fromArray($this->input(['kind' => 'session']), $this->schedules());
+
+        self::assertTrue($submission->hasErrors());
+        self::assertArrayHasKey('kind', $submission->errors);
+        self::assertStringContainsString('not built yet', $submission->errors['kind']);
+        self::assertSame('session', $submission->values['kind'], 'the select re-renders as the human left it');
+    }
+
+    /**
      * Only the selected mode's list is honoured: the other picker is hidden
      * in the browser, and a stale value in it must never leak into the saved
      * declaration.

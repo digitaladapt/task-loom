@@ -159,7 +159,7 @@ final class TaskServerFactory
                     'properties' => [
                         'title' => ['type' => 'string', 'description' => 'Short task name.', 'minLength' => 1, 'maxLength' => 255],
                         'brief' => ['type' => 'string', 'description' => 'What the task should accomplish. For a stepped task this brief is the final consumer: it runs after all steps, with every step\'s output available as inputs.'],
-                        'kind' => ['type' => 'string', 'enum' => ['run', 'session'], 'description' => 'Task kind; v1 ships run only.'],
+                        'kind' => ['type' => 'string', 'enum' => ['run', 'session'], 'description' => 'Task kind. v1 ships "run" only — "session" is refused until its engine lands (docs/design/SESSION_TASKS.md).'],
                         'toolboxMode' => ['type' => 'string', 'enum' => ['tags', 'explicit'], 'description' => 'How the toolbox list is resolved at run time.'],
                         'toolbox' => ['type' => 'array', 'items' => ['type' => 'string'], 'description' => 'Tags or explicit tool names, depending on toolboxMode.'],
                         'schedule' => ['type' => ['string', 'null'], 'description' => 'Optional cron-style schedule; v1 runs are manual, so leave null.'],
@@ -189,7 +189,7 @@ final class TaskServerFactory
                             'properties' => [
                                 'title' => ['type' => 'string', 'minLength' => 1, 'maxLength' => 255],
                                 'brief' => ['type' => 'string'],
-                                'kind' => ['type' => 'string', 'enum' => ['run', 'session']],
+                                'kind' => ['type' => 'string', 'enum' => ['run', 'session'], 'description' => 'Changing a task to "session" is refused until its engine lands.'],
                                 'toolbox_mode' => ['type' => 'string', 'enum' => ['tags', 'explicit']],
                                 'toolbox' => ['type' => 'array', 'items' => ['type' => 'string']],
                                 'schedule' => ['type' => ['string', 'null'], 'description' => 'Cron-style schedule, or null to clear.'],

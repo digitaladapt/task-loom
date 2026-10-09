@@ -137,6 +137,15 @@
 <section aria-labelledby="actions-heading">
     <h2 id="actions-heading">Actions</h2>
 
+    {% if task.kind.value == 'session' %}
+        {#
+            docs/design/SESSION_TASKS.md, build order step 1: the kind has no
+            engine behind it, and every gate refuses it — say so where the
+            actions would be refused, not only after the refusal.
+        #}
+        <p class="flash flash-error">This task is of the "session" kind, whose engine is not built yet — Enable, Approve, and Run are all refused until it lands.</p>
+    {% endif %}
+
     {% if not task.archived %}
         {# The human authoring path (SPEC §8, ROADMAP v1.x). Offered on
            enabled tasks too, where saving produces a replacement draft

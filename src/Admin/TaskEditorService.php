@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Admin;
 
+use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Step;
 use App\Entity\Task;
 use App\Entity\TaskAuthor;
@@ -212,8 +213,8 @@ final class TaskEditorService
                 'schedule' => $submission->schedule(),
                 'steps' => $submission->steps(),
             ], TaskAuthor::User);
-        } catch (StepFormatException|ScheduleFormatException|EntityNotFoundException $e) {
-            // One catch: all three are "the form said something the store
+        } catch (StepFormatException|ScheduleFormatException|EntityNotFoundException|SessionKindUnsupportedException $e) {
+            // One catch: all four are "the form said something the store
             // refused", and the message is already written for a human.
             throw new TaskEditorException($e->getMessage(), 0, $e);
         }
