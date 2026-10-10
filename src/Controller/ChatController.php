@@ -153,6 +153,7 @@ final class ChatController extends AbstractController
             'transcript' => $this->events->findTranscript($chat),
             'pending' => $pending,
             'lastError' => $this->lastFailure($chat),
+            'window_notice' => $this->windowNotice($chat),
             'used_tools' => null !== $current ? ChatToolbox::fromExchange($current)->toolNames() : [],
             'known_tags' => $this->knownTags(),
             'catalog_tools' => $this->catalogTools(),
@@ -291,6 +292,55 @@ final class ChatController extends AbstractController
         }
 
         return 'the reply could not be produced';
+    }
+
+    /**
+     * A plain-words account of the model's window, when part of the
+     * conversation is no longer in it (SPEC §15.9).
+     *
+     * The ledger records every trim, but the chat page has no timeline to
+     * render it into — so the fact that matters most to a person is said
+     * here, once, at the top: **the assistant can no longer see the start of
+     * this conversation.** That is a different sentence from "the window was
+     * trimmed", and it is the one a human needs, because it changes what it
+     * makes sense to ask for without restating context.
+     *
+     * Null when the window has never trimmed — the ordinary case, and one
+     * that must not be announced as if it were a problem.
+     */
+    private function windowNotice(Chat $chat): ?string
+    {
+        $trim = $this->events->findLatestContextTrim($chat);
+
+        if (null === $trim) {
+            return null;
+        }
+
+        $payload = $trim->getPayload();
+
+        $droppedTurns = (int) ($payload['droppedTurns'] ?? 0);
+        $droppedRounds = (int) ($payload['droppedRounds'] ?? 0);
+
+        return \sprintf(
+            'This conversation has grown past the model\'s window: it can no longer see the first %s of it. Only the most recent exchanges are in view, so restate anything it seems to have forgotten.',
+            self::describeShed($droppedTurns, $droppedRounds),
+        );
+    }
+
+    /** "N turn(s) and M tool round(s)", whichever parts are non-zero. */
+    private static function describeShed(int $turns, int $rounds): string
+    {
+        $parts = [];
+
+        if ($turns > 0) {
+            $parts[] = \sprintf('%d turn%s', $turns, 1 === $turns ? '' : 's');
+        }
+
+        if ($rounds > 0) {
+            $parts[] = \sprintf('%d tool round%s', $rounds, 1 === $rounds ? '' : 's');
+        }
+
+        return [] === $parts ? 'part' : implode(' and ', $parts);
     }
 
     /**

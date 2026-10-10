@@ -6,8 +6,8 @@ namespace App\Chat;
 
 use App\Claims\ClaimStore;
 use App\Claims\ClaimTarget;
+use App\Context\ContextExhaustedException;
 use App\Context\Grounding;
-use App\Context\TokenEstimate;
 use App\Entity\Chat;
 use App\Entity\ChatEventType;
 use App\Entity\ChatExchange;
@@ -57,9 +57,13 @@ use Symfony\Component\Messenger\MessageBusInterface;
  *
  * There is no separate conversation buffer. The turns are the conversational
  * rows of the conversation's exchanges, and the model is shown exactly those,
- * with the roster's role mapping applied. That is why a worker that has never
- * seen this conversation before can answer it: the next worker is a stranger,
- * so nothing may depend on live state — the durable record *is* the input.
+ * with the roster's role mapping applied — *fitted to the model's budget*,
+ * because a conversation does not end: the chat context window (SPEC §15.9)
+ * sheds the oldest whole turns when the transcript outgrows one request, and
+ * records the shedding rather than letting it happen silently. That is why a
+ * worker that has never seen this conversation before can answer it: the next
+ * worker is a stranger, so nothing may depend on live state — the durable
+ * record *is* the input.
  *
  * ## Failure is loud, and it is not a retry
  *
@@ -88,19 +92,6 @@ final readonly class ChatEngine
      * this version gives chat no toolbox at all, so a model that assumes it
      * can act is worse than one that says it cannot.
      */
-    /**
-     * Deployment defaults for the two knobs `capToolResult` reads by name.
-     *
-     * The authoritative values live in `config/services.yaml` as parameters, so
-     * on any real deployment the environment is already resolved and these are
-     * unreachable. They exist because this method reads the environment
-     * *directly* rather than through the container, so it is the one place that
-     * has no fallback of its own — and a wrong fallback here would be a
-     * silently different cap from the run engine's, on the same document.
-     */
-    private const int DEFAULT_CONTEXT_LIMIT = 32768;
-    private const float DEFAULT_MAX_TOOL_OUTPUT_PCT = 15.0;
-
     public const string SYSTEM_PREAMBLE = <<<'TXT'
         You are answering in a conversation. Reply directly to the most recent turn, in your own voice.
         You have no tools in this conversation: if something would require looking it up or taking an
@@ -136,6 +127,7 @@ final readonly class ChatEngine
         private LoggerInterface $logger,
         private ToolExecutorInterface $executor,
         private PromptCompiler $prompts,
+        private ChatContextWindow $context,
         private ?MessageBusInterface $bus = null,
     ) {
     }
@@ -444,17 +436,33 @@ final readonly class ChatEngine
             return $exchange->getStatus();
         }
 
-        $messages = $this->compileMessages($chat);
+        // The tool definitions travel on the same request as the messages, so
+        // the budget has to see both: the window fits the conversation around
+        // them, not the conversation alone. The descriptors are built once and
+        // handed to both the budget and the client, exactly as the run engine
+        // does it.
+        $toolDescriptors = $this->prompts->toolsToOpenAi($tools);
+
+        try {
+            $fit = $this->context->fit($this->events->findWireWindow($chat, $this->context->maxTurns()), $this->compileSystemMessage($chat), $toolDescriptors);
+        } catch (ContextExhaustedException $e) {
+            // The same fail-closed shape a run has (SPEC §5.6): a conversation
+            // whose head and turn being answered cannot fit is told so, with a
+            // named reason, rather than flying at the provider to become a raw
+            // transport error in front of a person.
+            return $this->failExchange($exchange, $e->errorClass, $e->getMessage());
+        }
 
         $exchange->appendMachinery(ChatEventType::LlmRequest, [
-            'turns' => \count($messages) - 1, // minus the system message
+            'turns' => \count($fit->messages) - 1, // minus the system message
             'tools' => $toolbox->toolNames(),
             'rounds' => $state->rounds,
         ]);
+        $this->recordTrim($exchange, $fit);
         $this->em->flush();
 
         try {
-            $response = $this->llm->chat($messages, $this->prompts->toolsToOpenAi($tools));
+            $response = $this->llm->chat($fit->messages, $toolDescriptors);
         } catch (LlmRequestException $e) {
             return $this->failExchange($exchange, $e->errorClass, $e->getMessage());
         }
@@ -672,51 +680,74 @@ final readonly class ChatEngine
     }
 
     /**
-     * Compile the conversation into the model's message list
+     * Compile the model's system message for this request
      * (SPEC §15, §2.3, `CHAT_TOOLS.md` §3).
      *
-     * Two layers, and the split is the whole point:
+     * Three layers, and the split is the whole point:
      *
-     * - **The system message** carries the harness's own voice: the posture
-     *   (with or without tools — they are different texts, because a prompt
-     *   that says "you have no tools" while sending tool definitions is a
-     *   contradiction), the roster (which states whose words are whose, so the
-     *   mapping cannot be misread from context), and the grounding block.
-     * - **The turns** are the transcript, each rendered on the role the roster
-     *   assigned it. The human never types a name; attribution is rendered
-     *   here, at the render layer, exactly as §2.5 requires.
+     * - **The posture** — with or without tools, and they are different
+     *   texts, because a prompt that says "you have no tools" while sending
+     *   tool definitions is a contradiction the small model resolves
+     *   unpredictably.
+     * - **The roster**, which states whose words are whose, so the mapping
+     *   cannot be misread from context. The human never types a name;
+     *   attribution is rendered at the render layer, exactly as §2.5
+     *   requires.
+     * - **The grounding block**, compiled *per request* rather than frozen
+     *   into the exchange — a deliberate difference from a run. An exchange
+     *   is short-lived, and a conversation resumed after a day of silence
+     *   should be grounded in the day it is resumed on, not the day the
+     *   previous exchange happened.
      *
-     * The grounding block is compiled *per request* rather than frozen into the
-     * exchange — a deliberate difference from a run. An exchange is
-     * short-lived, and a conversation resumed after a day of silence should be
-     * grounded in the day it is resumed on, not the day the previous exchange
-     * happened.
-     *
-     * @return list<array<string, mixed>>
+     * The turns are compiled beside this by the context window
+     * ({@see ChatContextWindow::fit()}), which is where the fitting happens:
+     * this method builds the one message that is never trimmed, and the
+     * window builds the rest around it.
      */
-    private function compileMessages(Chat $chat): array
+    private function compileSystemMessage(Chat $chat): string
     {
         // The exchange being answered is the newest one, and it is the one
         // whose toolbox decides whether the prompt claims tools.
         $current = $this->exchanges->findLatestForChat($chat);
         $hasTools = null !== $current && !$this->toolboxFor($current)->isEmpty();
 
-        $messages = [[
-            'role' => 'system',
-            'content' => implode("\n\n", [
-                $hasTools ? self::SYSTEM_PREAMBLE_WITH_TOOLS : self::SYSTEM_PREAMBLE,
-                $this->roster->render(),
-                "## Grounding\n\n".$this->grounding->render(),
-            ]),
-        ]];
+        return implode("\n\n", [
+            $hasTools ? self::SYSTEM_PREAMBLE_WITH_TOOLS : self::SYSTEM_PREAMBLE,
+            $this->roster->render(),
+            "## Grounding\n\n".$this->grounding->render(),
+        ]);
+    }
 
-        foreach ($this->events->findWireTranscript($chat) as $row) {
-            foreach ($row->toWireMessages() as $message) {
-                $messages[] = $message;
-            }
+    /**
+     * Record that the context window had to shed part of the conversation to
+     * fit the budget (SPEC §15.9).
+     *
+     * A conversation grows forever and the window is what keeps it sendable —
+     * so the shedding must be visible: a `context_trim` row says how many
+     * turns and tool rounds were kept and dropped, which is the difference
+     * between "this conversation is long" and "this conversation is quietly
+     * losing its earliest words". Absent a trim it writes nothing, so the
+     * common path gains no ledger row. (The run engine records the same fact
+     * under its own nouns; the row shape here is the chat's.)
+     *
+     * Flushed with the turn's request event: a trim that is not persisted
+     * because the process died mid-request is a diagnostic that was never
+     * owed.
+     */
+    private function recordTrim(ChatExchange $exchange, ChatContextWindowResult $fit): void
+    {
+        if (!$fit->trimmed()) {
+            return;
         }
 
-        return $messages;
+        $exchange->appendMachinery(ChatEventType::ContextTrim, [
+            'keptTurns' => $fit->keptTurns,
+            'keptRounds' => $fit->keptRounds,
+            'droppedTurns' => $fit->droppedTurns,
+            'droppedRounds' => $fit->droppedRounds,
+            'estimatedTokens' => $fit->estimatedTokens,
+            'limitTokens' => $fit->limitTokens,
+        ]);
     }
 
     /**
@@ -736,30 +767,15 @@ final readonly class ChatEngine
     /**
      * A tool result, capped so one verbose tool cannot fill the conversation.
      *
-     * The run engine routes this through `ContextWindow::capToolResult`; this
-     * is the same arithmetic, kept local because the chat does not otherwise
-     * need a context window (there is no exchange budget to trim against — the
-     * ceiling in `ChatLoopState` is the bound).
-     *
-     * Both the limit and the percentage are read by **name**, so the fallbacks
-     * here are dead code in a configured deployment — and were the one place
-     * that could silently disagree with the container's resolved values if they
-     * ever stopped matching. The names are also why this now prints as a
-     * deployment-default parameter in `config/services.yaml`: the two knobs
-     * have app-level defaults, so the `?:` arms below only ever apply to a
-     * build that has no container at all.
+     * The arithmetic lives with the window ({@see ChatContextWindow::capToolResult}),
+     * resolved from the container like every other knob — the earlier local
+     * copy read `TASKLOOM_CONTEXT_LIMIT` and `TASKLOOM_MAX_TOOL_OUTPUT_PCT` out
+     * of the raw environment by name, which was the one place that could
+     * silently disagree with the deployment's resolved values.
      */
     private function capToolResult(string $result): string
     {
-        $limit = (int) (getenv('TASKLOOM_CONTEXT_LIMIT') ?: self::DEFAULT_CONTEXT_LIMIT);
-        $pct = (float) (getenv('TASKLOOM_MAX_TOOL_OUTPUT_PCT') ?: self::DEFAULT_MAX_TOOL_OUTPUT_PCT);
-        $maxChars = (int) floor($limit * TokenEstimate::CHARS_PER_TOKEN * $pct / 100);
-
-        if ($maxChars <= 0 || \strlen($result) <= $maxChars) {
-            return $result;
-        }
-
-        return substr($result, 0, $maxChars)."\n…[truncated — tool result capped]";
+        return $this->context->capToolResult($result);
     }
 
     /**

@@ -13,8 +13,8 @@ namespace App\Entity;
  * ledger once carried a `context_trim` type that nothing wrote, so a reader
  * could not tell "nothing was trimmed" from "trimming was not recorded"; a
  * vocabulary is a promise, and an unemitted case is a broken one. New cases
- * arrive with the code that writes them — tools, for instance, would add
- * `tool_call` / `tool_result` alongside the machinery.
+ * arrive with the code that writes them — which is how `tool_call` /
+ * `tool_result` arrived, and how `context_trim` did too (SPEC §15.9).
  */
 enum ChatEventType: string
 {
@@ -63,6 +63,21 @@ enum ChatEventType: string
      */
     case ToolError = 'tool_error';
 
+    /**
+     * The context window shed part of the conversation to fit the budget
+     * (SPEC §15.9).
+     *
+     * A conversation does not end, so its transcript eventually must be
+     * fitted rather than sent — and when the newest turns alone do not fit,
+     * the oldest are dropped whole. That shedding must be visible: this row
+     * says how many turns and tool rounds were kept and dropped, which is the
+     * difference between "this conversation is long" and "this conversation
+     * is quietly losing its earliest words". Absent a trim nothing is
+     * written, so the common path gains no ledger row — exactly as the run
+     * ledger's `context_trim` behaves.
+     */
+    case ContextTrim = 'context_trim';
+
     /** The exchange's resume position advanced. */
     case Checkpoint = 'checkpoint';
 
@@ -105,5 +120,22 @@ enum ChatEventType: string
             // shape: an assistant `tool_calls` message with no matching `tool`
             // result is a malformed request.
             || self::ToolError === $this;
+    }
+
+    /**
+     * Whether this event can start a whole unit of the wire transcript: a
+     * conversational turn, or a tool round (whose result rows belong to it).
+     *
+     * A turn is the smallest slice of the wire transcript that travels whole —
+     * a `tool` message whose `tool_calls` is outside the window is a malformed
+     * request, and so is a `tool_calls` message whose results are missing. The
+     * chat context window's shed unit and the wire read's cut boundary are
+     * therefore the same thing (SPEC §15.9), so the predicate is stated here,
+     * once, where both can agree on it rather than each spelling out their own
+     * list.
+     */
+    public function startsWireUnit(): bool
+    {
+        return $this->isConversational() || self::ToolCall === $this;
     }
 }

@@ -41,6 +41,12 @@ parameters:
     TASKLOOM_MAX_TOOL_OUTPUT_PCT: 15
     TASKLOOM_MAX_INPUT_ARTIFACT_PCT: 50
     TASKLOOM_WINDOW_TAIL_EXCHANGES: 10
+    # The chat window (SPEC §15.9): how many turns a chat request may carry
+    # before the candidate cap bites. Deliberately its own name and its own
+    # scale — the run window counts exchanges against a budget, and chat is a
+    # different lane with a different shape (see docs/design/CHAT_TOOLS.md §4
+    # for why chat's loop ceiling, too, is separate from the run's).
+    TASKLOOM_CHAT_WINDOW_TURNS: 100
     # Session memory (docs/design/SESSION_TASKS.md §3.3): the store's four
     # caps. The block's own percentage is separate from the Inputs cap on
     # purpose — memory and inputs are different kinds of never-pruned
@@ -143,7 +149,18 @@ services:
         arguments:
             $executor: '@App\RunEngine\ToolExecutor'
             $prompts: '@App\RunEngine\PromptCompiler'
+            $context: '@App\Chat\ChatContextWindow'
             $bus: '@messenger.default_bus'
+
+    # The chat context window (SPEC §15.9): the fit that keeps a conversation
+    # sendable as it grows. The token budget is the model's window, so the
+    # limit is the same knob the run window reads; the candidate count is the
+    # chat's own, for the same reason its tool-round ceiling is.
+    App\Chat\ChatContextWindow:
+        arguments:
+            $contextLimitTokens: '%env(int:default:TASKLOOM_CONTEXT_LIMIT:TASKLOOM_CONTEXT_LIMIT)%'
+            $maxToolOutputPct: '%env(float:default:TASKLOOM_MAX_TOOL_OUTPUT_PCT:TASKLOOM_MAX_TOOL_OUTPUT_PCT)%'
+            $windowTurns: '%env(int:default:TASKLOOM_CHAT_WINDOW_TURNS:TASKLOOM_CHAT_WINDOW_TURNS)%'
 
     # Run engine (SPEC §3, §5): loop, prompt compiler, budgets.
     App\Llm\LlmClient:

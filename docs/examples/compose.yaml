@@ -98,6 +98,12 @@ x-taskloom-env: &taskloom-env
   TASKLOOM_CIRCUIT_BREAKER: ${TASKLOOM_CIRCUIT_BREAKER:-3}
   TASKLOOM_CONTEXT_LIMIT: ${TASKLOOM_CONTEXT_LIMIT:-32768}
   TASKLOOM_MAX_TOOL_OUTPUT_PCT: ${TASKLOOM_MAX_TOOL_OUTPUT_PCT:-15}
+  # Chat (SPEC §15): the tool-round ceiling per reply, and how many turns of a
+  # conversation one request may carry before the oldest are shed from the
+  # model's window (SPEC §15.9). Both are chat-specific on purpose — chat is
+  # the priority head and its bounds are about the person waiting.
+  TASKLOOM_CHAT_TOOL_ROUNDS: ${TASKLOOM_CHAT_TOOL_ROUNDS:-6}
+  TASKLOOM_CHAT_WINDOW_TURNS: ${TASKLOOM_CHAT_WINDOW_TURNS:-100}
   # Cap on the whole Inputs block (a stepped run's dependency outputs): each
   # artifact gets an equal share, so a wide task cannot pin its runs' floor.
   TASKLOOM_MAX_INPUT_ARTIFACT_PCT: ${TASKLOOM_MAX_INPUT_ARTIFACT_PCT:-50}

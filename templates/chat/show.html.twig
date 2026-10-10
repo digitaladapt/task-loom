@@ -35,6 +35,21 @@
 <section aria-labelledby="transcript-heading" class="chat-transcript">
     <h2 id="transcript-heading" class="visually-hidden">Transcript</h2>
 
+    {#
+        The window's confession (SPEC §15.9).
+
+        A conversation grows forever; the model's window does not. When the
+        oldest turns have slipped out of the model's view, this says so in
+        plain words — the ledger records every trim, but a person needs the
+        consequence, not the row: *she can no longer see the start of this
+        conversation*. It changes what it makes sense to ask for without
+        restating context, which is exactly the kind of thing that is worse
+        to leave unsaid.
+    #}
+    {% if window_notice is not null %}
+        <p class="muted" role="status">{{ window_notice }}</p>
+    {% endif %}
+
     {% if transcript is empty %}
         <p class="muted">Nothing said yet.</p>
     {% endif %}

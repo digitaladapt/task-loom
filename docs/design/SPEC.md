@@ -1059,3 +1059,55 @@ kept as recorded facts rather than inferences: every dispatch writes a
 transcript is long and half written by the model), and a `tool` role message
 may only be rendered from a `tool_result`/`tool_error` row the executor wrote,
 never from prose that happens to be in the ledger.
+
+### 15.9 Chat context — the window a conversation needs (v1.x)
+
+**Status:** built. Closes the design note's §10.2 ("Unbounded conversation")
+with the policy it said was owed, and it is deliberately the run engine's
+policy, not a new one.
+
+A `Run` ends, so its context is bounded by construction (SPEC §5.6). A
+conversation does not end, so its transcript eventually outgrows any model
+window — the one problem the chat aggregate has that a run does not. The
+answer is the run's discipline pointed at a second aggregate: **static
+whole-unit trimming with a fail-closed budget**, no LLM summarization
+(DESIGN_CONSIDERATIONS §2.3 rejects it as silently lossy, and a conversation
+is not an exception).
+
+- **The unit is a whole turn.** A conversational row (`message` / `reply`),
+  or a whole tool round (the assistant `tool_calls` row *plus* the
+  `tool_result` / `tool_error` rows that answer it). The oldest turns are
+  shed whole, never half a round: a `tool` message whose `tool_calls` is
+  outside the window is a malformed request, which is the same reason the run
+  window retires a whole exchange. The boundary is stated once, on the
+  vocabulary (`ChatEventType::startsWireUnit()`), so the read and the fit
+  cannot drift apart.
+- **The budget is the model's window** (`TASKLOOM_CONTEXT_LIMIT`) — the same
+  knob the run window reads, because the window is a fact about the model,
+  not about which lane is asking. The fit counts the whole request: the head
+  and the tool definitions, besides the turns.
+- **The head is never trimmed, and neither is the newest turn.** The system
+  message is the conversation's constitution. The newest turn is the
+  question being answered: a request that cannot fit head + newest turn fails
+  the exchange closed with a named reason (ErrorClass `context_exhausted`) —
+  never a transcript with no question in it, and never a request that flies
+  at the provider to return a raw transport error to a person.
+- **The shedding is visible, with exact counts.** Every trim writes a
+  `context_trim` row saying how many turns and tool rounds were kept and
+  dropped (SPEC §15.8's rule extends here: a person is waiting, so the
+  surface renders a plain-words notice — "she can no longer see the start of
+  this conversation" — when it applies). The wire read cuts at turn
+  boundaries and reports what it left behind, so *everything* out of the
+  model's view is counted; a conversation inside the window writes no row at
+  all.
+- **`TASKLOOM_CHAT_WINDOW_TURNS` (default 100)** bounds how deep into a
+  conversation one request reaches at all — a *read* bound, separate from the
+  run window's exchange count for the same reason chat's tool-round ceiling
+  is separate from the step budget (`CHAT_TOOLS.md` §4). Everything older is
+  out of the read and counted into the trim.
+
+What this is *not*: a second engine, a table, or a summarizer. The fit lives
+in `App\Chat\ChatContextWindow`, sharing the token estimate and the capping
+arithmetic with the run window; the transcript stays the filtered read it
+always was, and the ledger still keeps everything — this is a *context*
+policy, exactly as §10.2 framed it.

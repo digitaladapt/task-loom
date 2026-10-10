@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional;
 
+use App\Chat\ChatContextWindow;
 use App\Context\ContextWindow;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
 
@@ -39,6 +40,7 @@ final class DeploymentDefaultsTest extends WebTestCase
         'TASKLOOM_MAX_TOOL_OUTPUT_PCT' => 15,
         'TASKLOOM_MAX_INPUT_ARTIFACT_PCT' => 50,
         'TASKLOOM_WINDOW_TAIL_EXCHANGES' => 10,
+        'TASKLOOM_CHAT_WINDOW_TURNS' => 100,
         'TASKLOOM_SESSION_HOT' => 5,
         'TASKLOOM_SESSION_COLD' => 25,
         'TASKLOOM_SESSION_WRITE_MAX_CHARS' => 2000,
@@ -101,6 +103,38 @@ final class DeploymentDefaultsTest extends WebTestCase
                 $value,
                 $actual,
                 \sprintf('ContextWindow::$%s should resolve to the deployment value (%s).', $property, $value),
+            );
+        }
+    }
+
+    /**
+     * The chat window is wired the same way (SPEC §15.9): its token budget is
+     * the model window — the same knob the run window reads — and its turn
+     * count is chat's own, both resolved from the deployment rather than read
+     * out of the raw environment where they could drift.
+     */
+    public function testTheChatContextWindowResolvesItsKnobsFromTheDeployment(): void
+    {
+        $container = static::getContainer();
+
+        $window = $container->get('test.service_container')->get(ChatContextWindow::class);
+        \assert($window instanceof ChatContextWindow);
+
+        $reflection = new \ReflectionObject($window);
+
+        $expected = [
+            'contextLimitTokens' => (int) $container->getParameter('TASKLOOM_CONTEXT_LIMIT'),
+            'maxToolOutputPct' => (float) $container->getParameter('TASKLOOM_MAX_TOOL_OUTPUT_PCT'),
+            'windowTurns' => (int) $container->getParameter('TASKLOOM_CHAT_WINDOW_TURNS'),
+        ];
+
+        foreach ($expected as $property => $value) {
+            $actual = $reflection->getProperty($property)->getValue($window);
+
+            self::assertSame(
+                $value,
+                $actual,
+                \sprintf('ChatContextWindow::$%s should resolve to the deployment value (%s).', $property, $value),
             );
         }
     }

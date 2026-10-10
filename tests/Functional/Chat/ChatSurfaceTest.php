@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Functional\Chat;
 
 use App\Entity\Chat;
+use App\Entity\ChatEventType;
 use App\Entity\ChatExchange;
 use App\Entity\ChatExchangeEvent;
 use App\Entity\ErrorClass;
@@ -188,6 +189,62 @@ final class ChatSurfaceTest extends WebTestCase
         self::assertResponseStatusCodeSame(404);
     }
 
+    /**
+     * THE WINDOW'S CONFESSION (SPEC §15.9).
+     *
+     * Once the model's window has shed part of the conversation, the page
+     * says so in plain words — because "she can no longer see the start of
+     * this conversation" changes what it makes sense to ask for, and it is
+     * worse to leave that unsaid than any ledger row.
+     */
+    public function testThePageSaysWhenTheModelCanNoLongerSeeTheStartOfTheConversation(): void
+    {
+        $chat = $this->seedConversation('hello', 'hi');
+        $this->recordATrim($chat, droppedTurns: 7, droppedRounds: 2);
+
+        $crawler = $this->client->request('GET', '/chat/'.$chat->getId());
+
+        self::assertResponseIsSuccessful();
+
+        $notice = $crawler->filter('[role="status"]')->text();
+        self::assertStringContainsString('no longer see', $notice);
+        self::assertStringContainsString('7 turns and 2 tool rounds', $notice, 'the counts are stated, not hand-waved');
+    }
+
+    /**
+     * And a conversation inside the window is not announced as trimmed: the
+     * ordinary case must not read like a problem.
+     */
+    public function testAnUntrimmedConversationCarriesNoWindowNotice(): void
+    {
+        $chat = $this->seedConversation('hello', 'hi');
+
+        $crawler = $this->client->request('GET', '/chat/'.$chat->getId());
+
+        self::assertResponseIsSuccessful();
+        self::assertCount(0, $crawler->filter('[role="status"]'), 'nothing to confess');
+    }
+
+    /** Record the one ledger row a trim leaves, as the engine writes it. */
+    private function recordATrim(Chat $chat, int $droppedTurns, int $droppedRounds): void
+    {
+        $em = $this->em();
+        $exchange = $em->getRepository(ChatExchange::class)->findOneBy(['chat' => $chat]);
+
+        self::assertInstanceOf(ChatExchange::class, $exchange);
+
+        $exchange->appendMachinery(ChatEventType::ContextTrim, [
+            'keptTurns' => 3,
+            'keptRounds' => 1,
+            'droppedTurns' => $droppedTurns,
+            'droppedRounds' => $droppedRounds,
+            'estimatedTokens' => 4000,
+            'limitTokens' => 32768,
+        ]);
+
+        $em->flush();
+    }
+
     private function sayToken(Chat $chat): string
     {
         $crawler = $this->client->request('GET', '/chat/'.$chat->getId());
@@ -213,14 +270,14 @@ final class ChatSurfaceTest extends WebTestCase
         $em->persist($exchange);
 
         $exchange->appendEvent(ChatExchangeEvent::turn(
-            \App\Entity\ChatEventType::Message,
+            ChatEventType::Message,
             Participant::Andrew,
             TurnRole::User,
             \App\Entity\ChatOrigin::Web,
             $said,
         ));
         $exchange->appendEvent(ChatExchangeEvent::turn(
-            \App\Entity\ChatEventType::Reply,
+            ChatEventType::Reply,
             Participant::Nia,
             TurnRole::Assistant,
             \App\Entity\ChatOrigin::Web,
@@ -243,7 +300,7 @@ final class ChatSurfaceTest extends WebTestCase
         self::assertInstanceOf(ChatExchange::class, $exchange);
 
         $exchange->appendMachinery(
-            \App\Entity\ChatEventType::Failure,
+            ChatEventType::Failure,
             ['reason' => 'LLM transport failure: endpoint unreachable'],
             errorClass: ErrorClass::LlmError,
         );
