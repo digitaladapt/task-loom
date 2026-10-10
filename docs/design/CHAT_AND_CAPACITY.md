@@ -1,7 +1,7 @@
 # Chat and Capacity
 
 **Status:** design — settled, and **§8 steps 1, 2 and the tool loop are built**
-(SPEC §15 and §15.8; the tool loop has its own note, `CHAT_TOOLS.md`).
+(SPEC §15, §15.8, §15.9; the tool loop has its own note, `CHAT_TOOLS.md`).
 The attribution invariant, the chat aggregate, the exchange ledger, the
 phone-first web surface, and the chat lane as priority head all shipped
 together; this doc is now the record of why they are shaped the way they are,
@@ -15,9 +15,10 @@ generation. If that proves too slow in use, the streaming work in §4.3 is the
 fix, and nothing about the aggregate or the lane has to move for it.
 
 The open questions from review are answered (§10.4 lists them); what remains
-open is listed in §10 — of which §10.2 (an unbounded transcript and the
-context policy it needs) is now the live one, because the conversation it
-warns about exists.
+open is listed in §10. §10.2 (an unbounded transcript and the context policy
+it needs) was the live one and is now **closed** — built as SPEC §15.9, on
+this doc's own advice: the run engine's discipline pointed at a second
+aggregate.
 
 ## 0. The two problems
 
@@ -708,12 +709,15 @@ first.
    turn's partial output is persisted per chunk or only on completion.
    (Related to §4.3: the same streaming reader serves both the preemption
    goal and the "watch it type" feel.)
-2. **Unbounded conversation.** A `Run` ends, so its context is bounded by
-   construction. A chat does not end, so its transcript grows forever. The
-   SPEC has context-budget machinery for runs; a chat needs the analogous
-   policy — what scrolls out, what is summarized, what is always kept.
-   Not designed here. (Note this is a *context* problem, not a storage
-   one: the ledger keeps everything.)
+2. ~~**Unbounded conversation.**~~ **Closed — built as SPEC §15.9.** A `Run`
+   ends, so its context is bounded by construction; a chat does not end, so
+   its transcript grows forever. The policy landed as the run engine's own
+   discipline pointed at the second aggregate: whole-turn static trimming
+   with a fail-closed budget, a visible `context_trim` record, and a
+   chat-specific read bound (`TASKLOOM_CHAT_WINDOW_TURNS`). No summarization
+   (DESIGN_CONSIDERATIONS §2.3 applies to a conversation too), no new engine,
+   no table. (Note this was a *context* problem, not a storage one: the
+   ledger keeps everything, and still does.)
 3. **Which human?** The roster makes a second human an addition, but
    nothing yet decides *which* participant an inbound message is from. v1:
    one human, identity from the session.

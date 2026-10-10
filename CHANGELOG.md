@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The chat context window — a conversation is fitted to the model's budget,
+  and the shedding is visible (SPEC §15.9, closing `CHAT_AND_CAPACITY.md`
+  §10.2).** A `Run` ends, so its context is bounded by construction; a
+  conversation does not end, so its transcript grew forever — and until now
+  nothing fitted it. The chat path compiled the *whole* wire transcript into
+  every request with no token accounting at all: `TASKLOOM_CONTEXT_LIMIT`
+  reached it only as a per-tool-result cap, so a long conversation eventually
+  overflowed the model's real window and died as a raw provider HTTP error
+  (`llm_error`) in front of a person, instead of the clean fail-closed
+  `context_exhausted` a run gets.
+
+  **The fix is the run engine's discipline, not a new one.**
+  `App\Chat\ChatContextWindow` fits the transcript statically: the oldest
+  *whole turns* are shed until the request fits, where a turn is a
+  conversational row or a whole tool round — never half a round, because a
+  `tool` message whose `tool_calls` is outside the window is a malformed
+  request. No LLM summarization (DESIGN_CONSIDERATIONS §2.3 rejects it for a
+  conversation as much as for a run). The head is never trimmed and neither
+  is the newest turn — the question being answered — and a request that
+  cannot fit those fails the exchange closed with a named reason.
+
+  **Nothing leaves the model's view unrecorded.** Every trim writes a
+  `context_trim` row (kept/dropped turns and rounds); the chat page renders
+  it back as a plain-words notice — "she can no longer see the start of this
+  conversation" — because a chat surface has no ledger timeline and the
+  consequence is what a person needs to hear. A conversation inside the
+  window writes no row at all, so "nothing was trimmed" and "trimming was
+  not recorded" stay distinguishable.
+
+  **A new chat-specific knob, and a dead env-read removed.**
+  `TASKLOOM_CHAT_WINDOW_TURNS` (default 100) bounds how deep into a
+  conversation one request reaches at all — a *read* bound, separate from the
+  run window's exchange count for the same reason chat's tool-round ceiling
+  is separate from the step budget. The wire read
+  (`findWireWindow()`) cuts at turn boundaries and reports exactly what it
+  left behind, so counts are exact; it replaces the silent 200-row cap the
+  old read could hit mid-round. And the window's knobs now resolve through
+  the container like every other configuration value — the old
+  `capToolResult` read `TASKLOOM_CONTEXT_LIMIT` and
+  `TASKLOOM_MAX_TOOL_OUTPUT_PCT` out of the raw environment by name, one
+  place that could silently disagree with the deployment's resolved values.
+
+  **The deployment files were also missing a forwarded knob.**
+  `TASKLOOM_CHAT_TOOL_ROUNDS` is read straight from the process environment,
+  and neither compose file passed it — so in a container (which runs with
+  dotenv disabled) the documented chat-tools ceiling was silently inert.
+  Both compose files now forward it, and the new knob, with the same
+  defaults .env.example states.
+
+  Proofs: the overgrown conversation is trimmed with the counts recorded and
+  the oldest content absent from the wire; an unfittable turn fails closed as
+  `context_exhausted` with the provider never called; the retained window
+  never contains a `tool` message without its announcing `tool_calls`
+  message; the read bound is counted into the trim; a short conversation
+  records nothing; the surface says the sentence only when it is true; and a
+  wiring test pins both chat-window knobs to the deployment's resolved
+  values.
+
 - **The session write tools — `session_note` and `session_objective` — and SPEC
   §4.1's harness-tool clause (build order step 3 of
   `docs/design/SESSION_TASKS.md`).** These are task-loom's **first built-in
