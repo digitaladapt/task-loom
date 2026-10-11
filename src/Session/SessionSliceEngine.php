@@ -84,6 +84,18 @@ final readonly class SessionSliceEngine
             return SessionState::Paused;
         }
 
+        return $this->activeState($task);
+    }
+
+    /**
+     * The state the session would be in if it were enabled — the same
+     * derivation as {@see self::state()} without the operator's switch. The
+     * UI (step 6) reads this to say what a resume would actually do: a
+     * paused session whose last slice declared `done` resumes to
+     * `complete`, and enabling it launches nothing.
+     */
+    public function activeState(Task $task): SessionState
+    {
         $runs = $this->runs->findForTask($task);
 
         foreach ($runs as $run) {

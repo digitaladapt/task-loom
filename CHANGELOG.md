@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The session UI — steering is a page, and every write goes through the
+  store (build order step 6 of `docs/design/SESSION_TASKS.md`).** The session
+  page (`/tasks/{id}/session`) shows the derived state with a one-sentence
+  explanation of why the session is where it is, the controls the state
+  honestly allows — **Start** (a first slice), **Resume** (owed / blocked /
+  stopped), **Pause** (the switch off; the current slice finishes quietly),
+  and a plain re-enable for a mid-slice pause — and the memory: the objective
+  first with its provenance, then the notes by tier, each with its age and a
+  revision history that can be reverted.
+
+  **The operator's steering, live.** Edit the objective (the cleanest steer
+  there is: "stop refactoring; the importer only" *is* an objective edit),
+  add / edit / delete notes, pin a note hot, demote or promote between tiers,
+  and revert any entry to a prior revision — the revert is itself an edit
+  (the replaced text is kept), so nothing is ever lost: revert-of-a-revert
+  walks back forward. All of it takes effect on the session's next request;
+  nothing mid-flight is rewritten (§4.1). This is runtime state, not a task
+  edit — the immutable constitution (SPEC §4.4) is untouched, no approval
+  gate is involved.
+
+  **One writer, enforced by construction.** `SessionMemoryStore` grew the
+  five operator operations (`editMemory`, `deleteNote`, `setPinned`,
+  `setTier`, `revertToRevision`) so the UI and the harness tools share every
+  rule — the caps, the revision history, the provenance typing — and the
+  refusals stay reasons: the objective cannot be deleted (it is always
+  injected; replace it), a pinned note cannot be demoted (unpin first; pinned
+  means kept hot), a revision cannot be reverted across memories, and an
+  oversized write names its knob. The page's prose says what each act does
+  before you take it.
+
+  While testing this, a latent store bug surfaced and was fixed: the two
+  deletion paths removed revision rows with a bulk DQL delete, which bypasses
+  the UnitOfWork — the managed rows dangled in the identity map and the
+  *next* flush failed with a Doctrine error that named none of this. Both
+  paths now remove through the UnitOfWork.
+
 - **The session lane — sessions run below tasks, and nothing else changed
   (build order step 5 of `docs/design/SESSION_TASKS.md`).** A session slice's
   LLM turns now ride a third lane, drained last: the LLM workers consume

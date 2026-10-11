@@ -114,6 +114,111 @@ final readonly class SessionMemoryStore
     }
 
     /**
+     * Replace a memory row's text — the operator's edit (§6.1), the same
+     * "replacement, not mutation" as the objective's writes (§6.3).
+     *
+     * The superseded text is kept in the history first, exactly as
+     * setObjective does, so every edit is visible and reversible. Editing a
+     * session-written note is also a **provenance change**, and the passed
+     * source records that: the text the model will now read is the
+     * operator's, and the revision history shows what it replaced.
+     */
+    public function editMemory(SessionMemory $memory, string $text, SessionMemorySource $source): void
+    {
+        $this->guardWritable($memory->getTask());
+        $text = $this->guardText($text);
+
+        $this->keepRevision($memory);
+        $memory->applyText($text, $source);
+        $this->em->flush();
+    }
+
+    /**
+     * Delete one note (§6.1: the operator's delete).
+     *
+     * The note's revision history goes with it, deliberately — the same
+     * reasoning as cold-drop overflow (§3.3): history of a thing that no
+     * longer exists would be the unbounded store this table must not be.
+     * The objective cannot be deleted — it is always injected (§3.2);
+     * clearing it is not a state the design has.
+     */
+    public function deleteNote(SessionMemory $note): void
+    {
+        $this->guardWritable($note->getTask());
+        if (!$note->isNote()) {
+            throw new \LogicException('The objective cannot be deleted — it is always injected; replace it instead.');
+        }
+
+        // The history goes through the UnitOfWork, not a bulk DQL delete:
+        // a bulk delete bypasses it, leaving any already-managed revision
+        // rows dangling in the identity map — and the NEXT flush then trips
+        // over their association to the removed note, as a Doctrine error
+        // that looks nothing like its cause. Loading a handful of revisions
+        // is the cheap side of that trade.
+        foreach ($this->memories->findRevisionsForMemory($note) as $revision) {
+            $this->em->remove($revision);
+        }
+        $this->em->remove($note);
+        $this->em->flush();
+    }
+
+    /**
+     * Pin or unpin a note (§6.1). Pinning is one operator act that keeps the
+     * note hot — exempt from ageing — and drags it hot if it was cold
+     * ({@see SessionMemory::pin()}); unpinning leaves the tier where it is,
+     * and the next ageing pass reconciles the cap.
+     */
+    public function setPinned(SessionMemory $note, bool $pinned): void
+    {
+        $this->guardWritable($note->getTask());
+
+        if ($pinned) {
+            $note->pin();
+        } else {
+            $note->unpin();
+        }
+        $this->em->flush();
+    }
+
+    /**
+     * Move a note between tiers (§6.1): `cold` demotes (the transition
+     * ageing applies, made explicit by the operator), `hot` promotes a cold
+     * note back. Both are operator acts, so neither silently reconciles the
+     * hot cap — {@see SessionMemory::demote()} and
+     * {@see SessionMemory::promote()} state the rules, and they are the
+     * rules the ageing pass then applies.
+     */
+    public function setTier(SessionMemory $note, SessionMemoryTier $tier): void
+    {
+        $this->guardWritable($note->getTask());
+
+        match ($tier) {
+            SessionMemoryTier::Cold => $note->demote(),
+            SessionMemoryTier::Hot => $note->promote(),
+        };
+        $this->em->flush();
+    }
+
+    /**
+     * Revert a memory row to a prior revision (§6.1, §6.3): the revert is
+     * itself an edit — it keeps the current text in the history first, then
+     * applies the old text, marked as the operator's (they are choosing it
+     * now, deliberately). Nothing is ever lost: revert-of-a-revert walks
+     * back forward again.
+     */
+    public function revertToRevision(SessionMemory $memory, SessionMemoryRevision $revision): void
+    {
+        $this->guardWritable($memory->getTask());
+        if ($revision->getMemory() !== $memory) {
+            throw new \LogicException('This revision does not belong to that memory row — refusing a cross-memory revert.');
+        }
+
+        $this->keepRevision($memory);
+        $memory->applyText($revision->getText(), SessionMemorySource::Operator);
+        $this->em->flush();
+    }
+
+    /**
      * Keep the text an edit replaced (§6.3): one append-only revision row,
      * carrying the revision it belonged to and its provenance.
      */
@@ -174,12 +279,12 @@ final readonly class SessionMemoryStore
             // The oldest cold note is dropped. A dropped note's revision
             // history goes with it — history of a thing that no longer
             // exists would be the unbounded store this table must not be
-            // (§3.3) — and SQLite enforces no foreign keys unless its
-            // pragma says so, which is exactly why the cleanup is explicit
-            // here rather than left to the constraint.
-            $this->em->createQuery('DELETE FROM App\Entity\SessionMemoryRevision r WHERE r.memory = :memory')
-                ->setParameter('memory', $cold[$index])
-                ->execute();
+            // (§3.3). Removed through the UnitOfWork for the same reason as
+            // deleteNote: a bulk DQL delete would leave managed rows
+            // dangling in the identity map for the next flush to trip over.
+            foreach ($this->memories->findRevisionsForMemory($cold[$index]) as $revision) {
+                $this->em->remove($revision);
+            }
             $this->em->remove($cold[$index]);
         }
 

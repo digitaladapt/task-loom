@@ -6,6 +6,7 @@ namespace App\Repository;
 
 use App\Entity\SessionMemory;
 use App\Entity\SessionMemoryKind;
+use App\Entity\SessionMemoryRevision;
 use App\Entity\SessionMemoryTier;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\Persistence\ManagerRegistry;
@@ -63,5 +64,64 @@ final class SessionMemoryRepository extends ServiceEntityRepository
             ->orderBy('m.id', \SortDirection::Ascending)
             ->getQuery()
             ->getResult();
+    }
+
+    /**
+     * One memory row by id, scoped to its session — the controller's lookup
+     * for a UI action, so a request for another session's row finds nothing
+     * rather than writing it.
+     */
+    public function findOneForTask(int $taskId, int $memoryId): ?SessionMemory
+    {
+        return $this->createQueryBuilder('m')
+            ->where('m.task = :task')
+            ->andWhere('m.id = :id')
+            ->setParameter('task', $taskId)
+            ->setParameter('id', $memoryId)
+            ->getQuery()
+            ->getOneOrNullResult();
+    }
+
+    /**
+     * Every revision of every memory row of one session, newest first — the
+     * UI's history list, one query for the page. The caller groups by
+     * memory id (the revision's own `memory` association carries it).
+     *
+     * @return list<SessionMemoryRevision>
+     */
+    public function findRevisionsForTask(int $taskId): array
+    {
+        return $this->getEntityManager()
+            ->createQuery('SELECT r FROM App\Entity\SessionMemoryRevision r JOIN r.memory m WHERE m.task = :task ORDER BY r.id DESC')
+            ->setParameter('task', $taskId)
+            ->getResult();
+    }
+
+    /**
+     * Every revision of one memory row, newest first — what delete and
+     * revert need to take (or apply) the history through the UnitOfWork.
+     *
+     * @return list<SessionMemoryRevision>
+     */
+    public function findRevisionsForMemory(SessionMemory $memory): array
+    {
+        return $this->getEntityManager()
+            ->createQuery('SELECT r FROM App\Entity\SessionMemoryRevision r WHERE r.memory = :memory ORDER BY r.id DESC')
+            ->setParameter('memory', $memory)
+            ->getResult();
+    }
+
+    /**
+     * One revision, scoped to its session and its memory row — the revert
+     * action's lookup, so a request cannot revert another session's entry.
+     */
+    public function findRevisionForTask(int $taskId, int $memoryId, int $revisionId): ?SessionMemoryRevision
+    {
+        return $this->getEntityManager()
+            ->createQuery('SELECT r FROM App\Entity\SessionMemoryRevision r JOIN r.memory m WHERE m.task = :task AND m.id = :memory AND r.id = :revision')
+            ->setParameter('task', $taskId)
+            ->setParameter('memory', $memoryId)
+            ->setParameter('revision', $revisionId)
+            ->getOneOrNullResult();
     }
 }

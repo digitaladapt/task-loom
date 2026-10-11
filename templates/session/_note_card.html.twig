@@ -1,0 +1,44 @@
+{#
+    One note card on the session page (docs/design/SESSION_TASKS.md §6.1):
+    the note, its provenance, age and tier, and the operator's controls —
+    edit, pin/unpin, demote/promote, delete, and the revision history with
+    revert.
+#}
+<article class="memory-card note-card">
+    <p class="memory-head">
+        <span class="memory-badge">{{ note.pinned ? 'Pinned' : (note.hot ? 'Hot' : 'Cold') }}</span>
+        <span class="muted">[{{ note.source.value == 'operator' ? 'operator' : 'you' }}] · revision {{ note.revision }} · added {{ note.createdAt|date('Y-m-d H:i') }}</span>
+    </p>
+    <p class="memory-text">{{ note.text }}</p>
+
+    <div class="memory-actions">
+        <details class="memory-disclosure">
+            <summary>Edit</summary>
+            <form method="post" action="{{ path('app_session_memory_edit', {id: task.id, memoryId: note.id}) }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('session-memory-edit-' ~ note.id) }}">
+                <textarea name="text" rows="3" required>{{ note.text }}</textarea>
+                <button type="submit">Save note</button>
+                <span class="muted">Editing attributes the text to you — the revision history keeps what it replaced.</span>
+            </form>
+        </details>
+
+        <form method="post" action="{{ path('app_session_memory_pin', {id: task.id, memoryId: note.id}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('session-memory-pin-' ~ note.id) }}">
+            <input type="hidden" name="pinned" value="{{ note.pinned ? '0' : '1' }}">
+            <button type="submit" class="small">{{ note.pinned ? 'Unpin' : 'Pin hot' }}</button>
+        </form>
+
+        <form method="post" action="{{ path('app_session_memory_tier', {id: task.id, memoryId: note.id}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('session-memory-tier-' ~ note.id) }}">
+            <input type="hidden" name="tier" value="{{ note.hot ? 'cold' : 'hot' }}">
+            <button type="submit" class="small">{{ note.hot ? 'Demote' : 'Promote' }}</button>
+        </form>
+
+        <form method="post" action="{{ path('app_session_memory_delete', {id: task.id, memoryId: note.id}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('session-memory-delete-' ~ note.id) }}">
+            <button type="submit" class="small danger">Delete</button>
+        </form>
+    </div>
+
+    {% include 'session/_history.html.twig' with {task: task, memory: note, revisions: revisions} %}
+</article>

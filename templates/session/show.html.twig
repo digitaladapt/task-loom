@@ -1,0 +1,132 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Session #{{ task.id }} {{ task.title }} — TaskLoom{% endblock %}
+
+{% block body %}
+<header class="page-header">
+    <h1>Session #{{ task.id }} — {{ task.title }}</h1>
+    <p class="muted">
+        <a href="{{ path('app_task_detail', {id: task.id}) }}">task page</a> ·
+        state: <strong>{{ session.stateLabel }}</strong>
+    </p>
+</header>
+
+{% for label, messages in app.flashes %}
+    {% for message in messages %}
+        <p class="flash flash-{{ label }}" role="status">{{ message }}</p>
+    {% endfor %}
+{% endfor %}
+
+{# The state block: why the session is where it is, and what the controls do. #}
+<section aria-labelledby="state-heading" class="session-state">
+    <h2 id="state-heading" class="visually-hidden">State</h2>
+    <p>{{ session.explanation }}</p>
+    {% if session.lastSlice %}
+        <p class="muted">Last slice: <a href="{{ path('app_run_detail', {id: session.lastSlice.id}) }}">run #{{ session.lastSlice.id }}</a>
+            ({{ session.lastSlice.status.value }}{% if session.lastSlice.declaration %} — declared {{ session.lastSlice.declaration.outcome }}{% endif %})</p>
+    {% endif %}
+
+    <div class="session-controls">
+        {% if session.startable %}
+            <form method="post" action="{{ path('app_session_start', {id: task.id}) }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('session-start') }}">
+                <button type="submit">{{ session.startLabel }}</button>
+            </form>
+        {% elseif session.enableOnly %}
+            {# Paused mid-slice: re-enabling is a pure unpause — the slice finishes on its own. #}
+            <form method="post" action="{{ path('app_session_enable', {id: task.id}) }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('session-enable') }}">
+                <button type="submit">Enable session</button>
+            </form>
+        {% endif %}
+
+        {% if session.pausable %}
+            <form method="post" action="{{ path('app_session_pause', {id: task.id}) }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('session-pause') }}">
+                <button type="submit">Pause</button>
+            </form>
+        {% endif %}
+    </div>
+</section>
+
+{#
+    The memory (§6.1): the objective first, then the notes — hottest first.
+    Each entry carries its source, its age and its tier; edits take effect on
+    the session's next request (nothing mid-flight is rewritten).
+
+    Provenance is visible because it matters: [operator] entries are
+    directives the session is told to follow; [you] entries are the
+    session's own recollections, which the block tells it not to be steered
+    by.
+#}
+<section aria-labelledby="memory-heading" class="session-memory">
+    <h2 id="memory-heading">Memory</h2>
+    <p class="muted">What carries across slices — the transcript does not. Edits ride the session's next request.</p>
+
+    {# ── The objective ─────────────────────────────────────────────────── #}
+    {% if session.objective %}
+        {% set objective = session.objective %}
+        <article class="memory-card objective-card">
+            <p class="memory-head">
+                <span class="memory-badge">Objective</span>
+                <span class="muted">[{{ objective.source.value == 'operator' ? 'operator' : 'you' }}] · revision {{ objective.revision }} · updated {{ objective.updatedAt|date('Y-m-d H:i') }}</span>
+            </p>
+            <p class="memory-text">{{ objective.text }}</p>
+
+            <details class="memory-disclosure">
+                <summary>Edit objective</summary>
+                <form method="post" action="{{ path('app_session_objective', {id: task.id}) }}">
+                    <input type="hidden" name="_token" value="{{ csrf_token('session-objective') }}">
+                    <textarea name="text" rows="3" required>{{ objective.text }}</textarea>
+                    <button type="submit">Save objective</button>
+                </form>
+            </details>
+            {% include 'session/_history.html.twig' with {task: task, memory: objective, revisions: session.revisionsOf(objective)} %}
+        </article>
+    {% else %}
+        <article class="memory-card objective-card">
+            <p class="memory-head"><span class="memory-badge">Objective</span> <span class="muted">none yet</span></p>
+            <details class="memory-disclosure" open>
+                <summary>Set the objective</summary>
+                <form method="post" action="{{ path('app_session_objective', {id: task.id}) }}">
+                    <input type="hidden" name="_token" value="{{ csrf_token('session-objective') }}">
+                    <textarea name="text" rows="3" required placeholder="What this session is trying to achieve now"></textarea>
+                    <button type="submit">Save objective</button>
+                </form>
+            </details>
+        </article>
+    {% endif %}
+
+    {# ── Hot notes ─────────────────────────────────────────────────────── #}
+    <h3>Notes — hot <span class="muted">(injected into every request)</span></h3>
+    {% if session.hotNotes is empty %}
+        <p class="muted">No hot notes.</p>
+    {% else %}
+        {% for note in session.hotNotes %}
+            {% include 'session/_note_card.html.twig' with {task: task, note: note, revisions: session.revisionsOf(note)} %}
+        {% endfor %}
+    {% endif %}
+
+    {# ── Cold notes ────────────────────────────────────────────────────── #}
+    <h3>Notes — cold <span class="muted">(kept, not injected)</span></h3>
+    {% if session.coldNotes is empty %}
+        <p class="muted">No cold notes.</p>
+    {% else %}
+        {% for note in session.coldNotes %}
+            {% include 'session/_note_card.html.twig' with {task: task, note: note, revisions: session.revisionsOf(note)} %}
+        {% endfor %}
+    {% endif %}
+
+    {# ── Add a note ────────────────────────────────────────────────────── #}
+    <article class="memory-card">
+        <details class="memory-disclosure">
+            <summary>Add a note</summary>
+            <form method="post" action="{{ path('app_session_add_note', {id: task.id}) }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('session-note-add') }}">
+                <textarea name="text" rows="3" required placeholder="One thing worth carrying forward — written as steering, since you are the operator"></textarea>
+                <button type="submit">Add note</button>
+            </form>
+        </details>
+    </article>
+</section>
+{% endblock %}
