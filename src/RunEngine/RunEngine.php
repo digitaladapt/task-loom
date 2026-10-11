@@ -12,7 +12,7 @@ use App\Entity\Run;
 use App\Entity\RunEvent;
 use App\Entity\RunEventType;
 use App\Entity\RunStatus;
-use App\Entity\SessionKindUnsupportedException;
+use App\Entity\SessionDeclarationOutcome;
 use App\Entity\Task;
 use App\Entity\TaskKind;
 use App\Entity\Tool;
@@ -22,8 +22,10 @@ use App\Llm\LlmRequestException;
 use App\Message\LlmTurnMessage;
 use App\Message\ToolTurnMessage;
 use App\Repository\RunRepository;
+use App\Session\SessionConstraintException;
 use App\Session\SessionMemoryRenderer;
 use App\Session\SessionMemoryWriteException;
+use App\Session\SessionSliceEngine;
 use App\Session\SessionTool;
 use App\Session\SessionToolRunner;
 use App\Toolbox\ToolSchemaValidator;
@@ -38,6 +40,12 @@ use Symfony\Component\Messenger\MessageBusInterface;
  * completion declaration or a budget failure. Every exchange is a typed
  * RunEvent row in the attempt ledger (§5.3), persisted before the next LLM
  * request (checkpoint, §5.5).
+ *
+ * Session slices (docs/design/SESSION_TASKS.md §8) ride this same loop: a
+ * slice is one run of a session-kind task; `session_declare` settles it
+ * through the same terminal-commit choke point step children use, and a
+ * `milestone` launches the next slice's run and lane message inside the
+ * settlement commit itself.
  *
  * The engine is TURN-BASED: one LLM exchange is two deliverable units — an
  * LLM turn (one model request) and a tool turn (the calls of that
@@ -90,6 +98,14 @@ final class RunEngine
     public const int CLAIM_STALE_SECONDS = 3600;
 
     /**
+     * Why a round carrying `session_declare` beside other calls is refused
+     * whole (docs/design/SESSION_TASKS.md §5): the settle path must have no
+     * ambiguity about which calls ran, and nothing comes after the
+     * declaration.
+     */
+    private const string DECLARATION_ALONE_DETAIL = 'session_declare must be alone in its round — no other calls beside it; nothing dispatches from a round that carries it with company. Re-issue it by itself.';
+
+    /**
      * @param array<string, int> $budgets step_budget, tool_retries, circuit_breaker
      */
     public function __construct(
@@ -106,6 +122,7 @@ final class RunEngine
         private readonly ?MessageBusInterface $bus = null,
         private readonly ?SessionMemoryRenderer $sessionMemory = null,
         private readonly ?SessionToolRunner $sessionToolRunner = null,
+        private readonly ?SessionSliceEngine $slices = null,
     ) {
     }
 
@@ -121,7 +138,13 @@ final class RunEngine
      */
     public function run(Task $task): Run
     {
-        $this->guardKind($task);
+        if (TaskKind::Session === $task->getKind()) {
+            // Sessions are lane-driven by design: their slices wait in the
+            // persisted queue like everything else, and the synchronous
+            // path would hold a whole session — and its next slice — on one
+            // process (docs/design/SESSION_TASKS.md §7, §8).
+            throw SessionConstraintException::syncNotAllowed();
+        }
 
         $graph = $this->graphFor($task);
         if (null !== $graph) {
@@ -253,7 +276,16 @@ final class RunEngine
      */
     public function start(Task $task): Run
     {
-        $this->guardKind($task);
+        if (TaskKind::Session === $task->getKind()) {
+            // A session's slice is not the ordinary begin() shape: it is
+            // gated on the session's derived state, frozen with the slice
+            // budget, and launched by the slice engine
+            // (docs/design/SESSION_TASKS.md §8). The launcher dispatches its
+            // first turn from RunEngine::nextTurnMessage() as usual.
+            $slices = $this->slices ?? throw new \LogicException('The run engine has no slice engine — a session cannot start. Wire App\\Session\\SessionSliceEngine in services.yaml.');
+
+            return $slices->start($task);
+        }
 
         $graph = $this->graphFor($task);
         if (null !== $graph) {
@@ -465,21 +497,6 @@ final class RunEngine
     }
 
     /**
-     * docs/design/SESSION_TASKS.md, build order step 1: the two dispatch
-     * entry points (run() and start()) refuse a task whose kind has no
-     * engine behind it, before any run row is created. Callers — the CLI
-     * trigger, the admin Run-now action, the scheduler — each translate the
-     * refusal into their own vocabulary; nothing may create a run for such
-     * a task.
-     */
-    private function guardKind(Task $task): void
-    {
-        if (!$task->getKind()->isImplemented()) {
-            throw SessionKindUnsupportedException::refused(\sprintf('Cannot start a run for task %d (kind "%s")', $task->getId(), $task->getKind()->value));
-        }
-    }
-
-    /**
      * The rendered `## Memories` block for a session run, or null for an
      * ordinary run (docs/design/SESSION_TASKS.md §4.1, build order step 2).
      *
@@ -547,12 +564,16 @@ final class RunEngine
     private function performLlmTurn(Run $run, LoopState $state, int $step, bool $async, ?int $claimToken = null): RunTurnResult
     {
         if ($step > $state->stepBudget) {
-            $this->commitTerminal($run, $async, function () use ($run, $state): void {
+            $sessionSlice = TaskKind::Session === $run->getTask()->getKind();
+
+            $this->commitTerminal($run, $async, function () use ($run, $state, $sessionSlice): void {
                 $run->markIncomplete();
                 $this->appendEvent(
                     $run,
                     RunEventType::Failure,
-                    ['reason' => \sprintf('step budget exhausted: %d exchanges, no completion declaration', $state->stepBudget)],
+                    ['reason' => $sessionSlice
+                        ? \sprintf('slice budget exhausted: %d exchanges, no session_declare declaration — the session stops for a human (docs/design/SESSION_TASKS.md §8)', $state->stepBudget)
+                        : \sprintf('step budget exhausted: %d exchanges, no completion declaration', $state->stepBudget)],
                     errorClass: ErrorClass::BudgetExceeded,
                 );
                 $this->em->flush();
@@ -610,12 +631,27 @@ final class RunEngine
 
         if (!$response->wantsToolCall()) {
             // Terminal message: completion must BE the result (SPEC §5.4).
+            // For a session slice the completion IS the declaration — a
+            // terminal message settles the slice WITHOUT one, which §8
+            // treats as "the session stops and needs a human": loud in the
+            // ledger, no retry, and no Completion artifact that would
+            // pretend the slice delivered anything.
+            //
             // Response event and terminal status commit together — and, for
             // a step child, the graph's advancement commits with them.
-            $this->commitTerminal($run, $async, function () use ($run, $response, $responsePayload): void {
+            $sessionSlice = TaskKind::Session === $run->getTask()->getKind();
+
+            $this->commitTerminal($run, $async, function () use ($run, $response, $responsePayload, $sessionSlice): void {
                 $this->appendEvent($run, RunEventType::LlmResponse, $responsePayload, durationMs: $response->durationMs);
 
-                if (null !== $response->content && '' !== trim($response->content)) {
+                if ($sessionSlice) {
+                    $run->markIncomplete();
+                    $this->appendEvent(
+                        $run,
+                        RunEventType::Failure,
+                        ['reason' => 'terminal message with no session_declare — a slice settles by declaration; the session stops for a human (docs/design/SESSION_TASKS.md §8)'],
+                    );
+                } elseif (null !== $response->content && '' !== trim($response->content)) {
                     $run->markSucceeded();
                     $this->appendEvent($run, RunEventType::Completion, ['result' => $response->content]);
                 } else {
@@ -705,10 +741,49 @@ final class RunEngine
             $toolMap[$tool->getName()] = $tool;
         }
 
+        // A declaration is alone in its round (§5): "the settle path must
+        // have no ambiguity about which calls ran, and nothing comes after
+        // the declaration." A round that carries session_declare beside
+        // other calls is refused whole — nothing dispatches — with the
+        // standard error feedback, so the model re-issues it cleanly.
+        $refuseRound = false;
+        foreach ($pending->calls as $call) {
+            if (($toolMap[$call['name']] ?? null) === SessionTool::Declare) {
+                $refuseRound = \count($pending->calls) > 1;
+                break;
+            }
+        }
+
         try {
             while ($pending->nextIndex < \count($pending->calls)) {
                 $call = $pending->calls[$pending->nextIndex];
-                $pending->results[] = $this->executeToolCall($run, $toolMap, $state, $call, $async);
+                $tool = $toolMap[$call['name']] ?? null;
+
+                if (SessionTool::Declare === $tool) {
+                    if ($refuseRound) {
+                        $pending->results[] = $this->refuseCall($run, $call, self::DECLARATION_ALONE_DETAIL);
+                    } else {
+                        $errors = ToolSchemaValidator::validate($tool->getSchema(), $call['arguments']);
+                        $outcome = $this->declaredOutcome($call['arguments']);
+                        if ([] === $errors && null !== $outcome) {
+                            // The declaration is the completion: settle the
+                            // slice — and, for a milestone, launch the next
+                            // slice — in one terminal commit, and stop the
+                            // loop; nothing comes after it.
+                            return $this->settleSlice($run, $state, $call, $outcome, $async);
+                        }
+
+                        $detail = [] !== $errors
+                            ? implode('; ', $errors)
+                            : 'outcome must be one of: milestone, done, blocked';
+                        $pending->results[] = $this->refuseCall($run, $call, $detail);
+                    }
+                } elseif ($refuseRound) {
+                    $pending->results[] = $this->refuseCall($run, $call, self::DECLARATION_ALONE_DETAIL);
+                } else {
+                    $pending->results[] = $this->executeToolCall($run, $toolMap, $state, $call, $async);
+                }
+
                 ++$pending->nextIndex;
 
                 // Durable point: the resume position moves with every
@@ -743,6 +818,131 @@ final class RunEngine
         }, $async ? new LlmTurnMessage((int) $run->getId(), $nextStep) : null);
 
         return RunTurnResult::AwaitLlmTurn;
+    }
+
+    /**
+     * A refusal the model is expected to fix — malformed declaration round,
+     * a declaration beside company, a declaration missing its outcome.
+     * Records the refusal on the ledger (the same shape a malformed MCP
+     * call takes) and returns the standard error feedback, so the model
+     * re-issues the call cleanly on its next turn.
+     *
+     * @param array{id: string, name: string, arguments: array<string, mixed>} $call
+     *
+     * @return array{toolCallId: string, content: string}
+     */
+    private function refuseCall(Run $run, array $call, string $detail): array
+    {
+        $callId = $call['id'];
+        $toolName = $call['name'];
+
+        $this->appendEvent(
+            $run,
+            RunEventType::ToolValidationError,
+            ['tool' => $toolName, 'detail' => $detail, 'origin' => 'harness', 'attempt' => 1, 'toolCallId' => $callId],
+            errorClass: ErrorClass::InvalidArguments,
+            attemptNo: 1,
+        );
+        $this->em->flush();
+
+        return [
+            'toolCallId' => $callId,
+            'content' => ToolCallPrimitives::errorFeedbackJson('invalid_arguments', $toolName, $detail, 1),
+        ];
+    }
+
+    /**
+     * The declaration's outcome from its schema-validated arguments, or
+     * null when the value is not one of the three (a schema the validator
+     * could not enforce, or a hand-built call): the caller refuses with
+     * feedback rather than guessing.
+     *
+     * @param array<string, mixed> $arguments
+     */
+    private function declaredOutcome(array $arguments): ?SessionDeclarationOutcome
+    {
+        $outcome = $arguments['outcome'] ?? null;
+
+        return \is_string($outcome) ? SessionDeclarationOutcome::tryFrom($outcome) : null;
+    }
+
+    /**
+     * The declaration IS the slice's completion (docs/design/SESSION_TASKS.md
+     * §8): validate (done by the caller), record the declaration on the run
+     * and in the ledger, settle the run — and, for a `milestone`, launch the
+     * next slice — in ONE terminal commit. Nothing comes after the
+     * declaration, so this returns Done directly and skips the ordinary
+     * tool-turn continuation (no exchange append, no next LLM message).
+     *
+     * Settling shapes (§8):
+     *
+     *  - `milestone` / `done` — a justified completion: the summary is the
+     *    slice's artifact (the Completion event), and the run succeeds.
+     *    A milestone's next slice is created here, inside the same commit.
+     *  - `blocked` — a designed stop, not a fault: needs_attention with a
+     *    Failure event carrying "declared blocked: …" and NO error class
+     *    (the attention queue shows it unclassified; nothing broke).
+     *
+     * @param array{id: string, name: string, arguments: array<string, mixed>} $call
+     */
+    private function settleSlice(Run $run, LoopState $state, array $call, SessionDeclarationOutcome $outcome, bool $async): RunTurnResult
+    {
+        $callId = $call['id'];
+        $arguments = $call['arguments'];
+        $summary = \is_string($arguments['summary'] ?? null) ? $arguments['summary'] : '';
+        $toolName = SessionTool::Declare->getName();
+
+        $this->commitTerminal($run, $async, function () use ($run, $state, $callId, $arguments, $outcome, $summary, $toolName): void {
+            $this->appendEvent(
+                $run,
+                RunEventType::ToolCall,
+                ['tool' => $toolName, 'arguments' => $arguments, 'origin' => 'harness', 'attempt' => 1, 'toolCallId' => $callId],
+                attemptNo: 1,
+            );
+            $this->appendEvent(
+                $run,
+                RunEventType::ToolResult,
+                [
+                    'tool' => $toolName,
+                    'content' => $this->context->capToolResult((string) json_encode(['declared' => $outcome->value], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)),
+                    'isError' => false,
+                    'origin' => 'harness',
+                    'attempt' => 1,
+                    'toolCallId' => $callId,
+                ],
+                attemptNo: 1,
+            );
+
+            $run->recordDeclaration($outcome, $summary);
+            $state->pendingToolTurn = null;
+            $run->setCheckpoint($state->toCheckpoint());
+
+            if (SessionDeclarationOutcome::Blocked === $outcome) {
+                $run->markNeedsAttention();
+                $this->appendEvent(
+                    $run,
+                    RunEventType::Failure,
+                    ['reason' => \sprintf('declared blocked: %s — the session waits for a human (docs/design/SESSION_TASKS.md §8)', $summary)],
+                );
+            } else {
+                $run->markSucceeded();
+                $this->appendEvent($run, RunEventType::Completion, ['result' => $summary]);
+            }
+
+            $this->em->flush();
+
+            // The milestone's continuation (§8): "the next slice's run row
+            // and its first lane message commit in the same transaction as
+            // the settlement." This closure runs inside commitTerminal's
+            // transaction, so the launch joins it — the settled slice, the
+            // declaration, and the successor's carrier live or die together.
+            if (SessionDeclarationOutcome::Milestone === $outcome) {
+                $slices = $this->slices ?? throw new \LogicException('The run engine has no slice engine — a milestone cannot launch its next slice. Wire App\\Session\\SessionSliceEngine in services.yaml.');
+                $slices->advance($run);
+            }
+        });
+
+        return RunTurnResult::Done;
     }
 
     /**

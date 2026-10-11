@@ -12,6 +12,7 @@ use App\RunEngine\FleetId;
 use App\RunEngine\FleetOwnership;
 use App\RunEngine\RunEngine;
 use App\RunEngine\RunGraph;
+use App\Session\SessionSliceEngine;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -31,7 +32,7 @@ use Symfony\Component\Messenger\MessageBusInterface;
  * the durable queue of record; this command re-derives what is owed from it
  * and dispatches.
  *
- * Three sweeps, in order (§6.2, §13.3):
+ * Three sweeps, in order (§6.2, §13.3, docs/design/SESSION_TASKS.md §8):
  *
  * 1. **Claim reap** (`--startup` only) — clear execution claims abandoned by
  *    a fleet that is no longer running, so the work below is not held back by
@@ -42,7 +43,11 @@ use Symfony\Component\Messenger\MessageBusInterface;
  *    committed graph owes (a step whose child run was never created, the
  *    final consumer, an uncommitted settlement) and apply it. This is what
  *    no turn re-dispatch can see: repair at the graph layer.
- * 3. **Turn sweep** — for every active turn-executing run, re-derive its
+ * 3. **Session pass** — for every enabled session, re-derive whether the
+ *    next slice is owed (the last slice declared a `milestone` but no
+ *    successor committed) and launch it. Same posture as the graph
+ *    reconcile, one level up: a session's slices are its graph.
+ * 4. **Turn sweep** — for every active turn-executing run, re-derive its
  *    owed turn and dispatch; the case a purged queue leaves behind.
  *
  * Safe to run at any time: every dispatch is the same work committed state
@@ -63,6 +68,7 @@ final class RunRequeueCommand extends Command
         private readonly MessageBusInterface $bus,
         private readonly RunGraph $graph,
         private readonly ClaimReaper $reaper,
+        private readonly SessionSliceEngine $slices,
         private readonly LoggerInterface $logger,
     ) {
         parent::__construct();
@@ -122,6 +128,7 @@ final class RunRequeueCommand extends Command
         }
 
         $dispatched = $this->reconcileGraphs($scope, $dryRun, $output);
+        $this->reconcileSessions($scope, $dryRun, $output);
         $this->requeueTurns($scope, $dryRun, $output, $dispatched);
 
         return self::SUCCESS;
@@ -299,6 +306,46 @@ final class RunRequeueCommand extends Command
         }
 
         return $dispatched;
+    }
+
+    /**
+     * The session half of the sweep (docs/design/SESSION_TASKS.md §8): for
+     * every enabled session, re-derive whether the next slice is owed — the
+     * last slice declared a `milestone` and no successor committed — and
+     * launch it. Same posture as the graph reconcile: it repairs what no
+     * turn dispatch can see (an owed slice whose launch was lost with the
+     * process that owed it), and converges to nothing when healthy.
+     *
+     * Scoped by run-id: a session whose OWN slice was named reconciles
+     * just that session.
+     */
+    private function reconcileSessions(?Run $scope, bool $dryRun, OutputInterface $output): void
+    {
+        $reconciles = [];
+
+        if (null !== $scope) {
+            $task = $scope->getTask();
+            if (\App\Entity\TaskKind::Session === $task->getKind()) {
+                $single = $this->slices->reconcileTask($task, $dryRun);
+                if (null !== $single) {
+                    $reconciles[] = $single;
+                }
+            }
+        } else {
+            $reconciles = $this->slices->reconcile($dryRun);
+        }
+
+        foreach ($reconciles as $reconcile) {
+            $output->writeln($dryRun
+                ? \sprintf('Session %d: would launch the next slice.', $reconcile->taskId)
+                : \sprintf('Session %d: launched the next slice (#%s).', $reconcile->taskId, null === $reconcile->sliceRunId ? '?' : (string) $reconcile->sliceRunId));
+        }
+
+        if ([] !== $reconciles) {
+            $output->writeln($dryRun
+                ? \sprintf('Session slices: %d would be launched.', \count($reconciles))
+                : \sprintf('Session slices: %d launched.', \count($reconciles)));
+        }
     }
 
     /**

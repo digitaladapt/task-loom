@@ -182,27 +182,32 @@ final class AdminTaskEditorTest extends WebTestCase
     }
 
     /**
-     * docs/design/SESSION_TASKS.md, build order step 1: a save of the
-     * session kind is refused at the field, nothing persists, and the
+     * docs/design/SESSION_TASKS.md §8, build order step 4: a session
+     * carrying steps is refused beside the field, nothing persists, and the
      * human's work survives the re-render.
      */
-    public function testSavingASessionKindTaskIsRefusedBeforeAnythingPersists(): void
+    public function testSavingASteppedSessionIsRefusedBeforeAnythingPersists(): void
     {
         $crawler = $this->client->request('GET', '/tasks/new');
         self::assertResponseIsSuccessful();
+        $token = $this->tokenFrom($crawler);
 
-        $form = $crawler->selectButton('Create draft')->form([
+        // A raw POST: the step builder is JS-driven, so the nested step
+        // arrays never exist in the rendered form — this is the shape the
+        // browser would send after the builder added one step.
+        $this->client->request('POST', '/tasks/new', [
+            '_token' => $token,
             'title' => 'Long haul',
             'brief' => 'Keep going.',
             'kind' => 'session',
             'toolbox_mode' => 'tags',
+            'steps' => [0 => [0 => ['title' => 'Fetch', 'brief' => 'Fetch it.', 'toolbox_mode' => 'tags']]],
         ]);
-        $this->client->submit($form);
 
         // A re-render, not a redirect: the human's work is not thrown away.
         self::assertResponseIsSuccessful();
         $content = (string) $this->client->getResponse()->getContent();
-        self::assertStringContainsString('not built yet', $content);
+        self::assertStringContainsString('cannot have steps', $content);
         self::assertStringContainsString('Long haul', $content, 'the submitted values survive the refusal');
 
         self::assertCount(0, $this->tasks()->findAll(), 'a refused save persists nothing');

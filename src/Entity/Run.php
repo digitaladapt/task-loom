@@ -138,6 +138,25 @@ class Run
     #[ORM\Column(length: 32, nullable: true, enumType: ErrorClass::class)]
     private ?ErrorClass $errorClass = null;
 
+    /**
+     * A session slice's typed declaration, recorded in the commit that
+     * settles the slice (docs/design/SESSION_TASKS.md §8): the outcome
+     * (`milestone` / `done` / `blocked`) and the slice's summary.
+     *
+     * Null on a run-kind task, and null on a slice that settled WITHOUT a
+     * declaration — an exhausted slice budget, a failed turn, a tripped
+     * breaker, a plain terminal message — which is exactly the case the
+     * design treats as "the session stops and needs a human" (§8). The
+     * session's derived state and the requeue sweep's session pass read
+     * this one column beside the row; the human-readable record of every
+     * declaration stays in the attempt ledger (the tool call, its
+     * settlement, and the Completion event).
+     *
+     * @var array{outcome: string, summary: string}|null
+     */
+    #[ORM\Column(type: 'json', nullable: true)]
+    private ?array $declaration = null;
+
     /** @var Collection<int, RunEvent> */
     #[ORM\OneToMany(mappedBy: 'run', targetEntity: RunEvent::class, cascade: ['persist'], orphanRemoval: true)]
     private Collection $events;
@@ -321,6 +340,40 @@ class Run
         $this->errorClass = $errorClass;
     }
 
+    /**
+     * @return array{outcome: string, summary: string}|null
+     */
+    public function getDeclaration(): ?array
+    {
+        return $this->declaration;
+    }
+
+    /**
+     * The slice's declared outcome, or null when it settled without a
+     * declaration — or is not a slice at all (docs/design/SESSION_TASKS.md
+     * §8). The session's derived state is built from this.
+     */
+    public function getDeclarationOutcome(): ?SessionDeclarationOutcome
+    {
+        $outcome = $this->declaration['outcome'] ?? null;
+
+        return \is_string($outcome) ? SessionDeclarationOutcome::tryFrom($outcome) : null;
+    }
+
+    /**
+     * Record the slice's declaration (docs/design/SESSION_TASKS.md §8).
+     * Called from inside the terminal commit that settles the slice, so the
+     * declaration, the terminal status, and — for a milestone — the next
+     * slice's launch live or die together.
+     */
+    public function recordDeclaration(SessionDeclarationOutcome $outcome, string $summary): void
+    {
+        $this->declaration = [
+            'outcome' => $outcome->value,
+            'summary' => $summary,
+        ];
+    }
+
     /** @return Collection<int, RunEvent> */
     public function getEvents(): Collection
     {
@@ -363,7 +416,15 @@ class Run
         $this->finishedAt = new \DateTimeImmutable();
     }
 
-    public function markNeedsAttention(ErrorClass $errorClass): void
+    /**
+     * Needs attention: the repetition circuit breaker, or a session slice
+     * that declared itself `blocked` (docs/design/SESSION_TASKS.md §8).
+     *
+     * The error class is optional and deliberately so: a blocked
+     * declaration is a designed stop, not a fault, and it settles here
+     * with no error class — "declared blocked" is not "something broke".
+     */
+    public function markNeedsAttention(?ErrorClass $errorClass = null): void
     {
         $this->status = RunStatus::NeedsAttention;
         $this->errorClass = $errorClass;

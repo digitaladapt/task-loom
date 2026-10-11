@@ -77,6 +77,9 @@ final class TaskSchedulerTickTest extends KernelTestCase
             $container->get(RunGraph::class),
             ['step_budget' => 5, 'tool_retries' => 1, 'circuit_breaker' => 3],
             $container->get(MessageBusInterface::class),
+            $container->get(\App\Session\SessionMemoryRenderer::class),
+            $container->get(\App\Session\SessionToolRunner::class),
+            $container->get(\App\Session\SessionSliceEngine::class),
         );
         $container->set(RunEngine::class, $engine);
 
@@ -264,11 +267,11 @@ final class TaskSchedulerTickTest extends KernelTestCase
     }
 
     /**
-     * docs/design/SESSION_TASKS.md, build order step 1: every authoring
-     * gate refuses the session kind, but a row can still reach the store
-     * out of band (a restored backup, a direct DB edit). The tick must then
-     * fail LOUDLY — a classified failed run, the occurrence consumed —
-     * never a silent skip and never a retry storm.
+     * docs/design/SESSION_TASKS.md §8, build order step 4: the write and
+     * lifecycle gates refuse a scheduled session, but a row can still reach
+     * the store by surgery — and the slice engine refuses the schedule at
+     * creation, so the tick fails it LOUDLY: a classified failed run, the
+     * occurrence consumed, never a silent skip and never a retry storm.
      */
     public function testASessionKindTaskFailsLoudlyAtDispatch(): void
     {

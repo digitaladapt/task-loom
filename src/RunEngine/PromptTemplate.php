@@ -82,6 +82,30 @@ final readonly class PromptTemplate
         with your best result and an explanation of what was missing.
         TXT;
 
+    /**
+     * A session slice's completion text (docs/design/SESSION_TASKS.md §8).
+     * Harness-owned rather than configurable: a slice ends in a typed
+     * `session_declare` call, not a prose final message, and an operator's
+     * run-level completion prose would be actively wrong here. Kept beside
+     * DEFAULT_COMPLETION so the two contracts read side by side.
+     */
+    public const string SLICE_COMPLETION = <<<'TXT'
+        This is a slice: end it by calling session_declare with its outcome
+        and a summary of the work.
+
+        - milestone — progress made, more to do. The harness launches the
+          next slice automatically; the summary is what it carries to the
+          operator.
+        - done — the session's goal is complete; the session ends.
+        - blocked — you need a human; the session stops for attention.
+
+        Call session_declare ALONE, with no other tool calls in that round.
+        If the aim has changed, write it first with session_objective.
+
+        A slice that ends without a declaration stops the session for a
+        human — it is never treated as a completion.
+        TXT;
+
     private ?string $preamble;
     private ?string $completion;
     private bool $listTools;

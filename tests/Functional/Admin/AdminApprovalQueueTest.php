@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional\Admin;
 
+use App\Entity\Step;
 use App\Entity\Task;
 use App\Entity\TaskAuthor;
 use App\Entity\TaskKind;
@@ -127,11 +128,33 @@ final class AdminApprovalQueueTest extends WebTestCase
     }
 
     /**
-     * docs/design/SESSION_TASKS.md, build order step 1: a session-kind draft
-     * still offers Enable on its page, and the action refuses it — the gate
-     * is the service, not just the button — with the reason stated.
+     * docs/design/SESSION_TASKS.md §8, build order step 4: a session-kind
+     * draft with a shape a session cannot have — steps here — is refused at
+     * Enable by the lifecycle gate, with the reason stated.
      */
-    public function testEnableRefusesASessionKindDraft(): void
+    public function testEnableRefusesASteppedSessionDraft(): void
+    {
+        $task = new Task('Long haul', 'Keep going.', TaskKind::Session, ToolboxMode::Tags, ['core'], TaskAuthor::User);
+        $this->tasks()->save($task);
+
+        // Give it a step out of band (the write gate would have refused it):
+        // the enable gate must refuse the shape anyway.
+        $step = new Step($task, 1, 'Fetch', 'Fetch it.', ToolboxMode::Tags, []);
+        $this->em()->persist($step);
+        $this->em()->flush();
+
+        $this->postAction($task, 'enable');
+
+        self::assertResponseRedirects();
+        $this->client->followRedirect();
+        self::assertStringContainsString('cannot have steps', (string) $this->client->getResponse()->getContent());
+        self::assertFalse($this->refetch($task)->isEnabled(), 'the refused enable flips nothing');
+    }
+
+    /**
+     * And a plain session draft enables cleanly: the kind is real now.
+     */
+    public function testEnableAcceptsAPlainSessionDraft(): void
     {
         $task = new Task('Long haul', 'Keep going.', TaskKind::Session, ToolboxMode::Tags, ['core'], TaskAuthor::User);
         $this->tasks()->save($task);
@@ -139,9 +162,7 @@ final class AdminApprovalQueueTest extends WebTestCase
         $this->postAction($task, 'enable');
 
         self::assertResponseRedirects();
-        $this->client->followRedirect();
-        self::assertStringContainsString('not built yet', (string) $this->client->getResponse()->getContent());
-        self::assertFalse($this->refetch($task)->isEnabled(), 'the refused enable flips nothing');
+        self::assertTrue($this->refetch($task)->isEnabled());
     }
 
     public function testEnableFailsWithoutCsrfToken(): void
@@ -425,11 +446,12 @@ final class AdminApprovalQueueTest extends WebTestCase
     }
 
     /**
-     * docs/design/SESSION_TASKS.md, build order step 1: a session-kind task
-     * that reached the store out of band may even be enabled out of band —
-     * Run now must still refuse it at dispatch, loudly, with the reason.
+     * docs/design/SESSION_TASKS.md §7, build order step 4: Run now on an
+     * enabled session launches the first slice through the queue path —
+     * the operator's start. The synchronous path is refused; the web
+     * surface only ever queues.
      */
-    public function testRunNowRefusesASessionKindTaskAtDispatch(): void
+    public function testRunNowLaunchesASessionsFirstSlice(): void
     {
         $task = new Task('Long haul', 'Keep going.', TaskKind::Session, ToolboxMode::Tags, ['core'], TaskAuthor::User);
         $this->tasks()->save($task);
@@ -444,17 +466,13 @@ final class AdminApprovalQueueTest extends WebTestCase
 
         $this->client->request('POST', '/tasks/'.$task->getId().'/run', ['_token' => $token]);
 
-        self::assertResponseRedirects('/tasks/'.$task->getId());
-        $this->client->followRedirect();
-        $content = (string) $this->client->getResponse()->getContent();
-        self::assertStringContainsString('Run refused at dispatch', $content);
-        self::assertStringContainsString('not built yet', $content);
+        self::assertResponseRedirects();
 
-        // And no run row was created for the refused task.
+        // And exactly one slice run was created for it, waiting on the lanes.
         $runs = $this->em()->createQuery('SELECT r FROM App\Entity\Run r WHERE r.task = :task')
             ->setParameter('task', $this->refetch($task))
             ->getResult();
-        self::assertCount(0, $runs);
+        self::assertCount(1, $runs);
     }
 
     /**

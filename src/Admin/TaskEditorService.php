@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Admin;
 
-use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Step;
 use App\Entity\Task;
 use App\Entity\TaskAuthor;
@@ -18,6 +17,7 @@ use App\Scheduler\ScheduleExpression;
 use App\Scheduler\ScheduleFormatException;
 use App\Scheduler\SchedulePreset;
 use App\Scheduler\SchedulePresetMatch;
+use App\Session\SessionConstraintException;
 use App\StepModel\StepFormatException;
 use App\StepModel\StepGraphCodec;
 use Doctrine\ORM\EntityNotFoundException;
@@ -213,7 +213,7 @@ final class TaskEditorService
                 'schedule' => $submission->schedule(),
                 'steps' => $submission->steps(),
             ], TaskAuthor::User);
-        } catch (StepFormatException|ScheduleFormatException|EntityNotFoundException|SessionKindUnsupportedException $e) {
+        } catch (StepFormatException|ScheduleFormatException|EntityNotFoundException|SessionConstraintException $e) {
             // One catch: all four are "the form said something the store
             // refused", and the message is already written for a human.
             throw new TaskEditorException($e->getMessage(), 0, $e);

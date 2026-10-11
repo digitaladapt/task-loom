@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Repository;
 
 use App\Entity\Task;
+use App\Entity\TaskKind;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\Persistence\ManagerRegistry;
 
@@ -120,6 +121,27 @@ final class TaskRepository extends ServiceEntityRepository
         return $this->createQueryBuilder('t')
             ->where('t.archivedAt IS NOT NULL')
             ->orderBy('t.archivedAt', \SortDirection::Descending)
+            ->getQuery()->getResult();
+    }
+
+    /**
+     * Enabled session-kind tasks (docs/design/SESSION_TASKS.md §8) — the
+     * requeue sweep's session pass walks these, re-deriving whether each
+     * owes a slice. Same gates as findRunnable() (enabled, not archived,
+     * not superseded), narrowed to the one kind the pass serves: an
+     * ordinary task in this list would be a bug, not a no-op.
+     *
+     * @return list<Task>
+     */
+    public function findEnabledSessions(): array
+    {
+        return $this->createQueryBuilder('t')
+            ->where('t.kind = :kind')
+            ->andWhere('t.enabled = true')
+            ->andWhere('t.archivedAt IS NULL')
+            ->andWhere('t.supersededBy IS NULL')
+            ->setParameter('kind', TaskKind::Session)
+            ->orderBy('t.id', \SortDirection::Ascending)
             ->getQuery()->getResult();
     }
 

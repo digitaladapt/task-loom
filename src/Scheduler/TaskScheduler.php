@@ -8,13 +8,13 @@ use App\Entity\Run;
 use App\Entity\RunEvent;
 use App\Entity\RunEventType;
 use App\Entity\RunTrigger;
-use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
 use App\Repository\RunRepository;
 use App\Repository\TaskRepository;
 use App\RunEngine\RunLauncher;
 use App\RunEngine\RunLaunchException;
 use App\RunEngine\ToolboxResolutionException;
+use App\Session\SessionConstraintException;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
 
@@ -256,7 +256,7 @@ final readonly class TaskScheduler
                     $this->em->flush();
 
                     $fired = ['task' => $task, 'run' => $launch->run];
-                } catch (ToolboxResolutionException|SessionKindUnsupportedException $e) {
+                } catch (ToolboxResolutionException|SessionConstraintException $e) {
                     // A classified dispatch failure: the occurrence happened
                     // and failed loudly. Record it as a failed run so the
                     // operator sees it in the ledger and the attention
@@ -302,7 +302,7 @@ final readonly class TaskScheduler
      * cannot resolve): the run exists, carries the trigger, and states the
      * classified reason. It consumes the occurrence like any other fire.
      */
-    private function recordDispatchFailure(Task $task, ToolboxResolutionException|SessionKindUnsupportedException $e): Run
+    private function recordDispatchFailure(Task $task, ToolboxResolutionException|SessionConstraintException $e): Run
     {
         $run = new Run($task);
         $run->setTriggeredBy(RunTrigger::Scheduled);

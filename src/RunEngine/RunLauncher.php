@@ -5,10 +5,10 @@ declare(strict_types=1);
 namespace App\RunEngine;
 
 use App\Entity\RunRole;
-use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
 use App\Message\LlmTurnMessage;
 use App\Message\ToolTurnMessage;
+use App\Session\SessionConstraintException;
 use Symfony\Component\Messenger\MessageBusInterface;
 
 /**
@@ -34,10 +34,10 @@ final readonly class RunLauncher
     }
 
     /**
-     * @throws RunLaunchException              when the created run owes no turn to dispatch
-     * @throws ToolboxResolutionException      when a standalone task's toolbox does not resolve
-     * @throws SessionKindUnsupportedException when the task's kind has no engine behind it yet
-     *                                         (docs/design/SESSION_TASKS.md, build order step 1)
+     * @throws RunLaunchException         when the created run owes no turn to dispatch
+     * @throws ToolboxResolutionException when a standalone task's toolbox does not resolve
+     * @throws SessionConstraintException when a session's derived state refuses a new slice
+     *                                    (docs/design/SESSION_TASKS.md §8)
      */
     public function launch(Task $task): RunLaunch
     {

@@ -97,6 +97,8 @@ final class SessionMemoryInjectionTest extends KernelTestCase
             ['step_budget' => 50, 'tool_retries' => 2, 'circuit_breaker' => 3],
             $this->bus(),
             $container->get(SessionMemoryRenderer::class),
+            $container->get(\App\Session\SessionToolRunner::class),
+            $container->get(\App\Session\SessionSliceEngine::class),
         );
 
         // Install BEFORE anything is dispatched: handlers are built lazily
@@ -123,7 +125,7 @@ final class SessionMemoryInjectionTest extends KernelTestCase
 
                 return 1 === \count($chats)
                     ? $this->response(toolCalls: [['id' => 'c1', 'name' => 'get_weather', 'arguments' => []]])
-                    : $this->response(content: 'Done, warmed up.');
+                    : $this->response(toolCalls: [['id' => 'c2', 'name' => 'session_declare', 'arguments' => ['outcome' => 'done', 'summary' => 'Warmed up; nothing more to do.']]]);
             },
         );
 
@@ -198,9 +200,9 @@ final class SessionMemoryInjectionTest extends KernelTestCase
     }
 
     /**
-     * The run a session's first slice will create, crafted exactly as
-     * RunEngine::begin() crafts a standalone run — because run()/start()
-     * still refuse the kind until the slice engine lands (step 4).
+     * The run a session's first slice creates — the same shape the slice
+     * engine now creates for real (build order step 4 landed; this helper
+     * stays because the tests drive hand-crafted starting states).
      */
     private function craftRun(Task $task): Run
     {

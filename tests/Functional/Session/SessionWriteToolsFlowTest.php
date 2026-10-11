@@ -10,6 +10,7 @@ use App\Entity\Run;
 use App\Entity\RunEventType;
 use App\Entity\RunStatus;
 use App\Entity\ServerProtocol;
+use App\Entity\SessionDeclarationOutcome;
 use App\Entity\SessionMemorySource;
 use App\Entity\SessionMemoryTier;
 use App\Entity\Task;
@@ -103,6 +104,7 @@ final class SessionWriteToolsFlowTest extends KernelTestCase
             $this->bus(),
             $container->get(SessionMemoryRenderer::class),
             new SessionToolRunner($this->store),
+            $container->get(\App\Session\SessionSliceEngine::class),
         );
 
         // Install BEFORE anything is dispatched: handlers are built lazily
@@ -126,8 +128,10 @@ final class SessionWriteToolsFlowTest extends KernelTestCase
                         ['id' => 'c1', 'name' => 'session_note', 'arguments' => ['text' => 'Migration 0007 adds the store; the importer consumes it.']],
                         ['id' => 'c2', 'name' => 'session_objective', 'arguments' => ['text' => 'Finish the importer, then harden it.']],
                     ]),
-                    // Turn 2: done.
-                    default => $this->response(content: 'Done with this slice of work.'),
+                    // Turn 2: the slice ends — by declaration, alone (step 4).
+                    default => $this->response(toolCalls: [
+                        ['id' => 'c3', 'name' => 'session_declare', 'arguments' => ['outcome' => 'done', 'summary' => 'Importer finished and hardened.']],
+                    ]),
                 };
             },
         );
@@ -144,7 +148,9 @@ final class SessionWriteToolsFlowTest extends KernelTestCase
         $this->em->clear();
         $run = $this->runs()[0];
         self::assertSame(RunStatus::Succeeded, $run->getStatus());
-        self::assertCount(2, $chats, 'two requests: one that writes, one that finishes');
+        self::assertCount(1, $this->runs(), 'a done declaration launches no next slice');
+        self::assertSame(SessionDeclarationOutcome::Done, $run->getDeclarationOutcome());
+        self::assertCount(2, $chats, 'two requests: one that writes, one that declares');
 
         // 1. The harness tools rode the wire as definitions.
         $firstTools = array_column(array_column($chats[0][1], 'function'), 'name');
@@ -154,7 +160,7 @@ final class SessionWriteToolsFlowTest extends KernelTestCase
         // 2. The result the model saw for each call, and the ledger's record
         //    of dispatch — origin harness, no server anywhere.
         $results = $this->toolResults($run);
-        self::assertCount(2, $results, 'both calls produced a result');
+        self::assertCount(3, $results, 'each call produced a result — including the declaration');
         $byTool = [];
         foreach ($results as $result) {
             $byTool[$result['tool']] = $result;
@@ -162,6 +168,7 @@ final class SessionWriteToolsFlowTest extends KernelTestCase
         self::assertStringContainsString('"saved":true', $byTool['session_note']['content']);
         self::assertSame('harness', $byTool['session_note']['origin']);
         self::assertStringContainsString('"revision":1', $byTool['session_objective']['content'], 'a fresh objective reports revision 1');
+        self::assertStringContainsString('"declared":"done"', $byTool['session_declare']['content'], 'the declaration is recorded like any harness result');
 
         // 3. The writes landed in the store, as the session's own.
         $objective = $this->memories->findObjectiveFor((int) $task->getId());
@@ -195,7 +202,9 @@ final class SessionWriteToolsFlowTest extends KernelTestCase
                     1 => $this->response(toolCalls: [
                         ['id' => 'c1', 'name' => 'session_note', 'arguments' => ['text' => str_repeat('x', 5000)]],
                     ]),
-                    default => $this->response(content: 'Understood — too long.'),
+                    default => $this->response(toolCalls: [
+                        ['id' => 'c2', 'name' => 'session_declare', 'arguments' => ['outcome' => 'done', 'summary' => 'Learned the note was too long; declared anyway.']],
+                    ]),
                 };
             },
         );
@@ -209,11 +218,13 @@ final class SessionWriteToolsFlowTest extends KernelTestCase
 
         // The refusal is recorded on the ledger (as `detail`, the same shape
         // an MCP-side failure takes) — and the feedback the model actually
-        // received rides the next request's tool message, read below.
+        // received rides the next request's tool message, read below. (The
+        // declaration that ended the slice is the other result.)
         $results = $this->toolResults($run);
-        self::assertCount(1, $results);
-        self::assertStringContainsString('TASKLOOM_SESSION_WRITE_MAX_CHARS', (string) $results[0]['detail']);
-        self::assertSame('harness', $results[0]['origin']);
+        self::assertCount(2, $results);
+        $refusal = $results[0];
+        self::assertStringContainsString('TASKLOOM_SESSION_WRITE_MAX_CHARS', (string) $refusal['detail']);
+        self::assertSame('harness', $refusal['origin']);
 
         $feedback = null;
         foreach ($chats[1] as $message) {
@@ -256,9 +267,9 @@ final class SessionWriteToolsFlowTest extends KernelTestCase
     // --------------------------------------------------------------- helpers
 
     /**
-     * The run a session's first slice will create, crafted exactly as
-     * RunEngine::begin() crafts a standalone run — because run()/start()
-     * still refuse the kind until the slice engine lands (step 4).
+     * The run a session's first slice creates — the same shape the slice
+     * engine now creates for real (build order step 4 landed; this helper
+     * stays because the tests drive hand-crafted starting states).
      */
     private function craftRun(Task $task): Run
     {

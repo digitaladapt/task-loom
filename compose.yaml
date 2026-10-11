@@ -106,6 +106,9 @@ x-taskloom-env: &taskloom-env
   TASKLOOM_SESSION_COLD: ${TASKLOOM_SESSION_COLD:-25}
   TASKLOOM_SESSION_WRITE_MAX_CHARS: ${TASKLOOM_SESSION_WRITE_MAX_CHARS:-2000}
   TASKLOOM_SESSION_MAX_MEMORY_PCT: ${TASKLOOM_SESSION_MAX_MEMORY_PCT:-10}
+  # A session slice's exchange budget (build order step 4): exchanges per
+  # slice before it settles without declaring — "stop and ask a human".
+  TASKLOOM_SESSION_SLICE_BUDGET: ${TASKLOOM_SESSION_SLICE_BUDGET:-25}
   # Absolute URLs in non-HTTP contexts: must match the public-facing address.
   DEFAULT_URI: ${DEFAULT_URI:-http://localhost:8080}
   # SQLite (WAL) on the data volume; the lanes share this file.

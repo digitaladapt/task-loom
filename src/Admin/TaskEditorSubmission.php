@@ -4,11 +4,11 @@ declare(strict_types=1);
 
 namespace App\Admin;
 
-use App\Entity\SessionKindUnsupportedException;
 use App\Entity\TaskKind;
 use App\Scheduler\ScheduleExpression;
 use App\Scheduler\ScheduleFormatException;
 use App\Scheduler\SchedulePreset;
+use App\Session\SessionConstraintException;
 
 /**
  * One admin-editor form submission (SPEC §8): the nested HTML form data,
@@ -97,13 +97,6 @@ final readonly class TaskEditorSubmission
         if (null === $enum) {
             $errors['kind'] = \sprintf('Unknown task kind "%s".', $kind);
             $kind = TaskKind::Run->value;
-        } elseif (!$enum->isImplemented()) {
-            // docs/design/SESSION_TASKS.md, build order step 1: the slice
-            // engine behind the kind is not built, so the save is refused
-            // here, beside the field — the same discipline as an invalid
-            // schedule (§14.5). The submitted value survives so the select
-            // re-renders as the human left it.
-            $errors['kind'] = SessionKindUnsupportedException::sentence(\sprintf('Cannot save a "%s"-kind task', $kind));
         }
 
         // The picker's fields -> a declaration. One implementation, shared
@@ -120,6 +113,20 @@ final readonly class TaskEditorSubmission
 
         [$scheduleValues, $schedule, $scheduleErrors] = self::parseSchedule($input, $schedules);
         $errors += $scheduleErrors;
+
+        // Session shape (docs/design/SESSION_TASKS.md §8): a session cannot
+        // carry steps or a schedule — refused beside the field it concerns,
+        // the same discipline as an invalid schedule. The submitted values
+        // survive so the form re-renders as the human left it.
+        if (TaskKind::Session->value === $kind) {
+            if ([] !== $steps) {
+                $errors['steps'] = SessionConstraintException::stepsNotAllowed()->getMessage();
+            }
+
+            if (null !== $schedule) {
+                $errors['schedule'] = SessionConstraintException::scheduleNotAllowed()->getMessage();
+            }
+        }
 
         return new self([
             'title' => $title,

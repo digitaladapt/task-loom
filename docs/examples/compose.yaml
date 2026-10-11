@@ -115,6 +115,9 @@ x-taskloom-env: &taskloom-env
   TASKLOOM_SESSION_COLD: ${TASKLOOM_SESSION_COLD:-25}
   TASKLOOM_SESSION_WRITE_MAX_CHARS: ${TASKLOOM_SESSION_WRITE_MAX_CHARS:-2000}
   TASKLOOM_SESSION_MAX_MEMORY_PCT: ${TASKLOOM_SESSION_MAX_MEMORY_PCT:-10}
+  # A session slice's exchange budget (build order step 4): exchanges per
+  # slice before it settles without declaring — "stop and ask a human".
+  TASKLOOM_SESSION_SLICE_BUDGET: ${TASKLOOM_SESSION_SLICE_BUDGET:-25}
   # Absolute URLs in non-HTTP contexts (CLI, workers): the public address of
   # this deployment, as users and agents reach it.
   DEFAULT_URI: ${DEFAULT_URI:-http://localhost:8080}

@@ -55,6 +55,11 @@ parameters:
     TASKLOOM_SESSION_COLD: 25
     TASKLOOM_SESSION_WRITE_MAX_CHARS: 2000
     TASKLOOM_SESSION_MAX_MEMORY_PCT: 10
+    # A session slice's own budget (docs/design/SESSION_TASKS.md §11, build
+    # order step 4): exchanges per slice before it settles without declaring
+    # — a smaller bound than a run's, because a slice is a bounded unit and
+    # its failure mode is "stop and ask", not "keep going".
+    TASKLOOM_SESSION_SLICE_BUDGET: 25
     TASKLOOM_STEP_BUDGET: 50
     TASKLOOM_TOOL_RETRIES: 2
     TASKLOOM_CIRCUIT_BREAKER: 3
@@ -225,6 +230,23 @@ services:
             $coldCap: '%env(int:default:TASKLOOM_SESSION_COLD:TASKLOOM_SESSION_COLD)%'
             $writeMaxChars: '%env(int:default:TASKLOOM_SESSION_WRITE_MAX_CHARS:TASKLOOM_SESSION_WRITE_MAX_CHARS)%'
 
+    # The session slice engine (docs/design/SESSION_TASKS.md §8, build order
+    # step 4): derives a session's state, creates slices, and launches the
+    # next slice at settlement. Its budgets mirror the run engine's knobs —
+    # same tool_retries/circuit_breaker, and slice_budget in place of
+    # step_budget, because a slice is a bounded unit with its own ceiling.
+    #
+    # The bus is passed explicitly and is NOT nullable: the next slice's
+    # carrier must commit with its settlement, so the engine always has a
+    # bus to enqueue the slice's first turn on.
+    App\Session\SessionSliceEngine:
+        arguments:
+            $budgets:
+                slice_budget: '%env(int:default:TASKLOOM_SESSION_SLICE_BUDGET:TASKLOOM_SESSION_SLICE_BUDGET)%'
+                tool_retries: '%env(int:default:TASKLOOM_TOOL_RETRIES:TASKLOOM_TOOL_RETRIES)%'
+                circuit_breaker: '%env(int:default:TASKLOOM_CIRCUIT_BREAKER:TASKLOOM_CIRCUIT_BREAKER)%'
+            $bus: '@messenger.default_bus'
+
     # The grounding block (SPEC §4.2 / §5.6). Same required deployment
     # timezone as the scheduler: the block states the wall-clock time the
     # runs and the schedules share, so a Chicago deployment reads
@@ -277,6 +299,11 @@ services:
             # separate collaborator from the MCP executor on purpose:
             # "which transport" is decided by the tool, not the toolbox.
             $sessionToolRunner: '@App\Session\SessionToolRunner'
+            # The slice engine (docs/design/SESSION_TASKS.md §8, build order
+            # step 4): the engine settles a session slice's declaration
+            # through it — and a `milestone`'s next slice is launched by it
+            # from inside the settlement commit.
+            $slices: '@App\Session\SessionSliceEngine'
 
     # The step model's run graph (SPEC §13.3): same budgets as the engine —
     # a child run's constitution is frozen with the same knobs a standalone

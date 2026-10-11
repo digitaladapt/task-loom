@@ -43,6 +43,14 @@ final readonly class SessionToolRunner
      */
     public function call(SessionTool $tool, array $arguments, Task $task): string
     {
+        if (SessionTool::Declare === $tool) {
+            // The declaration is settled by the engine, not written through
+            // the store: it ends the slice (§5, §8) and never dispatches
+            // here. Reaching this branch would silently fall through to
+            // setObjective() below — refuse loudly instead.
+            throw new \LogicException('session_declare is settled by the engine, not run through the session tool runner.');
+        }
+
         // The frozen schema guarantees a string; the defensive read keeps a
         // hand-built call (a test, a repaired snapshot) from crashing on
         // something the store would refuse anyway — it gets the store's

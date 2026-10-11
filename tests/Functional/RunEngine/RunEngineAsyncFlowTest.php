@@ -280,6 +280,7 @@ final class RunEngineAsyncFlowTest extends KernelTestCase
             $this->bus(),
             static::getContainer()->get(RunGraph::class),
             static::getContainer()->get(ClaimReaper::class),
+            static::getContainer()->get(\App\Session\SessionSliceEngine::class),
             new NullLogger(),
         ));
 

@@ -125,11 +125,11 @@ final class RunNowCommandTest extends KernelTestCase
     }
 
     /**
-     * docs/design/SESSION_TASKS.md, build order step 1: the engine refuses a
-     * kind with no engine behind it before any run row exists, and the
-     * command reports it as a clean non-zero exit.
+     * docs/design/SESSION_TASKS.md §7, build order step 4: a session is
+     * lane-driven, so the SYNCHRONOUS run refuses it before any run row
+     * exists (its slices wait in the persisted queue; --queue is the door).
      */
-    public function testRunNowRefusesASessionKindTask(): void
+    public function testRunNowRefusesASessionKindTaskSynchronously(): void
     {
         $this->catalogTool('get_weather');
         $this->llm->expects($this->never())->method('chat');
@@ -150,10 +150,40 @@ final class RunNowCommandTest extends KernelTestCase
         $exit = $tester->execute(['task-id' => (string) $task->getId()]);
 
         self::assertSame(1, $exit);
-        self::assertStringContainsString('not built yet', $tester->getDisplay());
+        self::assertStringContainsString('worker lanes', $tester->getDisplay());
 
         $runs = $this->em->createQuery('SELECT r FROM App\Entity\Run r')->getResult();
         self::assertCount(0, $runs, 'the refusal happens before any run row is created');
+    }
+
+    /**
+     * And with --queue the same session launches its first slice: the
+     * enqueue path is the one a session's slices take (docs/design/
+     * SESSION_TASKS.md §7).
+     */
+    public function testRunNowQueuedLaunchesASessionsFirstSlice(): void
+    {
+        $this->catalogTool('get_weather');
+        $this->llm->expects($this->never())->method('chat');
+
+        $task = new Task(
+            title: 'Long haul',
+            brief: 'Keep going.',
+            kind: TaskKind::Session,
+            toolboxMode: ToolboxMode::Tags,
+            toolbox: ['test-server'],
+            createdBy: TaskAuthor::User,
+        );
+        $task->enable();
+        $this->em->persist($task);
+        $this->em->flush();
+
+        $tester = $this->tester();
+        $exit = $tester->execute(['task-id' => (string) $task->getId(), '--queue' => true]);
+
+        self::assertSame(0, $exit);
+        $runs = $this->em->createQuery('SELECT r FROM App\\Entity\\Run r')->getResult();
+        self::assertCount(1, $runs, 'the first slice exists, waiting on the lanes');
     }
 
     public function testRunNowNonSucceededRunFailsExitCode(): void
@@ -230,6 +260,10 @@ final class RunNowCommandTest extends KernelTestCase
             new NullLogger(),
             $container->get(RunGraph::class),
             ['step_budget' => 10, 'tool_retries' => 1, 'circuit_breaker' => 3],
+            $container->get(MessageBusInterface::class),
+            $container->get(\App\Session\SessionMemoryRenderer::class),
+            $container->get(\App\Session\SessionToolRunner::class),
+            $container->get(\App\Session\SessionSliceEngine::class),
         );
 
         return new CommandTester(new RunNowCommand(

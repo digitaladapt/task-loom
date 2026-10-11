@@ -45,6 +45,7 @@ final class DeploymentDefaultsTest extends WebTestCase
         'TASKLOOM_SESSION_COLD' => 25,
         'TASKLOOM_SESSION_WRITE_MAX_CHARS' => 2000,
         'TASKLOOM_SESSION_MAX_MEMORY_PCT' => 10,
+        'TASKLOOM_SESSION_SLICE_BUDGET' => 25,
         'TASKLOOM_STEP_BUDGET' => 50,
         'TASKLOOM_TOOL_RETRIES' => 2,
         'TASKLOOM_CIRCUIT_BREAKER' => 3,
