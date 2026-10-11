@@ -17,7 +17,8 @@ namespace App\Message;
  *
  * Tools run on their own lane, so a slow tool never blocks the `llm` lane
  * and vice versa. When the tool turn finishes it re-enqueues the run's next
- * LLM turn at the back of the `llm` lane.
+ * LLM turn at the back of the run kind's lane — `llm`, or `session` for a
+ * slice (docs/design/SESSION_TASKS.md §7).
  */
 final readonly class ToolTurnMessage
 {

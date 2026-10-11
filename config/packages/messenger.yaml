@@ -26,7 +26,7 @@ framework:
             #
             #   chat  — one reply turn of a conversation (SPEC §15). Same
             #           table, same workers, drained FIRST: the LLM workers
-            #           consume `chat llm` and messenger:consume is
+            #           consume `chat llm session` and messenger:consume is
             #           strict-priority across receivers, so a queued reply
             #           is taken before any task turn the same worker could
             #           have taken. That is the whole preemption mechanism —
@@ -38,6 +38,18 @@ framework:
             #           TASKLOOM_LLM_MAX_CONCURRENCY is the *total* in flight,
             #           so at the default of 1 a chat goes next, never now,
             #           and waits out at most one in-flight generation.
+            #
+            #   session — one LLM turn of a session slice (docs/design/
+            #           SESSION_TASKS.md §7). Drained LAST by the same
+            #           workers (`chat llm session`), so the full order is
+            #           chat > task > session: a session's turn is taken
+            #           before nothing and after everything. Same table,
+            #           same options. Only LLM turns of session-kind runs
+            #           ride it — their tool turns stay on `tools`, because
+            #           a tool turn holds no model. No separate concurrency
+            #           knob: a paused/blocked/done session has no message on
+            #           this lane, so the only thing that consumes capacity
+            #           is a runnable slice, and the lane orders those.
             #
             # queue_name is passed as a transport option, not appended to
             # the DSN, so it composes with whatever query params the DSN
@@ -87,6 +99,18 @@ framework:
                     redeliver_timeout: 7200
                 retry_strategy:
                     max_retries: 0
+            # The session lane (docs/design/SESSION_TASKS.md §7): identical
+            # options to the other lanes, for the same reasons. One LLM turn
+            # of a session slice per message, drained last (`chat llm
+            # session`), so sessions never compete with a person or a task
+            # for the next available worker.
+            session:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+                options:
+                    queue_name: session
+                    redeliver_timeout: 7200
+                retry_strategy:
+                    max_retries: 0
             failed:
                 dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
                 options:
@@ -97,6 +121,11 @@ framework:
             App\Message\LlmTurnMessage: llm
             App\Message\ToolTurnMessage: tools
             App\Message\ChatReplyMessage: chat
+            # Session slices' LLM turns: the `session` lane below `llm`
+            # (docs/design/SESSION_TASKS.md §7). The class IS the routing —
+            # a session's turn cannot leak onto the task lane, because no
+            # LlmTurnMessage is ever built for a session run.
+            App\Message\SessionTurnMessage: session
             # Chat's tool turns ride the existing `tools` lane, deliberately:
             # a tool turn is I/O-bound on somebody else's server and must not
             # hold the model, and that is as true for a conversation as for a
@@ -118,6 +147,8 @@ when@test:
                 tools:
                     dsn: 'in-memory://'
                 chat:
+                    dsn: 'in-memory://'
+                session:
                     dsn: 'in-memory://'
                 failed:
                     dsn: 'in-memory://'

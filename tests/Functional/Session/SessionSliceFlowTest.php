@@ -16,7 +16,7 @@ use App\Entity\TaskKind;
 use App\Entity\ToolboxMode;
 use App\Llm\LlmClientInterface;
 use App\Llm\LlmResponse;
-use App\Message\LlmTurnMessage;
+use App\Message\SessionTurnMessage;
 use App\Repository\RunRepository;
 use App\RunEngine\LoopState;
 use App\RunEngine\RunEngine;
@@ -43,10 +43,12 @@ use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
  * declaration stops the session loudly, and the requeue sweep re-derives an
  * owed slice after a lost dispatch.
  *
- * The runs are driven through the **real lanes** (llm → tools → llm with
- * worker stamps) and through the real slice engine from the container, so
- * the settlement commit, the declaration record, the next slice's carrier,
- * and the derived session state are exercised exactly as they run.
+ * The runs are driven through the **real lanes** (session → tools →
+ * session with worker stamps) and through the real slice engine from the
+ * container, so the settlement commit, the declaration record, the next
+ * slice's carrier, and the derived session state are exercised exactly as
+ * they run — on the `session` lane a slice's turns actually ride
+ * (docs/design/SESSION_TASKS.md §7).
  *
  * The mock LLM speaks the protocol the prompt teaches: `session_declare`
  * alone in its round; anything else is a refusal the model must fix, which
@@ -70,6 +72,8 @@ final class SessionSliceFlowTest extends KernelTestCase
         $this->em->createQuery('DELETE FROM App\Entity\ToolCall')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\RunEvent')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\Run')->execute();
+        $this->em->createQuery('DELETE FROM App\Entity\Tool')->execute();
+        $this->em->createQuery('DELETE FROM App\Entity\McpServer')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\Task')->execute();
         $this->em->flush();
         $this->em->clear();
@@ -115,7 +119,7 @@ final class SessionSliceFlowTest extends KernelTestCase
         self::assertSame(RunTrigger::Manual, $slice1->getTriggeredBy());
 
         // RunLauncher would carry the first turn; do the same by hand.
-        $this->bus()->dispatch(new LlmTurnMessage((int) $slice1->getId(), 1));
+        $this->bus()->dispatch(new SessionTurnMessage((int) $slice1->getId(), 1));
 
         $chats = [];
         $this->llm->method('chat')->willReturnCallback(
@@ -160,7 +164,34 @@ final class SessionSliceFlowTest extends KernelTestCase
 
         // Done is terminal: nothing follows it.
         self::assertSame(SessionState::Complete, $slices->state($task));
-        self::assertCount(0, $this->lane('llm'), 'no carrier is left behind');
+        self::assertCount(0, $this->lane('session'), 'no carrier is left behind');
+    }
+
+    /**
+     * The lane the slice's turns ride is the `session` lane
+     * (docs/design/SESSION_TASKS.md §7): the engine builds
+     * `SessionTurnMessage` — and never `LlmTurnMessage` — for a session-kind
+     * run, so chat > task > session is a property of the configuration, not
+     * of every dispatch site remembering to pick the right class.
+     */
+    public function testASlicesTurnsAreBuiltForTheSessionLane(): void
+    {
+        $task = $this->sessionTask();
+        $slice = $this->engine->start($task);
+
+        $message = $this->engine->nextTurnMessage($slice);
+        self::assertInstanceOf(SessionTurnMessage::class, $message, 'a slice\'s LLM turn is a SessionTurnMessage');
+        self::assertSame(1, $message->step);
+
+        // And an ordinary task's run is untouched: same call, the other lane.
+        $this->catalogTool('get_weather');
+        $runTask = new Task('Ordinary', 'Do it.', TaskKind::Run, ToolboxMode::Explicit, ['get_weather'], TaskAuthor::User);
+        $runTask->enable();
+        $this->em->persist($runTask);
+        $this->em->flush();
+
+        $ordinary = $this->engine->start($runTask);
+        self::assertInstanceOf(\App\Message\LlmTurnMessage::class, $this->engine->nextTurnMessage($ordinary));
     }
 
     /**
@@ -171,7 +202,7 @@ final class SessionSliceFlowTest extends KernelTestCase
     {
         $task = $this->sessionTask();
         $slice = $this->engine->start($task);
-        $this->bus()->dispatch(new LlmTurnMessage((int) $slice->getId(), 1));
+        $this->bus()->dispatch(new SessionTurnMessage((int) $slice->getId(), 1));
 
         $this->llm->method('chat')->willReturn($this->response(toolCalls: [
             ['id' => 'c1', 'name' => 'session_declare', 'arguments' => ['outcome' => 'done', 'summary' => 'All done.']],
@@ -204,7 +235,7 @@ final class SessionSliceFlowTest extends KernelTestCase
     {
         $task = $this->sessionTask();
         $slice = $this->engine->start($task);
-        $this->bus()->dispatch(new LlmTurnMessage((int) $slice->getId(), 1));
+        $this->bus()->dispatch(new SessionTurnMessage((int) $slice->getId(), 1));
 
         $this->llm->method('chat')->willReturn($this->response(toolCalls: [
             ['id' => 'c1', 'name' => 'session_declare', 'arguments' => ['outcome' => 'blocked', 'summary' => 'Need the API key before proceeding.']],
@@ -249,7 +280,7 @@ final class SessionSliceFlowTest extends KernelTestCase
     {
         $task = $this->sessionTask();
         $slice = $this->engine->start($task);
-        $this->bus()->dispatch(new LlmTurnMessage((int) $slice->getId(), 1));
+        $this->bus()->dispatch(new SessionTurnMessage((int) $slice->getId(), 1));
 
         // A plain terminal message — prose, no declaration. (A session is
         // told not to do this, but the engine must hold the line if it
@@ -293,7 +324,7 @@ final class SessionSliceFlowTest extends KernelTestCase
     {
         $task = $this->sessionTask();
         $slice = $this->engine->start($task);
-        $this->bus()->dispatch(new LlmTurnMessage((int) $slice->getId(), 1));
+        $this->bus()->dispatch(new SessionTurnMessage((int) $slice->getId(), 1));
 
         $chats = [];
         $this->llm->method('chat')->willReturnCallback(
@@ -378,7 +409,8 @@ final class SessionSliceFlowTest extends KernelTestCase
         $successor = $runs[1];
         self::assertSame(RunTrigger::Continuation, $successor->getTriggeredBy());
         self::assertSame(RunStatus::Queued, $successor->getStatus(), 'waiting on the lanes is the committed state');
-        self::assertCount(1, $this->lane('llm'), 'its first turn is on the lane, committed with the row');
+        self::assertCount(1, $this->lane('session'), 'its first turn is on the session lane, committed with the row');
+        self::assertCount(0, $this->lane('llm'), 'a session never competes with a task for the next worker');
         self::assertSame(SessionState::Working, $slices->state($this->taskRefetch($task)));
 
         // Converged: a second sweep finds nothing to do.
@@ -436,6 +468,17 @@ final class SessionSliceFlowTest extends KernelTestCase
         return $task;
     }
 
+    /** One catalog tool, so an ordinary run-kind task's toolbox resolves. */
+    private function catalogTool(string $name): void
+    {
+        $server = new \App\Entity\McpServer('test-server', 'https://server.example/mcp', \App\Entity\ServerProtocol::Mcp);
+        $this->em->persist($server);
+
+        $tool = new \App\Entity\Tool($server, $name, 'test tool', ['type' => 'object'], []);
+        $this->em->persist($tool);
+        $this->em->flush();
+    }
+
     private function sessionTaskRefetched(): Task
     {
         $task = $this->em->getRepository(Task::class)->findOneBy([]);
@@ -491,7 +534,7 @@ final class SessionSliceFlowTest extends KernelTestCase
     private function pump(int $maxDeliveries = 50): void
     {
         for ($i = 0; $i < $maxDeliveries; ++$i) {
-            $delivered = $this->deliverOne('llm');
+            $delivered = $this->deliverOne('session');
             $delivered = $this->deliverOne('tools') || $delivered;
 
             if (!$delivered) {
@@ -523,8 +566,10 @@ final class SessionSliceFlowTest extends KernelTestCase
      */
     private function lane(string $lane): array
     {
+        // fetchSize high on purpose: the default (1) would let a second
+        // envelope hide, and "exactly one carrier" is the assertion.
         $messages = [];
-        foreach ($this->transport($lane)->get() as $envelope) {
+        foreach ($this->transport($lane)->get(1000) as $envelope) {
             $messages[] = $envelope->getMessage();
         }
 

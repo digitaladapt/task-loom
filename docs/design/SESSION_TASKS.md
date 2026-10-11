@@ -1,6 +1,6 @@
 # Session tasks — design note
 
-**Status:** agreed · **part-built** (steps 1–4 of §12 landed; steps 5–7
+**Status:** agreed · **part-built** (steps 1–5 of §12 landed; steps 6–7
 pending) · **Scope:** rewrites the `session` row of
 SPEC §9 and the deferred items it names; touches SPEC §4.1, §4.4, §5.6, §6.2,
 §13.4; adds a third lane to `CHAT_AND_CAPACITY.md` §4
@@ -15,23 +15,24 @@ SPEC §9 and the deferred items it names; touches SPEC §4.1, §4.4, §5.6, §6.
 > continuation unit; preemption was always the every-turn yield of §7.2, never
 > the slice boundary. §14 records all three.
 
-> **Where this stands.** Build order steps 1–4 have **landed**: the
+> **Where this stands.** Build order steps 1–5 have **landed**: the
 > half-built `session` label can no longer mis-run; the memory store and its
 > `## Memories` block are built (the store, the caps, the renderer, and the
 > per-request injection seam — see step 2 below); the write tools the model
 > uses to fill that store (`session_note`, `session_objective`) are built and
 > dispatchable, including SPEC §4.1's harness-tool clause (see step 3 below);
-> and **the slice engine is built** (step 4): `session_declare` settles a
+> **the slice engine is built** (step 4): `session_declare` settles a
 > slice through the terminal-commit choke point, a `milestone` launches the
 > next slice in the settlement commit, a settlement without a declaration
 > stops the session for a human, and `app:run:requeue` gains the session
-> pass. `TaskKind::isImplemented()` and `SessionKindUnsupportedException`
-> are **gone** — the engine exists. The shape rules that outlived the blanket
-> gate (no steps, no schedule, never synchronous) are refused at every
-> surface that can author or launch a session. A session's slices ride the
-> `llm` lane until the `session` lane lands (step 5), exactly as steps 2–4
-> were designed to be testable without it. Steps 5–7 remain **not built**;
-> what remains is to build them in the order of §12.
+> pass; and **the lane is built** (step 5): a slice's LLM turns ride the
+> `session` transport, drained last (`chat llm session`), so the order is
+> exactly chat > task > session. `TaskKind::isImplemented()` and
+> `SessionKindUnsupportedException` are **gone** — the engine exists. The
+> shape rules that outlived the blanket gate (no steps, no schedule, never
+> synchronous) are refused at every surface that can author or launch a
+> session. Steps 6–7 remain **not built**; what remains is to build them in
+> the order of §12.
 >
 > One piece *was* half-built and worth remembering as the trap the step-1
 > gate closed: nothing branched on kind, so a task created with
@@ -495,6 +496,16 @@ question: they add a lane *below* `llm`, and that is the whole mechanism.
 
 A session slice's LLM turn is taken before nothing and after everything.
 
+**Landed 2026-10-11** (build order step 5). `SessionTurnMessage`
+(`App\Message`) is the routing: `RunEngine` builds it — never
+`LlmTurnMessage` — for every LLM turn of a session-kind run (first turn,
+requeue, post-tool successor), and only it; a slice's tool turns stay
+`ToolTurnMessage` on the shared `tools` lane, because a tool turn holds no
+model. `SessionTurnHandler` is the pass-through, the boot-sweep ownership
+comment now names all three lanes it inherits (no new rule needed, exactly
+as this section predicted), and `ChatLanePriorityTest` pins the full order
+after extending its consume helper with the session lane.
+
 ### 7.2 Why a lane is sufficient — the yield point is every turn
 
 The mechanism is the same one that already makes chat preempt a task, extended one
@@ -720,8 +731,22 @@ matching the existing lanes. Concurrency is the existing
    milestone settles and its successor is on the lane in the same commit;
    done/blocked/no-declaration each settle as designed; the alone-in-round
    refusal feeds back; the sweep repairs a lost dispatch.
-5. **The lane.** `session` transport, the entrypoint receiver, and the ownership
-   comment beside the boot sweep (§7.3).
+5. ~~**The lane.**~~ **Done** (2026-10-11). The `session` transport in
+   `messenger.yaml` (`queue_name: session`, the other lanes' options), the
+   `SessionTurnMessage` class + handler that route a slice's LLM turns below
+   `llm`, and the entrypoint's LLM workers on `chat llm session` — the
+   ordering is exactly chat > task > session, one receiver appended, with
+   the boot sweep's ownership comment updated to say it covers the new lane
+   automatically. `RunEngine` builds the lane's message in one place
+   (`llmTurnMessageFor`), so no dispatch site can pick the wrong class; the
+   requeue command's session pass reports its launched successors so the
+   turn pass skips them (no guaranteed-stale duplicate after a lost
+   dispatch). The proof: `ChatLanePriorityTest` extended to the full stack
+   (a task turn beats a session turn; with one message on each lane the
+   worker handles chat, then task, then session), the session suites drive
+   their runs over the real `session` lane, and the slice-flow test pins
+   that a slice's turn is built as `SessionTurnMessage` while an ordinary
+   task's stays `LlmTurnMessage`.
 6. **The UI.** The objective and the notes: view/edit/pin/delete, provenance,
    revision history, live effect on the next request.
 7. **`SESSION_TASKS.md` → SPEC.** Fold this note into SPEC §9 and §5.6.

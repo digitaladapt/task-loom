@@ -327,7 +327,8 @@ the full, honest record — only what's sent to the model is trimmed.
 - **Where the semaphore physically lives:** the engine is turn-based — one LLM
   request per queued message — so the semaphore is *worker count*, not a counter
   in the app. The container's entrypoint (`serve`) starts
-  `TASKLOOM_LLM_MAX_CONCURRENCY` `messenger:consume llm` workers and
+  `TASKLOOM_LLM_MAX_CONCURRENCY` LLM workers (`messenger:consume chat llm
+  session`) and
   `TASKLOOM_TOOL_MAX_CONCURRENCY` tool workers, restarting any that exit;
   each worker holds at most one request on the wire. One container therefore
   is the whole deployment (web + MCP endpoint + fleet) — see
@@ -944,11 +945,13 @@ one LLM call, and preemption is not "stop the task" — it is **which lane the
 next available worker drains first**.
 
 - The `chat` lane is a transport on the same `messenger_messages` table.
-- The LLM workers consume **`chat llm`**. `messenger:consume` is
+- The LLM workers consume **`chat llm session`**. `messenger:consume` is
   strict-priority across its receivers — `Worker::run()` iterates them in
   order and breaks on the first that handled an envelope — so receiver order
   *is* consume order, and every existing LLM worker becomes chat-aware with no
-  new process, no lock, and no async runtime.
+  new process, no lock, and no async runtime. (The `session` lane — below
+  `llm`, docs/design/SESSION_TASKS.md §7 — rides the tail of the same list:
+  chat > task > session.)
 - **It does not create capacity.** At the default `N=1` a chat goes *next*,
   never *now*: the worst case is one in-flight generation, and for a reasoning
   model that is tens of seconds. Sub-second preemption needs a streaming

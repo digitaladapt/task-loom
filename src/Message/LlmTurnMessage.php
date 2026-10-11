@@ -19,6 +19,10 @@ namespace App\Message;
  * One delivery of this message = one LLM request = the unit the
  * TASKLOOM_LLM_MAX_CONCURRENCY semaphore is counted in: N workers consuming
  * `llm` means at most N requests on the wire.
+ *
+ * A session-kind run's LLM turns are `SessionTurnMessage` on the `session`
+ * lane instead — this class never appears on that lane, and that one never
+ * appears here (docs/design/SESSION_TASKS.md §7).
  */
 final readonly class LlmTurnMessage
 {

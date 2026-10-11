@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The session lane — sessions run below tasks, and nothing else changed
+  (build order step 5 of `docs/design/SESSION_TASKS.md`).** A session slice's
+  LLM turns now ride a third lane, drained last: the LLM workers consume
+  `chat llm session`, so receiver order is the priority order — chat > task
+  > session — and a slice's turn is taken before nothing and after
+  everything. Same table, same options, same workers; **no new concurrency
+  knob** (§7.3: a paused, blocked, or done session has no message on the
+  lane, so the only thing that consumes capacity is a runnable slice, and
+  the lane orders those).
+
+  **The routing is the message class.** `SessionTurnMessage` joins the
+  message vocabulary; `RunEngine` builds it — never `LlmTurnMessage` — for
+  every LLM turn of a session-kind run (first turn, requeue, post-tool
+  successor), in one constructor so no dispatch site can pick the wrong
+  class. A slice's tool turns stay `ToolTurnMessage` on the shared `tools`
+  lane: a tool turn holds no model, so it is not the resource the lanes
+  order. The requeue command's session pass now reports its launched
+  successors so the turn pass skips them — a lost-dispatch repair no longer
+  emits a guaranteed-stale duplicate.
+
+  **The boot sweep's coverage came for free, as designed.** The ownership
+  predicate keys off which lanes the LLM workers consume, so appending
+  `session` to the same receiver list extends it automatically; the comment
+  beside the check now says so (§7.3's one implementation note).
+
 - **The session slice engine — `session_declare`, settle-on-declare, and the
   next slice launched in the settlement commit (build order step 4 of
   `docs/design/SESSION_TASKS.md`).** A session is now a real task kind: its

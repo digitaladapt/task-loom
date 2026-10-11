@@ -6,6 +6,7 @@ namespace App\Tests\Functional\Chat;
 
 use App\Message\ChatReplyMessage;
 use App\Message\LlmTurnMessage;
+use App\Message\SessionTurnMessage;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
 use Symfony\Component\EventDispatcher\EventDispatcher;
@@ -24,11 +25,14 @@ use Symfony\Component\Messenger\Worker;
  * ## The mechanism
  *
  * Chat is a lane on the same `messenger_messages` table, the LLM workers
- * consume `chat llm`, and `messenger:consume` is **strict-priority across its
- * receivers**: `Worker::run()` iterates the receivers in the order given and
- * `break`s on the first one that handled an envelope, every iteration. So
- * every existing LLM worker becomes chat-aware with no new process, no lock,
- * and no async runtime — *receiver order is consume order*.
+ * consume `chat llm session`, and `messenger:consume` is **strict-priority
+ * across its receivers**: `Worker::run()` iterates the receivers in the order
+ * given and `break`s on the first one that handled an envelope, every
+ * iteration. So every existing LLM worker becomes chat-aware with no new
+ * process, no lock, and no async runtime — *receiver order is consume
+ * order*. The session lane rides the tail of the same list (docs/design/
+ * SESSION_TASKS.md §7): chat > task > session, and a session's turn is
+ * taken before nothing and after everything.
  *
  * ## Why this test drives `Worker` directly
  *
@@ -79,10 +83,44 @@ final class ChatLanePriorityTest extends TestCase
     }
 
     /**
+     * And one level down: a task turn beats a session turn, because the task
+     * lane is listed before the session lane (docs/design/SESSION_TASKS.md
+     * §7.1 — sessions are below tasks in the same way tasks are below chat).
+     */
+    public function testTheTaskLaneTakesPrecedenceOverTheSessionLane(): void
+    {
+        $handled = $this->consume(['llm', 'session']);
+
+        self::assertSame(
+            [LlmTurnMessage::class],
+            $handled,
+            'a queued task turn goes before a queued session turn',
+        );
+    }
+
+    /**
+     * And the whole stack, end to end: with one message on each lane the
+     * worker takes the chat turn first, then (next iteration) the task turn,
+     * then the session turn — chat > task > session, which is the fleet's
+     * `chat llm session` receiver order.
+     */
+    public function testTheFullOrderIsChatThenTaskThenSession(): void
+    {
+        $handled = $this->consume(['chat', 'llm', 'session'], limit: 3);
+
+        self::assertSame(
+            [ChatReplyMessage::class, LlmTurnMessage::class, SessionTurnMessage::class],
+            $handled,
+            'the consume order IS the priority order: chat, then task, then session',
+        );
+    }
+
+    /**
      * The fleet's own lane list, pinned end to end: the entrypoint starts its
-     * LLM workers on `chat llm`, which is what makes every existing worker
-     * chat-aware. This is the wiring half — the two tests above prove what the
-     * order *does*, and this one proves the fleet actually passes that order.
+     * LLM workers on `chat llm session`, which is what makes every existing
+     * worker chat-aware AND orders sessions below tasks. This is the wiring
+     * half — the tests above prove what the order *does*, and this one proves
+     * the fleet actually passes that order.
      *
      * (It reads the entrypoint rather than running the fleet because the fleet
      * test belongs to the container suite, which drives the real script against
@@ -94,9 +132,9 @@ final class ChatLanePriorityTest extends TestCase
         $entrypoint = (string) file_get_contents(\dirname(__DIR__, 3).'/docker/entrypoint.sh');
 
         self::assertMatchesRegularExpression(
-            '/messenger:consume chat llm/u',
+            '/messenger:consume chat llm session/u',
             $entrypoint,
-            'the LLM workers must drain the chat lane first, or chat has no priority at all',
+            'the LLM workers must drain chat first and session last, or neither lane has its priority',
         );
     }
 
@@ -134,23 +172,55 @@ final class ChatLanePriorityTest extends TestCase
     }
 
     /**
+     * The session lane exists and shares the other lanes' options.
+     *
+     * `redeliver_timeout` has to match for the same reason it does on the
+     * run lanes: a redelivery must be able to take over a dead worker's
+     * claim, which requires the claim to have gone stale first.
+     */
+    public function testTheSessionLaneIsConfiguredLikeTheRunLanes(): void
+    {
+        $config = (string) file_get_contents(\dirname(__DIR__, 3).'/config/packages/messenger.yaml');
+
+        self::assertMatchesRegularExpression(
+            '/^            session:\n(?:                .*\n)*?                retry_strategy:\n                    max_retries: 0$/mu',
+            $config,
+            'the session lane is a Doctrine transport with no Messenger retry: the engine owns failure semantics',
+        );
+
+        self::assertMatchesRegularExpression(
+            '/^            session:$.*?redeliver_timeout: 7200/msu',
+            $config,
+            'the session lane needs the same redelivery window as the run lanes, so a redelivery can take over a dead worker\'s claim',
+        );
+
+        self::assertMatchesRegularExpression(
+            '/routing:\n(?:.*\n)*?            App\\\\Message\\\\SessionTurnMessage: session$/mu',
+            $config,
+            'the session turn message has to be routed to the session lane, or a slice never reaches a worker',
+        );
+    }
+
+    /**
      * Drive Symfony's worker over the given lanes — in the given order, one
-     * message in each — and report which turn it handled.
+     * message in each — and report which turns it handled, up to `limit`.
      *
      * @param list<string> $lanes lane names, highest priority first
      *
      * @return list<class-string>
      */
-    private function consume(array $lanes): array
+    private function consume(array $lanes, int $limit = 1): array
     {
         $handled = [];
         $receivers = [];
 
         foreach ($lanes as $name) {
             $transport = new InMemoryTransport();
-            $message = 'chat' === $name
-                ? new ChatReplyMessage(999_999, 999_999)
-                : new LlmTurnMessage(999_999, 1);
+            $message = match ($name) {
+                'chat' => new ChatReplyMessage(999_999, 999_999),
+                'session' => new SessionTurnMessage(999_999, 1),
+                default => new LlmTurnMessage(999_999, 1),
+            };
 
             $transport->send(new Envelope($message));
 
@@ -168,11 +238,14 @@ final class ChatLanePriorityTest extends TestCase
                 LlmTurnMessage::class => [static function (LlmTurnMessage $m) use (&$handled): void {
                     $handled[] = $m::class;
                 }],
+                SessionTurnMessage::class => [static function (SessionTurnMessage $m) use (&$handled): void {
+                    $handled[] = $m::class;
+                }],
             ])),
         ]);
 
         $dispatcher = new EventDispatcher();
-        $dispatcher->addSubscriber(new StopWorkerOnMessageLimitListener(1, new NullLogger()));
+        $dispatcher->addSubscriber(new StopWorkerOnMessageLimitListener($limit, new NullLogger()));
 
         (new Worker($receivers, $bus, $dispatcher))->run(['sleep' => 1000]);
 

@@ -128,7 +128,7 @@ final class RunRequeueCommand extends Command
         }
 
         $dispatched = $this->reconcileGraphs($scope, $dryRun, $output);
-        $this->reconcileSessions($scope, $dryRun, $output);
+        $dispatched += $this->reconcileSessions($scope, $dryRun, $output);
         $this->requeueTurns($scope, $dryRun, $output, $dispatched);
 
         return self::SUCCESS;
@@ -316,10 +316,21 @@ final class RunRequeueCommand extends Command
      * turn dispatch can see (an owed slice whose launch was lost with the
      * process that owed it), and converges to nothing when healthy.
      *
+     * Returns the launched successors' run ids so the turn pass skips them:
+     * a slice's first turn is dispatched inside its creation transaction
+     * (row and carrier commit together), so re-dispatching it here would be
+     * a guaranteed-stale duplicate — the same reason the graph reconcile
+     * reports its dispatched children. A carrier lost LATER is still
+     * repaired: on a later invocation the session derives `working` (not
+     * owed), the session pass launches nothing, and the turn pass sees the
+     * queued slice and re-dispatches its turn.
+     *
      * Scoped by run-id: a session whose OWN slice was named reconciles
      * just that session.
+     *
+     * @return array<int, true> run ids whose first turn was already dispatched
      */
-    private function reconcileSessions(?Run $scope, bool $dryRun, OutputInterface $output): void
+    private function reconcileSessions(?Run $scope, bool $dryRun, OutputInterface $output): array
     {
         $reconciles = [];
 
@@ -335,10 +346,15 @@ final class RunRequeueCommand extends Command
             $reconciles = $this->slices->reconcile($dryRun);
         }
 
+        $skip = [];
         foreach ($reconciles as $reconcile) {
             $output->writeln($dryRun
                 ? \sprintf('Session %d: would launch the next slice.', $reconcile->taskId)
                 : \sprintf('Session %d: launched the next slice (#%s).', $reconcile->taskId, null === $reconcile->sliceRunId ? '?' : (string) $reconcile->sliceRunId));
+
+            if (null !== $reconcile->sliceRunId) {
+                $skip[$reconcile->sliceRunId] = true;
+            }
         }
 
         if ([] !== $reconciles) {
@@ -346,6 +362,8 @@ final class RunRequeueCommand extends Command
                 ? \sprintf('Session slices: %d would be launched.', \count($reconciles))
                 : \sprintf('Session slices: %d launched.', \count($reconciles)));
         }
+
+        return $skip;
     }
 
     /**

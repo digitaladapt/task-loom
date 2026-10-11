@@ -122,7 +122,7 @@ final class EntrypointSupervisorTest extends TestCase
         self::assertStringContainsString('app:run:requeue --startup', $log);
 
         $sweep = strpos($log, 'app:run:requeue --startup');
-        $firstWorker = strpos($log, 'messenger:consume chat llm');
+        $firstWorker = strpos($log, 'messenger:consume chat llm session');
         self::assertNotFalse($sweep);
         self::assertNotFalse($firstWorker, 'the fleet must start at all');
         self::assertLessThan($firstWorker, $sweep, 'the boot sweep must complete before the first worker consumes');
@@ -438,7 +438,7 @@ final class EntrypointSupervisorTest extends TestCase
             $this->stopServe($process);
         }
 
-        self::assertStringContainsString('messenger:consume chat llm', $this->readPhpLog());
+        self::assertStringContainsString('messenger:consume chat llm session', $this->readPhpLog());
         self::assertStringContainsString('--time-limit=120', $this->readPhpLog());
         self::assertStringContainsString('--memory-limit=64M', $this->readPhpLog());
     }
@@ -724,10 +724,11 @@ final class EntrypointSupervisorTest extends TestCase
                 *"catalog:sync"*) echo "synced"; exit 0 ;;
                 *"app:run:requeue"*) echo "requeued"; exit 0 ;;
                 *"app:chat:requeue"*) echo "chat requeued"; exit 0 ;;
-                # `chat llm`, in that order: the LLM workers are the fleet's
-                # chat-aware ones (SPEC §15), so the pattern has to name the
-                # lane list rather than just the run lane.
-                *"messenger:consume chat llm"*)
+                # `chat llm session`, in that order: the LLM workers are the
+                # fleet's chat-aware ones (SPEC §15) and the session lane
+                # rides below theirs (docs/design/SESSION_TASKS.md §7), so
+                # the pattern pins the full lane list.
+                *"messenger:consume chat llm session"*)
                     # Trap before announcing: "up" is the test's cue that this
                     # process is ready to receive TERM, so the handler must
                     # already be installed when it prints — a signal landing

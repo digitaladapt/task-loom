@@ -77,7 +77,7 @@ docker compose -f docs/examples/compose.yaml up -d
 ```
 
 One container runs everything: the admin UI, the MCP endpoint, and the worker
-fleet (N `llm` workers — each consuming `chat llm` — plus M `tools` workers),
+fleet (N `llm` workers — each consuming `chat llm session` — plus M `tools` workers),
 supervised by the image's entrypoint. `docker compose up` also deploys the schema — a one-shot `migrate`
 service runs to completion before the app is allowed to start (§8.6: schema
 changes stay an explicit step, they are simply wired for you). `TASKLOOM_LLM_MAX_CONCURRENCY`
@@ -346,10 +346,16 @@ by `queue_name`):
   FIFO between runs — a long multi-step task never starves others.
 - `chat` — one reply turn of a conversation (SPEC §15). **Drained first**, by the
   same LLM workers: `messenger:consume` is strict-priority across its receivers, so
-  `messenger:consume chat llm` serves a waiting human before the next task turn. Note
+  `messenger:consume chat llm session` serves a waiting human before the next task turn. Note
   the bound — `TASKLOOM_LLM_MAX_CONCURRENCY` is the *total* in flight, so at the
   default of 1 a chat goes **next**, not **now**, and waits out at most one
   generation. It reorders; it does not create capacity.
+- `session` — one LLM turn of a session slice (docs/design/SESSION_TASKS.md §7).
+  **Drained last** by the same workers, so the full order is chat > task > session:
+  a session progresses only when no person and no task is waiting. A slice's
+  tool turns ride the shared `tools` lane (a tool turn holds no model). No
+  separate knob: a paused, blocked, or done session has no message on this lane,
+  so the only capacity it can consume is a runnable slice.
 - `tools` — executes the pending tool calls of an exchange. A slow tool never blocks
   the `llm` lane, and runs release their LLM slot while on tool I/O.
 - `failed` — messages a worker could not process (infrastructure errors); inspect with
@@ -358,15 +364,15 @@ by `queue_name`):
   retry semantics; the transport's own retry is disabled).
 
 In the container, the entrypoint starts the fleet for you: `TASKLOOM_LLM_MAX_CONCURRENCY`
-llm workers (each consuming `chat llm`) and `TASKLOOM_TOOL_MAX_CONCURRENCY` tools
+llm workers (each consuming `chat llm session`) and `TASKLOOM_TOOL_MAX_CONCURRENCY` tools
 workers, restarted on exit.
 Locally (or when working outside the container) run them by hand:
 
 ```bash
 php bin/console app:run:now <task-id> --queue     # enqueue
-php bin/console messenger:consume chat llm tools  # one llm worker (chat-aware) + one tools worker
+php bin/console messenger:consume chat llm session tools  # one llm worker (chat + session aware) + one tools worker
 # N workers for concurrency N (e.g. 1 on a single local GPU):
-php bin/console messenger:consume chat llm       # start N of these, plus one `tools`
+php bin/console messenger:consume chat llm session       # start N of these, plus one `tools`
 ```
 
 Reliability properties, by construction: a turn's checkpoint and its successor message

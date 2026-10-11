@@ -21,6 +21,7 @@ use App\Entity\ToolboxMode;
 use App\Llm\LlmClientInterface;
 use App\Llm\LlmResponse;
 use App\Message\LlmTurnMessage;
+use App\Message\SessionTurnMessage;
 use App\Repository\RunRepository;
 use App\Repository\SessionMemoryRepository;
 use App\RunEngine\LoopState;
@@ -50,11 +51,11 @@ use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
  * request's `## Memories` block carries them — the loop the whole feature
  * exists for, closed.
  *
- * The run is crafted as the slice launcher will craft it (the step-1 gate
- * keeps run()/start() refusing the kind until step 4) and driven llm →
- * tools → llm with worker stamps; nothing calls a private seam. The tool
- * definitions on the wire are asserted too — a harness tool that is not on
- * the wire is a tool the model cannot call.
+ * The run is crafted as the slice launcher will craft it and driven on the
+ * **session** lane → tools → session with worker stamps (the lane a slice's
+ * turns actually ride, docs/design/SESSION_TASKS.md §7); nothing calls a
+ * private seam. The tool definitions on the wire are asserted too — a
+ * harness tool that is not on the wire is a tool the model cannot call.
  */
 #[AllowMockObjectsWithoutExpectations]
 final class SessionWriteToolsFlowTest extends KernelTestCase
@@ -142,7 +143,7 @@ final class SessionWriteToolsFlowTest extends KernelTestCase
         $this->executor->expects($this->never())->method('execute');
         $this->executor->expects($this->never())->method('validate');
 
-        $this->bus()->dispatch(new LlmTurnMessage((int) $run->getId(), 1));
+        $this->bus()->dispatch(new SessionTurnMessage((int) $run->getId(), 1));
         $this->pump();
 
         $this->em->clear();
@@ -209,7 +210,7 @@ final class SessionWriteToolsFlowTest extends KernelTestCase
             },
         );
 
-        $this->bus()->dispatch(new LlmTurnMessage((int) $run->getId(), 1));
+        $this->bus()->dispatch(new SessionTurnMessage((int) $run->getId(), 1));
         $this->pump();
 
         $this->em->clear();
@@ -333,7 +334,12 @@ final class SessionWriteToolsFlowTest extends KernelTestCase
     private function pump(int $maxDeliveries = 50): void
     {
         for ($i = 0; $i < $maxDeliveries; ++$i) {
+            // Mirror the fleet: the LLM workers drain `llm` before `session`
+            // (strict priority), the tools workers drain `tools`. Run-kind
+            // and session-kind tests share this pump, so both kinds' lanes
+            // are walked in the production order.
             $delivered = $this->deliverOne('llm');
+            $delivered = $this->deliverOne('session') || $delivered;
             $delivered = $this->deliverOne('tools') || $delivered;
 
             if (!$delivered) {
