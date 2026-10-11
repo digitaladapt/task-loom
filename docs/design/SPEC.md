@@ -54,7 +54,9 @@ alternatives that were rejected on the way here.
 ### Non-goals (v1)
 
 - No worker tier / container sandboxing / claim protocol.
-- No `session`-kind long-running tasks (designed for, deferred — §9).
+- ~~No `session`-kind long-running tasks~~ — **since built** (§9): a session
+  is a series of bounded slices, each an ordinary `Run`, settled by a typed
+  `session_declare` and steered through a memory store the operator can edit.
 - No scheduler tick (manual "Run now" only; tick lands in v1.1).
 - No stdio or legacy SSE MCP transports.
 - No LLM-driven context compaction; static trimming with fail-closed budget only.
@@ -313,6 +315,16 @@ the full, honest record — only what's sent to the model is trimmed.
   fit, the run still fails with
   `context exhausted: the prompt head and tool definitions alone are an estimated N tokens > limit M`.
   Never summarize-to-continue.
+- **A session slice adds one more never-pruned tenant: the `## Memories` block**
+  (SPEC §9). It is injected after the prompt head and before the kept exchanges,
+  on the `assistant` role, rebuilt from the store on every request — so an
+  operator edit lands on the next request, with no restart and no slice
+  boundary — and counted in the request's fixed cost. It is bounded on its own
+  percentage (`TASKLOOM_SESSION_MAX_MEMORY_PCT`), independent of the Inputs
+  cap, because memory and inputs are different kinds of never-pruned content;
+  when the block exceeds its cap the oldest notes are dropped whole, with a
+  visible marker, and the objective is never dropped — that is the whole reason
+  it is a separate shape.
 
 ---
 
@@ -508,13 +520,48 @@ Two kinds, same engine:
 | | `run` | `session` |
 |---|---|---|
 | Examples | Morning Briefing; log-review reviewer task | "Build an email MCP server" |
-| Shape | completes in one loop pass; few–dozen exchanges | long-lived, recurring work sessions |
-| Context | trimmed window | persistent **workspace** (files/scratchpad outside context) + compaction summary carried between sessions |
-| Completion | justified completion declaration, then done | model declares milestone/done; per-session budgets |
+| Shape | completes in one loop pass; few–dozen exchanges | a series of **bounded runs (slices)**, each ending in a `milestone`/`done`/`blocked` declaration; a `milestone` launches the next slice in the same commit (§13.3's contract, one level down) |
+| Context | trimmed window | trimmed window **+ a bounded, mutable `## Memories` block** injected after the head on every request (§5.6) |
+| Continuity | none | the session memory store (one objective + capped notes) carries state across slices; **no LLM compaction** (DESIGN_CONSIDERATIONS §2.3) |
+| Workspace | — | optional, and an ordinary MCP server; a session runs with none |
+| Steering | replacement task (§4.4) | same, **plus** live memory edits by the operator: the objective, and the notes |
+| Priority | `llm` lane | `session` lane, below `llm`: chat > task > session (no separate concurrency knob — a paused/blocked/done session has no lane message, so the lane alone orders the work) |
+| Completion | justified completion declaration, then done | `session_declare`: `milestone` → next slice; `done` → complete; `blocked` → attention; a settlement **without** a declaration stops the session for a human |
 
-**v1 ships `run` only.** `session` needs its own design pass (workspace layout, compaction
-contract, resumption semantics) and is the v1.x headline. Note the reviewer task is a `run`
-task — so the improvement cycle is provable in v1 even without sessions.
+**A session is a scheduler that launches runs.** Each slice is an ordinary `Run`
+through the existing engine — same two-phase LLM/tool loop, same claim protocol,
+same lane machinery, same frozen head — so the ledger, the transcript, the
+digest, the attention queue, and the resume path all work unchanged, per slice.
+The session's own machinery is small: a derived state (from committed rows
+only — the enabled flag, the top-level runs, and their declarations; never
+stored), the declaration that settles a slice, and the launch of the next one.
+Nothing polls; in steady state nothing is ever "owed".
+
+**Derived session states:** `fresh` (enabled, no slice has run), `working` (a
+slice in flight), `owed` (the last declaration was `milestone`;
+launched at settlement, re-derived by `app:run:requeue` after a lost
+dispatch), `complete` (last declaration `done`), `blocked` (last declaration
+`blocked`), `stopped` (the last slice settled without a declaration — an
+exhausted slice budget, a failed turn, a tripped breaker; loud, and no retry),
+and `paused` (the task is disabled — the operator's switch; the current slice
+finishes, no more launch).
+
+**Memory crosses slices; the transcript does not.** The store is one objective
+(a singleton, replaced with its superseded text kept) plus capped notes (hot
+ones injected, cold ones retained), all task-loom's own table — not an MCP
+server and not a context-shuttle key, because task-loom works with any MCP
+server and with none. The operator steers by editing what the session
+remembers; every write keeps its replaced text, so steering is visible and
+reversible. Anything that must cross a slice boundary must be written to the
+store — including a new aim (`session_objective`), which is never carried in
+the declaration.
+
+**Sessions are not scheduled and never run synchronously.** A session is
+started and stopped, not cron'd (its "recurring" shape is that it re-slices
+itself); its slices wait in the persisted queue on the `session` lane, behind
+any waiting chat and any task turn. `TaskKind::Session` is a real kind; the
+shape rules — no steps, no schedule, lane-driven — are refused at every
+surface that can author or launch a session.
 
 ---
 

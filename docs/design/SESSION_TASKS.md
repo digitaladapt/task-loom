@@ -1,7 +1,7 @@
 # Session tasks — design note
 
-**Status:** agreed · **part-built** (steps 1–6 of §12 landed; step 7
-pending) · **Scope:** rewrites the `session` row of
+**Status:** agreed · **built** (all seven steps of §12 landed;
+`SESSION_TASKS.md` folded into SPEC §9/§5.6) · **Scope:** rewrote the `session` row of
 SPEC §9 and the deferred items it names; touches SPEC §4.1, §4.4, §5.6, §6.2,
 §13.4; adds a third lane to `CHAT_AND_CAPACITY.md` §4
 
@@ -15,23 +15,31 @@ SPEC §9 and the deferred items it names; touches SPEC §4.1, §4.4, §5.6, §6.
 > continuation unit; preemption was always the every-turn yield of §7.2, never
 > the slice boundary. §14 records all three.
 
-> **Where this stands.** Build order steps 1–6 have **landed**: the
+> **Where this stands.** All seven build-order steps have **landed**: the
 > half-built `session` label can no longer mis-run; the memory store and its
 > `## Memories` block are built (the store, the caps, the renderer, and the
-> per-request injection seam — see step 2 below); the write tools the model
-> uses to fill that store (`session_note`, `session_objective`) are built and
-> dispatchable, including SPEC §4.1's harness-tool clause (see step 3 below);
-> **the slice engine is built** (step 4): `session_declare` settles a
-> slice through the terminal-commit choke point, a `milestone` launches the
-> next slice in the settlement commit, a settlement without a declaration
-> stops the session for a human, and `app:run:requeue` gains the session
-> pass; **the lane is built** (step 5): a slice's LLM turns ride the
-> `session` transport, drained last (`chat llm session`), so the order is
-> exactly chat > task > session; and **the UI is built** (step 6): the
-> session page shows the derived state, the start/resume/pause controls,
-> and the memory — view, edit, add, delete, pin, tier, revert — every write
-> through the store, the single writer. Step 7 remains **not built**: the
-> note folds into SPEC §9/§5.6.
+> per-request injection seam); the write tools the model uses to fill that
+> store (`session_note`, `session_objective`) are built and dispatchable,
+> including SPEC §4.1's harness-tool clause; **the slice engine is built**:
+> `session_declare` settles a slice through the terminal-commit choke point,
+> a `milestone` launches the next slice in the settlement commit, a
+> settlement without a declaration stops the session for a human, and
+> `app:run:requeue` gains the session pass; **the lane is built**: a slice's
+> LLM turns ride the `session` transport, drained last (`chat llm session`),
+> so the order is exactly chat > task > session; **the UI is built**: the
+> session page shows the derived state, the start/resume/pause controls, and
+> the memory — view, edit, add, delete, pin, tier, revert — every write
+> through the store, the single writer; and this note is **folded into
+> SPEC §9/§5.6** as its final step. `TaskKind::isImplemented()` and
+> `SessionKindUnsupportedException` are gone; the shape rules that outlived
+> the blanket gate (no steps, no schedule, never synchronous) are refused at
+> every surface that can author or launch a session.
+>
+> One piece *was* half-built and worth remembering as the trap the step-1
+> gate closed: nothing branched on kind, so a task created with
+> `kind: "session"` was dispatched as an ordinary single-pass run wearing a
+> session's label. That is now impossible at every entrance — and the slice
+> engine behind the kind is real.
 >
 > One piece *was* half-built and worth remembering as the trap the step-1
 > gate closed: nothing branched on kind, so a task created with
@@ -778,7 +786,13 @@ matching the existing lanes. Concurrency is the existing
    and fixed while testing: the store's bulk-DQL revision deletes left the
    UnitOfWork inconsistent for the next flush; both deletion paths now go
    through it.
-7. **`SESSION_TASKS.md` → SPEC.** Fold this note into SPEC §9 and §5.6.
+7. ~~**`SESSION_TASKS.md` → SPEC.**~~ **Done** (2026-10-11). SPEC §9 now
+   carries the two-kind table and the session contract (a scheduler that
+   launches runs; derived states; memory crosses slices, the transcript does
+   not; not scheduled, never synchronous) and SPEC §5.6 gains the
+   `## Memories` block as a fourth never-pruned tenant with its own
+   percentage. The note's §13 keeps the original proposal as the record;
+   §14 keeps the decisions.
 
 Steps 2–4 are the core and are testable without the lane or the UI — which is
 the point: the risky, novel piece (a mutable block in the head of a run, and a
@@ -787,6 +801,13 @@ tool call that settles one) lands before the machinery around it.
 ---
 
 ## 13. Proposed SPEC §9
+
+**Folded into SPEC.md on 2026-10-11** (build order step 7): the table below is
+now SPEC §9, updated to the shipped reality (the state list, the store's shape,
+the shape rules, and the completion row's "stops for a human" case); §5.6
+gained the `## Memories` tenant's paragraph. What follows is the original
+proposal, kept as the record of what was agreed — the same posture §14 takes
+for the decisions.
 
 Replacing the current `session` row and the "v1 ships `run` only" paragraph:
 
