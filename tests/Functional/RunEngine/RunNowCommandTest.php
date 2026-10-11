@@ -182,6 +182,7 @@ final class RunNowCommandTest extends KernelTestCase
         $exit = $tester->execute(['task-id' => (string) $task->getId(), '--queue' => true]);
 
         self::assertSame(0, $exit);
+        self::assertStringContainsString('"session" lane', $tester->getDisplay(), 'the first slice dispatch names the lane it rides (docs/design/SESSION_TASKS.md §7)');
         $runs = $this->em->createQuery('SELECT r FROM App\\Entity\\Run r')->getResult();
         self::assertCount(1, $runs, 'the first slice exists, waiting on the lanes');
     }

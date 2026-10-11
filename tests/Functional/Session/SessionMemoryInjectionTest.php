@@ -17,7 +17,7 @@ use App\Entity\Tool;
 use App\Entity\ToolboxMode;
 use App\Llm\LlmClientInterface;
 use App\Llm\LlmResponse;
-use App\Message\LlmTurnMessage;
+use App\Message\SessionTurnMessage;
 use App\Repository\RunRepository;
 use App\Repository\SessionMemoryRepository;
 use App\RunEngine\LoopState;
@@ -46,13 +46,13 @@ use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
  * lands on the very next request, with no restart and no slice boundary.
  *
  * This is the step's "provable against a single long run", and the shape of
- * the proof matters. The step-1 dispatch gate still (correctly) refuses
- * session-kind tasks at run()/start() until the slice engine lands — so the
- * run is crafted exactly as the slice launcher will craft it, and then
- * driven **through the turn cores via the real lanes**: the first message is
- * dispatched to the in-memory `llm` lane and delivered with the same stamps
- * a worker attaches, after which the run walks `llm → tools → llm` on its
- * own committed state. Nothing calls a private seam.
+ * the proof matters. The run is crafted exactly as the slice launcher crafts
+ * it, and then driven **through the turn cores via the real lanes**: the
+ * first message is dispatched to the in-memory `session` lane and delivered
+ * with the same stamps a worker attaches, after which the run walks
+ * `session → tools → session` on its own committed state — the lane a
+ * slice's turns actually ride (docs/design/SESSION_TASKS.md §7). Nothing
+ * calls a private seam.
  */
 #[AllowMockObjectsWithoutExpectations]
 final class SessionMemoryInjectionTest extends KernelTestCase
@@ -130,8 +130,8 @@ final class SessionMemoryInjectionTest extends KernelTestCase
         );
 
         // The first turn, delivered exactly as a worker would.
-        $this->bus()->dispatch(new LlmTurnMessage((int) $run->getId(), 1));
-        $this->deliverOne('llm');
+        $this->bus()->dispatch(new SessionTurnMessage((int) $run->getId(), 1));
+        $this->deliverOne('session');
 
         self::assertCount(1, $chats);
         $first = $chats[0];
@@ -247,15 +247,18 @@ final class SessionMemoryInjectionTest extends KernelTestCase
     }
 
     /**
-     * Drive every lane until it settles — what `messenger:consume llm tools`
-     * does in production, one message at a time, with the stamps a worker
-     * attaches. Mirrors RunEngineAsyncFlowTest, deliberately: the lanes here
-     * ARE the production routing.
+     * Drive every lane until it settles — what `messenger:consume chat llm
+     * session tools` does in production, one message at a time, with the
+     * stamps a worker attaches. Mirrors RunEngineAsyncFlowTest, deliberately:
+     * the lanes here ARE the production routing.
      */
     private function pump(int $maxDeliveries = 50): void
     {
         for ($i = 0; $i < $maxDeliveries; ++$i) {
+            // Mirror the fleet's priority: `llm` before `session` (the LLM
+            // workers drain `chat llm session`), `tools` alongside.
             $delivered = $this->deliverOne('llm');
+            $delivered = $this->deliverOne('session') || $delivered;
             $delivered = $this->deliverOne('tools') || $delivered;
 
             if (!$delivered) {

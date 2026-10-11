@@ -7,6 +7,7 @@ namespace App\RunEngine;
 use App\Entity\RunRole;
 use App\Entity\Task;
 use App\Message\LlmTurnMessage;
+use App\Message\SessionTurnMessage;
 use App\Message\ToolTurnMessage;
 use App\Session\SessionConstraintException;
 use Symfony\Component\Messenger\MessageBusInterface;
@@ -50,7 +51,7 @@ final readonly class RunLauncher
         }
 
         $message = $this->engine->nextTurnMessage($run);
-        if (!$message instanceof LlmTurnMessage && !$message instanceof ToolTurnMessage) {
+        if (!$message instanceof LlmTurnMessage && !$message instanceof SessionTurnMessage && !$message instanceof ToolTurnMessage) {
             throw new RunLaunchException(\sprintf('Run %d was created but has no turn to dispatch.', $run->getId()));
         }
 

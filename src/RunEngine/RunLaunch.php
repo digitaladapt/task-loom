@@ -6,6 +6,7 @@ namespace App\RunEngine;
 
 use App\Entity\Run;
 use App\Message\LlmTurnMessage;
+use App\Message\SessionTurnMessage;
 use App\Message\ToolTurnMessage;
 
 /**
@@ -18,7 +19,7 @@ final readonly class RunLaunch
 {
     public function __construct(
         public Run $run,
-        public LlmTurnMessage|ToolTurnMessage|null $message,
+        public LlmTurnMessage|SessionTurnMessage|ToolTurnMessage|null $message,
     ) {
     }
 
@@ -27,6 +28,7 @@ final readonly class RunLaunch
     {
         return match (true) {
             $this->message instanceof LlmTurnMessage => 'llm',
+            $this->message instanceof SessionTurnMessage => 'session',
             $this->message instanceof ToolTurnMessage => 'tools',
             default => null,
         };

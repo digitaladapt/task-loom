@@ -20,6 +20,7 @@ use App\Entity\ToolDefinition;
 use App\Llm\LlmClientInterface;
 use App\Llm\LlmRequestException;
 use App\Message\LlmTurnMessage;
+use App\Message\SessionTurnMessage;
 use App\Message\ToolTurnMessage;
 use App\Repository\RunRepository;
 use App\Session\SessionConstraintException;
@@ -41,11 +42,11 @@ use Symfony\Component\Messenger\MessageBusInterface;
  * RunEvent row in the attempt ledger (§5.3), persisted before the next LLM
  * request (checkpoint, §5.5).
  *
- * Session slices (docs/design/SESSION_TASKS.md §8) ride this same loop: a
- * slice is one run of a session-kind task; `session_declare` settles it
- * through the same terminal-commit choke point step children use, and a
- * `milestone` launches the next slice's run and lane message inside the
- * settlement commit itself.
+ * Session slices (docs/design/SESSION_TASKS.md §8) ride this same loop — on
+ * the `session` lane (§7): a slice is one run of a session-kind task;
+ * `session_declare` settles it through the same terminal-commit choke
+ * point step children use, and a `milestone` launches the next slice's run
+ * and lane message inside the settlement commit itself.
  *
  * The engine is TURN-BASED: one LLM exchange is two deliverable units — an
  * LLM turn (one model request) and a tool turn (the calls of that
@@ -300,8 +301,14 @@ final class RunEngine
      * needs nothing — derived from committed state only. Used by
      * app:run:now --queue for the first turn and by app:run:requeue for
      * recovery after a message was lost.
+     *
+     * The class picks the LANE (docs/design/SESSION_TASKS.md §7): a
+     * session-kind run's LLM turns ride `session`, every other run's ride
+     * `llm`; tool turns always ride `tools`. `LlmTurnMessage` never appears
+     * on the `session` lane, which is what makes chat > task > session a
+     * property of the configuration alone.
      */
-    public function nextTurnMessage(Run $run): LlmTurnMessage|ToolTurnMessage|null
+    public function nextTurnMessage(Run $run): LlmTurnMessage|SessionTurnMessage|ToolTurnMessage|null
     {
         if (!\in_array($run->getStatus(), [RunStatus::Queued, RunStatus::Running], true)) {
             return null;
@@ -324,7 +331,21 @@ final class RunEngine
             return new ToolTurnMessage((int) $run->getId(), $state->pendingToolTurn->step);
         }
 
-        return new LlmTurnMessage((int) $run->getId(), $state->step + 1);
+        return $this->llmTurnMessageFor($run, $state->step + 1);
+    }
+
+    /**
+     * The LLM-turn message for a run, on the run's own lane: `session` for
+     * a session-kind run (the slice engine's carrier too), `llm` for every
+     * other run. The ONE constructor for both, so no path can put a
+     * session's turn on the task lane or a task's turn on the session lane
+     * (docs/design/SESSION_TASKS.md §7).
+     */
+    private function llmTurnMessageFor(Run $run, int $step): LlmTurnMessage|SessionTurnMessage
+    {
+        return TaskKind::Session === $run->getTask()->getKind()
+            ? new SessionTurnMessage((int) $run->getId(), $step)
+            : new LlmTurnMessage((int) $run->getId(), $step);
     }
 
     /**
@@ -333,15 +354,21 @@ final class RunEngine
      * only when this step's LLM turn is still owed. Everything else — a
      * duplicate, a late redelivery, a terminal run — is dropped as stale.
      *
+     * A session-kind run's delivery rides the `session` lane
+     * (`SessionTurnMessage`, docs/design/SESSION_TASKS.md §7): the same
+     * core and the same checks — the lane is the only difference, and
+     * `$delivery` is the short name of the delivered class so the log
+     * lines name the message an operator is actually chasing.
+     *
      * When the turn requests tools, the pending tool turn and the tool
      * lane's message commit together; when it completes the run, nothing
      * follows.
      */
-    public function llmTurn(int $runId, int $step): RunTurnResult
+    public function llmTurn(int $runId, int $step, string $delivery = 'LlmTurnMessage'): RunTurnResult
     {
         $run = $this->runs->find($runId);
         if (!$run instanceof Run) {
-            $this->logger->debug('Dropping LlmTurnMessage: run {run} no longer exists.', ['run' => $runId]);
+            $this->logger->debug('Dropping {delivery}: run {run} no longer exists.', ['delivery' => $delivery, 'run' => $runId]);
 
             return RunTurnResult::Stale;
         }
@@ -351,7 +378,7 @@ final class RunEngine
         // stale by the time the claim is won.
         $token = $this->claim($run);
         if (null === $token) {
-            $this->logLostClaim($run, $runId, $step, 'LlmTurnMessage');
+            $this->logLostClaim($run, $runId, $step, $delivery);
 
             return RunTurnResult::Stale;
         }
@@ -362,7 +389,7 @@ final class RunEngine
             }
 
             if (!\in_array($run->getStatus(), [RunStatus::Queued, RunStatus::Running], true)) {
-                $this->logger->debug('Run {run}: dropping LlmTurnMessage (status {status} under claim).', ['run' => $runId, 'status' => $run->getStatus()->value]);
+                $this->logger->debug('Run {run}: dropping {delivery} (status {status} under claim).', ['delivery' => $delivery, 'run' => $runId, 'status' => $run->getStatus()->value]);
 
                 return RunTurnResult::Stale;
             }
@@ -370,7 +397,7 @@ final class RunEngine
             // A parent aggregator executes no turns (SPEC §13.3): a message
             // for one is stale by construction.
             if (!$run->executesTurns()) {
-                $this->logger->debug('Run {run}: dropping LlmTurnMessage (parent runs execute no turns).', ['run' => $runId]);
+                $this->logger->debug('Run {run}: dropping {delivery} (parent runs execute no turns).', ['delivery' => $delivery, 'run' => $runId]);
 
                 return RunTurnResult::Stale;
             }
@@ -378,7 +405,7 @@ final class RunEngine
             // A queued child of a settled graph was orphaned by a sibling's
             // failure: it never started and must never start (SPEC §13.5).
             if ($this->graph->isSkipped($run)) {
-                $this->logger->debug('Run {run}: dropping LlmTurnMessage (its graph settled before this child started).', ['run' => $runId]);
+                $this->logger->debug('Run {run}: dropping {delivery} (its graph settled before this child started).', ['delivery' => $delivery, 'run' => $runId]);
 
                 return RunTurnResult::Stale;
             }
@@ -392,7 +419,7 @@ final class RunEngine
             }
 
             if ($step !== $state->step + 1) {
-                $this->logger->debug('Run {run}: dropping LlmTurnMessage step {step} (run step {current}).', ['run' => $runId, 'step' => $step, 'current' => $state->step]);
+                $this->logger->debug('Run {run}: dropping {delivery} step {step} (run step {current}).', ['delivery' => $delivery, 'run' => $runId, 'step' => $step, 'current' => $state->step]);
 
                 return RunTurnResult::Stale;
             }
@@ -815,7 +842,7 @@ final class RunEngine
             $run->setCheckpoint($state->toCheckpoint());
             $this->appendEvent($run, RunEventType::Checkpoint, ['step' => $state->step]);
             $this->em->flush();
-        }, $async ? new LlmTurnMessage((int) $run->getId(), $nextStep) : null);
+        }, $async ? $this->llmTurnMessageFor($run, $nextStep) : null);
 
         return RunTurnResult::AwaitLlmTurn;
     }

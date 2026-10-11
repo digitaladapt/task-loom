@@ -360,6 +360,15 @@ turn sitting in the `chat` lane is taken before any task turn the same
 worker could have taken — and for *every* worker, since they are
 symmetric. That is the mechanism, in full.
 
+**The mechanism now carries a second lane below `llm`.** Sessions
+(docs/design/SESSION_TASKS.md §7) append a `session` receiver:
+`messenger:consume chat llm session`. Nothing about the argument above
+changes — receiver order is consume order — and the full ordering is
+**chat > task > session**: a session slice's turn is taken before nothing
+and after everything. Same table, same options, same workers, and the same
+no-new-capacity bound (§4.4): sessions consume capacity only while a
+slice is runnable, and the lane orders that behind everything else.
+
 ### 4.2 What "halt, run, resume" actually scopes to
 
 Three sharpenings, because the slogan overstates the surface.

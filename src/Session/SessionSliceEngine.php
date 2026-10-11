@@ -11,7 +11,7 @@ use App\Entity\RunEventType;
 use App\Entity\RunTrigger;
 use App\Entity\SessionDeclarationOutcome;
 use App\Entity\Task;
-use App\Message\LlmTurnMessage;
+use App\Message\SessionTurnMessage;
 use App\Repository\RunRepository;
 use App\Repository\TaskRepository;
 use App\RunEngine\LoopState;
@@ -319,7 +319,11 @@ final readonly class SessionSliceEngine
             $this->em->flush(); // the slice's id: its message carries it
 
             if ($dispatch) {
-                $this->bus->dispatch(new LlmTurnMessage((int) $run->getId(), 1));
+                // The session lane (docs/design/SESSION_TASKS.md §7): the
+                // slice's first turn carries the class that routes it below
+                // `llm`, so a session never competes with a task for the
+                // next available worker.
+                $this->bus->dispatch(new SessionTurnMessage((int) $run->getId(), 1));
             }
         });
 

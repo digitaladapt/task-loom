@@ -29,10 +29,11 @@ use Symfony\Component\Console\Output\OutputInterface;
  * Two modes, one gate:
  *   - default: synchronous — drives the turn cores inline and reports the
  *     terminal status (exit 0 only on succeeded).
- *   - --queue: dispatch — creates the run and drops its first turn on the
- *     `llm` lane; workers (`messenger:consume llm tools`) do the driving.
- *     Exit 0 means accepted for execution; the run's outcome is followed
- *     through the ledger, not this exit code.
+ *   - --queue: dispatch — creates the run and drops its first turn on its
+ *     kind's lane (`llm` for a task, `session` for a session slice, and
+ *     `tools` for tool turns); workers (`messenger:consume chat llm
+ *     session tools`) do the driving. Exit 0 means accepted for execution;
+ *     the run's outcome is followed through the ledger, not this exit code.
  */
 #[AsCommand(
     name: 'app:run:now',
@@ -62,10 +63,11 @@ final class RunNowCommand extends Command
                 Exit code 0 on succeeded; 1 on any non-succeeded terminal state
                 (incomplete / failed / needs_attention), so scripts can react.
 
-                With --queue the run is created and its first LLM turn is
-                dispatched to the `llm` lane; start workers with
+                With --queue the run is created and its first turn is
+                dispatched to its kind's lane (`llm`, or `session` for a
+                session slice); start workers with
 
-                    php bin/console messenger:consume llm tools
+                    php bin/console messenger:consume chat llm session tools
 
                 (one [llm] worker per concurrent LLM request — see README,
                 "Concurrency"). Exit code 0 means the run was accepted for
@@ -146,13 +148,13 @@ final class RunNowCommand extends Command
         if (RunRole::Parent === $run->getRole()) {
             $queued = \count(array_filter($this->runs->findChildren($run), static fn (Run $child): bool => RunStatus::Queued === $child->getStatus()));
             $output->writeln(\sprintf('Run %d: queued — %d step run(s) on the "llm" lane.', $run->getId(), $queued));
-            $output->writeln('Consume with: php bin/console messenger:consume llm tools');
+            $output->writeln('Consume with: php bin/console messenger:consume chat llm session tools');
 
             return self::SUCCESS;
         }
 
         $output->writeln(\sprintf('Run %d: queued — %s dispatched to the "%s" lane.', $run->getId(), $launch->messageClass(), $launch->lane()));
-        $output->writeln('Consume with: php bin/console messenger:consume llm tools');
+        $output->writeln('Consume with: php bin/console messenger:consume chat llm session tools');
 
         return self::SUCCESS;
     }
