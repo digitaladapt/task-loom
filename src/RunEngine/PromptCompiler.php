@@ -89,6 +89,38 @@ final readonly class PromptCompiler
     }
 
     /**
+     * The prompt head of a session slice (docs/design/SESSION_TASKS.md §8,
+     * build order step 4): the task's own brief and toolbox, framed as one
+     * slice of a longer session. The completion section is the declaration
+     * contract, harness-owned and NOT configurable: a slice's end is a
+     * typed `session_declare` call, so the `## Completion` text for a slice
+     * states that — the deployment's own completion prose (written for a
+     * run's final message) would be actively wrong here.
+     *
+     * What crosses between slices is the memory store (§3), never the
+     * transcript; if the aim has changed, the model writes it with
+     * `session_objective` before declaring.
+     *
+     * @param list<ToolDefinition> $tools the slice's frozen toolbox
+     *
+     * @return array{system: string, user: string}
+     */
+    public function compileForSlice(Task $task, array $tools): array
+    {
+        $note = 'This run is ONE SLICE of a longer session: the session keeps working across slices, and what carries to the next slice is your memory store (the ## Memories block) — not this transcript. When this slice\'s work reaches a stopping point, end it by calling session_declare with its outcome (milestone / done / blocked) and a summary of what you did — and call it ALONE, with no other tool calls in that round. A slice that ends without a declaration stops the session for a human.';
+        $system = $this->compileSystem(
+            $task->getTitle(),
+            $task->getBrief(),
+            $tools,
+            $note,
+            completionOverride: PromptTemplate::SLICE_COMPLETION,
+        );
+        $user = $this->compileUser($task->getBrief());
+
+        return ['system' => $system, 'user' => $user];
+    }
+
+    /**
      * The prompt head of the task's final consumer (SPEC §13.3, §13.4): the
      * task's own brief and toolbox, plus an Inputs block carrying ALL step
      * outputs, labeled — not just the leaves'. The completion declaration is
@@ -144,7 +176,7 @@ final readonly class PromptCompiler
      * @param list<ToolDefinition> $tools
      * @param list<StepOutput>     $inputs
      */
-    private function compileSystem(string $title, string $brief, array $tools, ?string $note = null, array $inputs = []): string
+    private function compileSystem(string $title, string $brief, array $tools, ?string $note = null, array $inputs = [], ?string $completionOverride = null): string
     {
         $sections = [];
 
@@ -180,8 +212,10 @@ final readonly class PromptCompiler
         // 5. The completion instruction: header harness-owned, text
         // configurable — the engine still enforces completion structurally
         // (a contentless terminal message is not a completion; the step
-        // budget fails closed).
-        $sections[] = "## Completion\n\n".$this->template->completion();
+        // budget fails closed). A slice overrides the text wholesale: its
+        // completion is a typed declaration, and the deployment's run-level
+        // prose would be wrong for it.
+        $sections[] = "## Completion\n\n".($completionOverride ?? $this->template->completion());
 
         // 6. Grounding last: the freshest terms in the head, nearest the
         // model's first reply.

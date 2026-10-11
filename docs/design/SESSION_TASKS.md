@@ -1,6 +1,7 @@
 # Session tasks — design note
 
-**Status:** agreed · **not built** · **Scope:** rewrites the `session` row of
+**Status:** agreed · **part-built** (steps 1–4 of §12 landed; steps 5–7
+pending) · **Scope:** rewrites the `session` row of
 SPEC §9 and the deferred items it names; touches SPEC §4.1, §4.4, §5.6, §6.2,
 §13.4; adds a third lane to `CHAT_AND_CAPACITY.md` §4
 
@@ -14,32 +15,29 @@ SPEC §9 and the deferred items it names; touches SPEC §4.1, §4.4, §5.6, §6.
 > continuation unit; preemption was always the every-turn yield of §7.2, never
 > the slice boundary. §14 records all three.
 
-> **Where this stands.** Build order steps 1–3 have **landed**: the
+> **Where this stands.** Build order steps 1–4 have **landed**: the
 > half-built `session` label can no longer mis-run; the memory store and its
 > `## Memories` block are built (the store, the caps, the renderer, and the
-> per-request injection seam — see step 2 below); and the write tools the
-> model uses to fill that store (`session_note`, `session_objective`) are
-> built and dispatchable, including SPEC §4.1's harness-tool clause — a
-> session's frozen toolbox is its MCP tools plus the harness's own (see
-> step 3 below).
-> `App\Entity\TaskKind` carries
-> `case Session = 'session'` and `TaskCrud::coerceKind()` still accepts
-> `"run" or "session"` on the wire, but a new `TaskKind::isImplemented()`
-> predicate is the single switch, and four gates refuse the unimplemented
-> kind before anything can go wrong: the write path (`TaskCrud` create and
-> update), the lifecycle (`TaskAdminService` enable/approve), the editor
-> parser (a field error, beside the kind select), and the engine's dispatch
-> entry points (`RunEngine::run`/`start`, reached by Run now, the admin UI,
-> and the scheduler). Every refusal names the reason
-> (`SessionKindUnsupportedException`), and the scheduler's is a classified
-> failed run — loud, never a silent skip. The predicate and its callers go
-> away in one reviewable change when the engine lands. Steps 4–7 remain
-> **not built**; what remains is to build them in the order of §12.
+> per-request injection seam — see step 2 below); the write tools the model
+> uses to fill that store (`session_note`, `session_objective`) are built and
+> dispatchable, including SPEC §4.1's harness-tool clause (see step 3 below);
+> and **the slice engine is built** (step 4): `session_declare` settles a
+> slice through the terminal-commit choke point, a `milestone` launches the
+> next slice in the settlement commit, a settlement without a declaration
+> stops the session for a human, and `app:run:requeue` gains the session
+> pass. `TaskKind::isImplemented()` and `SessionKindUnsupportedException`
+> are **gone** — the engine exists. The shape rules that outlived the blanket
+> gate (no steps, no schedule, never synchronous) are refused at every
+> surface that can author or launch a session. A session's slices ride the
+> `llm` lane until the `session` lane lands (step 5), exactly as steps 2–4
+> were designed to be testable without it. Steps 5–7 remain **not built**;
+> what remains is to build them in the order of §12.
 >
-> One piece *was* half-built and worth remembering as the trap this gate
-> closed: nothing branched on kind, so a task created with
+> One piece *was* half-built and worth remembering as the trap the step-1
+> gate closed: nothing branched on kind, so a task created with
 > `kind: "session"` was dispatched as an ordinary single-pass run wearing a
-> session's label. That is now impossible at every entrance.
+> session's label. That is now impossible at every entrance — and the slice
+> engine behind the kind is real.
 
 > **What this note refuses.** SPEC §9 says a session needs a design pass over
 > "workspace layout, compaction contract, resumption semantics". It gets one
@@ -704,8 +702,24 @@ matching the existing lanes. Concurrency is the existing
    drives the real lanes on a crafted session run: the model writes, the
    store receives, and the **next request's block carries the writes** — the
    loop closed.
-4. **The slice engine.** `session_declare` and settle-on-declare, the
-   next-slice launch at settlement, the requeue sweep's session pass, slice budgets.
+4. ~~**The slice engine.**~~ **Done** (2026-10-11). `session_declare`
+   (`App\Session\SessionTool` — the schema-validated outcome/summary call,
+   alone in its round) and settle-on-declare through the terminal-commit
+   choke point: `milestone`/`done` settle succeeded with the summary as the
+   slice's artifact, `blocked` settles needs_attention with no error class,
+   and a settlement without a declaration stops the session for a human —
+   no retry. `App\Session\SessionSliceEngine` derives the session state
+   (`fresh`/`working`/`owed`/`complete`/`blocked`/`stopped`/`paused`, never
+   stored), creates slices frozen with `TASKLOOM_SESSION_SLICE_BUDGET`
+   (default 25), and launches the next slice — row and lane message — in
+   the settlement commit; `app:run:requeue` gains the session pass. The
+   kind gate (`TaskKind::isImplemented()`,
+   `SessionKindUnsupportedException`) is gone; the shape rules that remain
+   refuse steps, a schedule, and synchronous execution. Slices ride `llm`
+   until step 5 lands the lane. The proof drives the real lanes: a
+   milestone settles and its successor is on the lane in the same commit;
+   done/blocked/no-declaration each settle as designed; the alone-in-round
+   refusal feeds back; the sweep repairs a lost dispatch.
 5. **The lane.** `session` transport, the entrypoint receiver, and the ownership
    comment beside the boot sweep (§7.3).
 6. **The UI.** The objective and the notes: view/edit/pin/delete, provenance,

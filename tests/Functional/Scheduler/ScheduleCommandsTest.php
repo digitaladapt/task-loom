@@ -76,6 +76,9 @@ final class ScheduleCommandsTest extends KernelTestCase
             $container->get(RunGraph::class),
             ['step_budget' => 5, 'tool_retries' => 1, 'circuit_breaker' => 3],
             $container->get(MessageBusInterface::class),
+            $container->get(\App\Session\SessionMemoryRenderer::class),
+            $container->get(\App\Session\SessionToolRunner::class),
+            $container->get(\App\Session\SessionSliceEngine::class),
         );
 
         $this->scheduler = new TaskScheduler(

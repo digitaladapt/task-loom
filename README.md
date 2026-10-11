@@ -406,6 +406,7 @@ inline. Key knobs:
 | `TASKLOOM_SESSION_HOT` / `TASKLOOM_SESSION_COLD` | Session memory: notes injected per request / notes retained beyond that (defaults `5` / `25`; build order step 2 of `docs/design/SESSION_TASKS.md`) |
 | `TASKLOOM_SESSION_WRITE_MAX_CHARS` | Session memory: per-write size cap for a note or the objective (default `2000`) |
 | `TASKLOOM_SESSION_MAX_MEMORY_PCT` | Session memory: cap on the rendered `## Memories` block, as % of the context limit (default `10`) |
+| `TASKLOOM_SESSION_SLICE_BUDGET` | Exchanges per session slice before it settles without declaring — "stop and ask a human" (default `25`; build order step 4) |
 | `MESSENGER_TRANSPORT_DSN` | Doctrine-backed lane table; `auto_setup=0` — create it with `doctrine:migrations:migrate` |
 
 ## Development

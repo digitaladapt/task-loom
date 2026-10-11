@@ -7,7 +7,6 @@ namespace App\Tests\Functional\Mcp\Server;
 use App\Entity\Run;
 use App\Entity\RunRole;
 use App\Entity\RunStatus;
-use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
 use App\Entity\TaskAuthor;
 use App\Entity\TaskKind;
@@ -15,6 +14,7 @@ use App\Entity\ToolboxMode;
 use App\Mcp\Server\TaskCrud;
 use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
+use App\Session\SessionConstraintException;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\EntityNotFoundException;
 use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
@@ -62,20 +62,52 @@ final class TaskCrudGatingTest extends KernelTestCase
     }
 
     /**
-     * docs/design/SESSION_TASKS.md, build order step 1: the session-kind
-     * label carries no engine, so the write gate refuses it — the task must
-     * not be persisted at all.
+     * docs/design/SESSION_TASKS.md §8, build order step 4: the slice engine
+     * exists, so the kind is no longer refused wholesale — but a session
+     * cannot CARRY STEPS, and that shape is refused at the same write gate
+     * so it cannot even be persisted as a draft.
      */
-    public function testCreateRefusesTheSessionKindUntilItsEngineExists(): void
+    public function testCreateRefusesASessionWithSteps(): void
     {
         try {
-            $this->crud->create('Long haul', 'Keep going.', TaskKind::Session, ToolboxMode::Tags, [], null);
-            self::fail('Expected SessionKindUnsupportedException.');
-        } catch (SessionKindUnsupportedException $e) {
-            self::assertStringContainsString('not built yet', $e->getMessage());
+            $this->crud->create('Long haul', 'Keep going.', TaskKind::Session, ToolboxMode::Tags, [], null, [
+                [['title' => 'Fetch', 'brief' => 'Fetch it.']],
+            ]);
+            self::fail('Expected SessionConstraintException.');
+        } catch (SessionConstraintException $e) {
+            self::assertStringContainsString('cannot have steps', $e->getMessage());
         }
 
         self::assertCount(0, $this->tasks->findAll(), 'a refused create persists nothing');
+    }
+
+    /**
+     * And a session cannot be scheduled either — it is started and stopped,
+     * not cron'd (§8).
+     */
+    public function testCreateRefusesAScheduledSession(): void
+    {
+        try {
+            $this->crud->create('Long haul', 'Keep going.', TaskKind::Session, ToolboxMode::Tags, [], '0 9 * * *');
+            self::fail('Expected SessionConstraintException.');
+        } catch (SessionConstraintException $e) {
+            self::assertStringContainsString('cannot be scheduled', $e->getMessage());
+        }
+
+        self::assertCount(0, $this->tasks->findAll(), 'a refused create persists nothing');
+    }
+
+    /**
+     * A plain session — no steps, no schedule — creates cleanly now: the
+     * kind is a real task kind, not a label awaiting an engine.
+     */
+    public function testCreateAcceptsASession(): void
+    {
+        $task = $this->crud->create('Long haul', 'Keep going.', TaskKind::Session, ToolboxMode::Tags, [], null);
+
+        self::assertSame(TaskKind::Session, $task->getKind());
+        self::assertFalse($task->isEnabled());
+        self::assertCount(1, $this->tasks->findAll());
     }
 
     public function testCreateAppearsInApprovalQueue(): void

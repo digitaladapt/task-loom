@@ -4,11 +4,11 @@ declare(strict_types=1);
 
 namespace App\Mcp\Server;
 
-use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
 use App\Entity\TaskKind;
 use App\Entity\ToolboxMode;
 use App\Scheduler\ScheduleFormatException;
+use App\Session\SessionConstraintException;
 use App\StepModel\StepFormatException;
 use App\StepModel\StepGraphCodec;
 use Mcp\Exception\ToolCallException;
@@ -66,7 +66,7 @@ final class TaskTools
     ): array {
         try {
             $task = $this->crud->create($title, $brief, $kind, $toolboxMode, $toolbox, $schedule, $steps);
-        } catch (StepFormatException|ScheduleFormatException|SessionKindUnsupportedException $e) {
+        } catch (StepFormatException|ScheduleFormatException|SessionConstraintException $e) {
             throw new ToolCallException($e->getMessage(), 0, $e);
         }
 
@@ -97,7 +97,7 @@ final class TaskTools
     {
         try {
             $task = $this->crud->update($taskId, $changes);
-        } catch (StepFormatException|ScheduleFormatException|SessionKindUnsupportedException $e) {
+        } catch (StepFormatException|ScheduleFormatException|SessionConstraintException $e) {
             throw new ToolCallException($e->getMessage(), 0, $e);
         }
 

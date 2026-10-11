@@ -57,7 +57,7 @@ final class SessionToolboxResolutionTest extends KernelTestCase
 
         $names = array_map(static fn ($tool): string => $tool->getName(), $this->resolver->resolve($task));
 
-        self::assertSame(['get_weather', 'session_note', 'session_objective'], $names, 'catalog tools first, the harness\'s own after — one frozen list');
+        self::assertSame(['get_weather', 'session_note', 'session_objective', 'session_declare'], $names, 'catalog tools first, the harness\'s own after — one frozen list');
     }
 
     public function testASessionMayResolveZeroMcpToolsAndStillResolve(): void
@@ -69,7 +69,7 @@ final class SessionToolboxResolutionTest extends KernelTestCase
 
         $names = array_map(static fn ($tool): string => $tool->getName(), $this->resolver->resolve($task));
 
-        self::assertSame(['session_note', 'session_objective'], $names);
+        self::assertSame(['session_note', 'session_objective', 'session_declare'], $names);
     }
 
     public function testAnOrdinaryTaskResolvesExactlyAsBefore(): void

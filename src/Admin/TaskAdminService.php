@@ -4,12 +4,13 @@ declare(strict_types=1);
 
 namespace App\Admin;
 
-use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
+use App\Entity\TaskKind;
 use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
 use App\Scheduler\ScheduleExpression;
 use App\Scheduler\ScheduleFormatException;
+use App\Session\SessionConstraintException;
 use App\StepModel\StepGraphException;
 use App\StepModel\StepGraphValidator;
 use Doctrine\ORM\EntityManagerInterface;
@@ -52,12 +53,11 @@ final class TaskAdminService
     {
         $task = $this->findOrThrow($taskId);
 
-        $this->guardKind($task, 'enable');
-
         if (null !== $task->getReplacementFor()) {
             throw new TaskLifecycleException(\sprintf('Task %d is a replacement draft — approve it instead (SPEC §4.4).', $taskId));
         }
 
+        $this->guardKind($task, 'enable');
         $this->guardStepGraph($task, 'enable');
         $this->guardSchedule($task, 'enable');
 
@@ -86,7 +86,6 @@ final class TaskAdminService
         $this->guardKind($task, 'approve');
         $this->guardStepGraph($task, 'approve');
         $this->guardSchedule($task, 'approve');
-
         try {
             $task->approve();
         } catch (\LogicException $e) {
@@ -182,16 +181,27 @@ final class TaskAdminService
     }
 
     /**
-     * Session-kind gate (docs/design/SESSION_TASKS.md, build order step 1):
-     * the slice engine behind the kind is not built, so a session-kind task
-     * never becomes enabled — the same discipline as the step graph and the
-     * schedule. Runs before the enable/approve flip; a failure leaves the
-     * rows untouched (nothing was flushed yet).
+     * Session-kind gates (docs/design/SESSION_TASKS.md §8, build order step
+     * 4): the constraints that outlived the blanket kind-gate. A session
+     * cannot carry steps (a slice is already the unit of work, and a step's
+     * run never gets the harness tools, so it could never declare) and
+     * cannot be scheduled (it is started and stopped, not cron'd). Refused
+     * here, at the enable/approve gate, the same discipline as the step
+     * graph and the schedule — and again at the digester's write gate, so
+     * one can never slip past the other.
      */
     private function guardKind(Task $task, string $action): void
     {
-        if (!$task->getKind()->isImplemented()) {
-            throw new TaskLifecycleException(SessionKindUnsupportedException::sentence(\sprintf('Cannot %s task %d (kind "%s")', $action, $task->getId(), $task->getKind()->value)));
+        if (TaskKind::Session !== $task->getKind()) {
+            return;
+        }
+
+        if ([] !== $this->steps->findForTask($task)) {
+            throw new TaskLifecycleException(\sprintf('Cannot %s task %d — %s', $action, $task->getId(), SessionConstraintException::stepsNotAllowed()->getMessage()));
+        }
+
+        if (null !== $task->getSchedule()) {
+            throw new TaskLifecycleException(\sprintf('Cannot %s task %d — %s', $action, $task->getId(), SessionConstraintException::scheduleNotAllowed()->getMessage()));
         }
     }
 

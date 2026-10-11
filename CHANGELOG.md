@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The session slice engine — `session_declare`, settle-on-declare, and the
+  next slice launched in the settlement commit (build order step 4 of
+  `docs/design/SESSION_TASKS.md`).** A session is now a real task kind: its
+  slices are bounded runs through the existing engine, each ending in a typed
+  declaration — `milestone` (progress made; the next slice launches), `done`
+  (the session is complete), `blocked` (a human is needed). This is task-loom's
+  first tool call that ends a run, and it settles through the same
+  terminal-commit choke point step children use.
+
+  **The declaration is a schema-validated call, never prose.**
+  `SessionTool::Declare` joins the enum with an `outcome`/`summary` schema; a
+  round that carries it beside other calls is refused WHOLE and fed back (the
+  settle path must have no ambiguity about which calls ran). The summary is
+  the slice's artifact: the ledger and the digest read it through the ordinary
+  Completion event, and `run.declaration` records the outcome beside the row,
+  where the derived session state and the requeue sweep re-read it.
+
+  **A settlement without a declaration stops the session — loud, no retry.** A
+  slice budget exhausted (`TASKLOOM_SESSION_SLICE_BUDGET`, default `25`), a
+  failed turn, a tripped breaker, or a plain terminal message settles the
+  slice `incomplete`/`failed`/`needs_attention` with the reason stated, and
+  the session waits for a human — the same posture as a classified launch
+  failure (SPEC §14.5). A `blocked` declaration settles needs_attention with
+  NO error class: a designed stop is not a fault.
+
+  **`milestone` means the next slice commits with the settlement.** The
+  successor's run row and its first lane message are created inside the same
+  terminal commit — SPEC §13.3's advancement contract, one level down — and
+  `app:run:requeue` gains a session pass that re-derives an owed slice after
+  a lost dispatch (dry-run aware, converges to nothing when healthy). Session
+  state is derived, never stored: `fresh` / `working` / `owed` / `complete` /
+  `blocked` / `stopped` / `paused`, a pure function of the enabled flag, the
+  slices, and their declarations.
+
+  **The kind gate comes out; three shape rules take its place.**
+  `TaskKind::isImplemented()` and `SessionKindUnsupportedException` are gone —
+  the engine exists. What remains is the design's own: a session cannot carry
+  steps (a slice is already the unit of work, and a step's run never gets the
+  harness tools, so it could never declare), cannot be scheduled (started and
+  stopped, not cron'd), and never runs synchronously (its slices wait in the
+  persisted queue; the web surface and `--queue` are the door). Each refusal
+  names its reason at the surface where it applies — write, enable/approve,
+  editor field, CLI, or a classified ledger row.
+
 - **The chat context window — a conversation is fitted to the model's budget,
   and the shedding is visible (SPEC §15.9, closing `CHAT_AND_CAPACITY.md`
   §10.2).** A `Run` ends, so its context is bounded by construction; a

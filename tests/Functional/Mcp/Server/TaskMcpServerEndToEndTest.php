@@ -436,11 +436,12 @@ final class TaskMcpServerEndToEndTest extends WebTestCase
     }
 
     /**
-     * docs/design/SESSION_TASKS.md, build order step 1: the kind is in the
-     * schema enum, but no engine is behind it — a create must surface the
-     * refusal as a tool error, and persist nothing.
+     * docs/design/SESSION_TASKS.md §8, build order step 4: the engine exists,
+     * and the constraint that remains for a session's shape is steps — a
+     * session cannot have them, refused on the wire as a tool error, and
+     * nothing persists.
      */
-    public function testToolsCallTaskCreateWithSessionKindIsRefused(): void
+    public function testToolsCallTaskCreateWithASteppedSessionIsRefused(): void
     {
         $created = $this->callTool('task_create', [
             'title' => 'E2E Long haul',
@@ -448,10 +449,11 @@ final class TaskMcpServerEndToEndTest extends WebTestCase
             'kind' => 'session',
             'toolboxMode' => 'tags',
             'toolbox' => ['weather'],
+            'steps' => [[['title' => 'Fetch', 'brief' => 'Fetch it.']]],
         ]);
 
-        self::assertTrue($created['error'], 'a session-kind create must be refused on the wire');
-        self::assertStringContainsString('not built yet', $created['raw']);
+        self::assertTrue($created['error'], 'a stepped session must be refused on the wire');
+        self::assertStringContainsString('cannot have steps', $created['raw']);
 
         // And nothing persisted: the gate sits below the tool contract, in
         // the single write path.
@@ -461,10 +463,28 @@ final class TaskMcpServerEndToEndTest extends WebTestCase
     }
 
     /**
-     * The update path refuses the kind change the same way — the enum is
-     * coercible, the gate is not.
+     * And a plain session creates cleanly: the kind is a real kind now.
      */
-    public function testToolsCallTaskUpdateToSessionKindIsRefused(): void
+    public function testToolsCallTaskCreateWithASessionSucceeds(): void
+    {
+        $created = $this->callTool('task_create', [
+            'title' => 'E2E Long haul',
+            'brief' => 'Keep going.',
+            'kind' => 'session',
+            'toolboxMode' => 'tags',
+            'toolbox' => ['weather'],
+        ]);
+
+        self::assertFalse($created['error'], $created['raw']);
+        self::assertSame('draft', $created['result']['status']);
+    }
+
+    /**
+     * The update path refuses a change to the session kind when the task
+     * carries a shape a session cannot have — steps here. The enum is
+     * coercible; the shape constraint is the gate.
+     */
+    public function testToolsCallTaskUpdateToSessionKindWithStepsIsRefused(): void
     {
         $created = $this->callTool('task_create', [
             'title' => 'E2E Run',
@@ -472,6 +492,7 @@ final class TaskMcpServerEndToEndTest extends WebTestCase
             'kind' => 'run',
             'toolboxMode' => 'tags',
             'toolbox' => ['weather'],
+            'steps' => [[['title' => 'Fetch', 'brief' => 'Fetch it.']]],
         ]);
         self::assertFalse($created['error'], $created['raw']);
         $taskId = $created['result']['id'];
@@ -481,8 +502,8 @@ final class TaskMcpServerEndToEndTest extends WebTestCase
             'changes' => ['kind' => 'session'],
         ]);
 
-        self::assertTrue($updated['error'], 'a change to the session kind must be refused');
-        self::assertStringContainsString('not built yet', $updated['raw']);
+        self::assertTrue($updated['error'], 'a change to the session kind over a step graph must be refused');
+        self::assertStringContainsString('cannot have steps', $updated['raw']);
 
         $this->bootKernel();
         $task = static::getContainer()->get(TaskRepository::class)->find($taskId);

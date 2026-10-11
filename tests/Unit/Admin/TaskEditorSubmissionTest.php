@@ -100,18 +100,38 @@ final class TaskEditorSubmissionTest extends TestCase
     }
 
     /**
-     * docs/design/SESSION_TASKS.md, build order step 1: the enum carries
-     * "session", but no engine does — the save is refused beside the field,
-     * and the submitted value survives so the select re-renders as chosen.
+     * docs/design/SESSION_TASKS.md §8, build order step 4: a session cannot
+     * carry steps — the save is refused beside the field, and the submitted
+     * value survives so the select re-renders as chosen.
      */
-    public function testTheSessionKindIsRefusedUntilItsEngineExists(): void
+    public function testASessionWithStepsIsRefused(): void
     {
-        $submission = TaskEditorSubmission::fromArray($this->input(['kind' => 'session']), $this->schedules());
+        $submission = TaskEditorSubmission::fromArray($this->input([
+            'kind' => 'session',
+            'steps' => [0 => [0 => ['title' => 'Fetch', 'brief' => 'Fetch it.', 'toolbox_mode' => 'tags']]],
+        ]), $this->schedules());
 
         self::assertTrue($submission->hasErrors());
-        self::assertArrayHasKey('kind', $submission->errors);
-        self::assertStringContainsString('not built yet', $submission->errors['kind']);
+        self::assertArrayHasKey('steps', $submission->errors);
+        self::assertStringContainsString('cannot have steps', $submission->errors['steps']);
         self::assertSame('session', $submission->values['kind'], 'the select re-renders as the human left it');
+    }
+
+    /**
+     * And a session with a schedule is refused beside that field — it is
+     * started and stopped, not cron'd (§8).
+     */
+    public function testAScheduledSessionIsRefused(): void
+    {
+        $submission = TaskEditorSubmission::fromArray($this->input([
+            'kind' => 'session',
+            'schedule_mode' => 'custom',
+            'schedule_custom' => '0 9 * * *',
+        ]), $this->schedules());
+
+        self::assertTrue($submission->hasErrors());
+        self::assertArrayHasKey('schedule', $submission->errors);
+        self::assertStringContainsString('cannot be scheduled', $submission->errors['schedule']);
     }
 
     /**

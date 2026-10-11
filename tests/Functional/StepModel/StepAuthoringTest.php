@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional\StepModel;
 
-use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Step;
 use App\Entity\Task;
 use App\Entity\TaskKind;
@@ -12,6 +11,7 @@ use App\Entity\ToolboxMode;
 use App\Mcp\Server\TaskCrud;
 use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
+use App\Session\SessionConstraintException;
 use App\StepModel\StepFormatException;
 use App\StepModel\StepGraphCodec;
 use Doctrine\ORM\EntityManagerInterface;
@@ -229,21 +229,36 @@ final class StepAuthoringTest extends KernelTestCase
      * write gate refuses it rather than persisting a label the engine
      * would silently mis-run.
      */
-    public function testUpdateRefusesTheSessionKindUntilItsEngineExists(): void
+    public function testUpdateRefusesASteppedTaskChangingToTheSessionKind(): void
     {
-        $task = $this->crud->create('T', 'B.', TaskKind::Run, ToolboxMode::Tags, [], null);
+        $task = $this->crud->create('T', 'B.', TaskKind::Run, ToolboxMode::Tags, [], null, [
+            [['title' => 'Fetch', 'brief' => 'Fetch it.']],
+        ]);
 
         try {
             $this->crud->update($task->getId(), ['kind' => 'session']);
-            self::fail('Expected SessionKindUnsupportedException.');
-        } catch (SessionKindUnsupportedException $e) {
-            self::assertStringContainsString('not built yet', $e->getMessage());
+            self::fail('Expected SessionConstraintException.');
+        } catch (SessionConstraintException $e) {
+            self::assertStringContainsString('cannot have steps', $e->getMessage());
         }
 
         // Nothing moved: the update rolled back and the task is still a run.
         $fresh = $this->em()->find(Task::class, $task->getId());
         self::assertInstanceOf(Task::class, $fresh);
         self::assertSame(TaskKind::Run, $fresh->getKind());
+    }
+
+    /**
+     * And a stepless task CAN change to the session kind now — the engine
+     * exists, so the kind is a real kind (docs/design/SESSION_TASKS.md §8).
+     */
+    public function testUpdateAcceptsASteplessTaskChangingToTheSessionKind(): void
+    {
+        $task = $this->crud->create('T', 'B.', TaskKind::Run, ToolboxMode::Tags, [], null);
+
+        $updated = $this->crud->update($task->getId(), ['kind' => 'session']);
+
+        self::assertSame(TaskKind::Session, $updated->getKind());
     }
 
     public function testUpdateRejectsUnknownEnumStrings(): void

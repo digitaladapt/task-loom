@@ -171,6 +171,25 @@ final class RunRepository extends ServiceEntityRepository
     }
 
     /**
+     * The count of active top-level runs of one task — the same rows
+     * findActiveTopLevelFor() returns, as a scalar. The session slice engine
+     * uses it as the one-slice-at-a-time guard inside its write transaction
+     * (a scalar count sidesteps the identity map; the point is the committed
+     * row set, not hydrated entities).
+     */
+    public function countActiveTopLevelFor(Task $task): int
+    {
+        return (int) $this->createQueryBuilder('r')
+            ->select('COUNT(r.id)')
+            ->where('r.task = :task')
+            ->andWhere('r.parent IS NULL')
+            ->andWhere('r.status IN (:statuses)')
+            ->setParameter('task', $task)
+            ->setParameter('statuses', [RunStatus::Queued, RunStatus::Running])
+            ->getQuery()->getSingleScalarResult();
+    }
+
+    /**
      * The children of a parent run, oldest first (creation order — which for
      * the graph is also dispatch order). The parent's status is derived from
      * these (SPEC §13.3).

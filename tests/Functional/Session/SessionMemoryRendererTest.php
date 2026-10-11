@@ -29,6 +29,14 @@ use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
  */
 final class SessionMemoryRendererTest extends KernelTestCase
 {
+    /**
+     * Characters allowed beyond the note budget for the block's fixed
+     * skeleton — heading, notes intro, footer, the objective — and one
+     * whole-note overshoot. Recalibrated for the declaration-bearing footer
+     * (build order step 4).
+     */
+    private const int FIXED_SKELETON_ALLOWANCE = 520;
+
     private EntityManagerInterface $em; // @phpstan-ignore property.uninitialized (assigned in setUp)
     private SessionMemoryRepository $memories; // @phpstan-ignore property.uninitialized (assigned in setUp)
 
@@ -152,7 +160,13 @@ final class SessionMemoryRendererTest extends KernelTestCase
 
         $rendered = $this->renderer(budgetTokens: 700, pct: 10.0)->render($task);
         self::assertNotNull($rendered);
-        self::assertLessThanOrEqual((int) floor(700 * 3.5 * 10 / 100) + 400, \strlen($rendered), 'the backstop keeps even a pins-overflow block near its budget (whole notes, so the last kept note can overshoot by one note)');
+        // The allowance beyond the note budget covers the block's fixed
+        // skeleton (heading, notes intro, footer, the objective) plus one
+        // whole-note overshoot — the backstop drops whole notes, so the last
+        // kept one can cross the line by its own length. The skeleton grew
+        // when the footer began naming the declaration tool, which is why
+        // the constant is named here rather than tuned silently.
+        self::assertLessThanOrEqual((int) floor(700 * 3.5 * 10 / 100) + self::FIXED_SKELETON_ALLOWANCE, \strlen($rendered), 'the backstop keeps even a pins-overflow block near its budget (whole notes, so the last kept note can overshoot by one note)');
     }
 
     private function renderer(int $budgetTokens = 100_000, float $pct = 10.0): SessionMemoryRenderer

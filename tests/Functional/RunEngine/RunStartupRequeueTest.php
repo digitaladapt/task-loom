@@ -428,6 +428,7 @@ final class RunStartupRequeueTest extends KernelTestCase
             $this->bus(),
             $container->get(RunGraph::class),
             $container->get(ClaimReaper::class),
+            $container->get(\App\Session\SessionSliceEngine::class),
             new NullLogger(),
         ));
     }

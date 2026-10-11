@@ -4,11 +4,12 @@ declare(strict_types=1);
 
 namespace App\Session;
 
+use App\Entity\SessionDeclarationOutcome;
 use App\Entity\ToolDefinition;
 
 /**
  * The harness's own session tools (docs/design/SESSION_TASKS.md §5, build
- * order step 3) — task-loom's first built-in tools: the ones the harness
+ * order steps 3–4) — task-loom's built-in tools: the ones the harness
  * implements itself rather than discovering from an MCP server.
  *
  * A fixed enum, deliberately: these are a closed vocabulary, not a catalog.
@@ -24,8 +25,16 @@ use App\Entity\ToolDefinition;
  * - {@see self::Objective} sets the objective (§3.2: replacement; the
  *   superseded text is kept).
  *
- * `session_declare` — the call that ends a slice — joins this enum with the
- * slice engine (build order step 4).
+ * And exactly one call ends a slice:
+ *
+ * - {@see self::Declare} declares the slice's outcome (§8) — the first tool
+ *   call that ends a run. Unlike the writes above it is never dispatched
+ *   through {@see SessionToolRunner}: the engine validates it, settles the
+ *   slice in the commit that records the declaration, and (for a milestone)
+ *   launches the next slice beside it. It must be **alone in its round**
+ *   (§5) — a round that carries it beside other calls is refused whole and
+ *   fed back, because the settle path must have no ambiguity about which
+ *   calls ran.
  *
  * These tools are injected into a session's frozen toolbox by the resolver
  * (`App\RunEngine\ToolboxResolver`: MCP tools + these), never declared by
@@ -39,6 +48,9 @@ enum SessionTool: string implements ToolDefinition
 
     /** Set the current objective — "what this is trying to achieve now". */
     case Objective = 'session_objective';
+
+    /** End the slice: milestone / done / blocked — the declaration (§8), settled by the engine. */
+    case Declare = 'session_declare';
 
     /**
      * The harness's reserved tool names — the refusal set a session's
@@ -64,6 +76,7 @@ enum SessionTool: string implements ToolDefinition
         return match ($this) {
             self::Note => 'Save one thing for your future self: the harness carries notes forward and injects them into every future request. Write state, not narrative — what you learned, decided, or what to do next. Notes are visible to, and editable by, the operator.',
             self::Objective => 'Set the current objective — the aim the work ahead serves. Replaces the previous objective; the replaced text is kept, and the operator can inspect or revert it. Keep it current as the work moves.',
+            self::Declare => 'End this slice with its outcome: milestone (progress made, more to do — the harness launches the next slice), done (the session\'s goal is complete), or blocked (you need a human). Must be ALONE in its round — no other calls beside it; nothing continues after it. The summary is the slice\'s result, shown to the operator.',
         };
     }
 
@@ -73,16 +86,38 @@ enum SessionTool: string implements ToolDefinition
     #[\Override]
     public function getSchema(): array
     {
+        if (self::Declare === $this) {
+            return [
+                'type' => 'object',
+                'properties' => [
+                    'outcome' => [
+                        'type' => 'string',
+                        'enum' => array_map(
+                            static fn (SessionDeclarationOutcome $outcome): string => $outcome->value,
+                            SessionDeclarationOutcome::cases(),
+                        ),
+                        'description' => 'milestone — progress made, more to do (the next slice launches automatically); done — the session\'s goal is complete; blocked — you need a human.',
+                    ],
+                    'summary' => [
+                        'type' => 'string',
+                        'minLength' => 1,
+                        'description' => 'The slice\'s result — what you accomplished, decided, or are blocked on. Shown to the operator and kept in the ledger.',
+                    ],
+                ],
+                'required' => ['outcome', 'summary'],
+                'additionalProperties' => false,
+            ];
+        }
+
         return [
             'type' => 'object',
             'properties' => [
                 'text' => [
                     'type' => 'string',
                     'minLength' => 1,
-                    'description' => match ($this) {
-                        self::Note => 'The note — one thing worth carrying forward.',
-                        self::Objective => 'The objective — what this session is trying to achieve now.',
-                    },
+                    'description' => self::Note === $this
+                        ? 'The note — one thing worth carrying forward.'
+                        : 'The objective — what this session is trying to achieve now.',
                 ],
             ],
             'required' => ['text'],

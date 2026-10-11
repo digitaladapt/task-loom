@@ -7,7 +7,6 @@ namespace App\Command;
 use App\Entity\Run;
 use App\Entity\RunRole;
 use App\Entity\RunStatus;
-use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Task;
 use App\Repository\RunRepository;
 use App\Repository\TaskRepository;
@@ -15,6 +14,7 @@ use App\RunEngine\RunEngine;
 use App\RunEngine\RunLauncher;
 use App\RunEngine\RunLaunchException;
 use App\RunEngine\ToolboxResolutionException;
+use App\Session\SessionConstraintException;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
@@ -97,9 +97,9 @@ final class RunNowCommand extends Command
 
         try {
             $run = $this->engine->run($task);
-        } catch (SessionKindUnsupportedException $e) {
-            // docs/design/SESSION_TASKS.md, build order step 1: the engine
-            // refuses the kind before any run row exists.
+        } catch (SessionConstraintException $e) {
+            // A session is lane-driven: the synchronous path refuses it
+            // before any run row exists (docs/design/SESSION_TASKS.md §7).
             $output->writeln(\sprintf('<error>%s</error>', $e->getMessage()));
 
             return self::FAILURE;
@@ -136,7 +136,7 @@ final class RunNowCommand extends Command
     {
         try {
             $launch = $this->launcher->launch($task);
-        } catch (ToolboxResolutionException|RunLaunchException|SessionKindUnsupportedException $e) {
+        } catch (ToolboxResolutionException|RunLaunchException|SessionConstraintException $e) {
             $output->writeln(\sprintf('<error>%s</error>', $e->getMessage()));
 
             return self::FAILURE;

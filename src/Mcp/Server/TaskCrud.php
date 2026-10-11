@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Mcp\Server;
 
-use App\Entity\SessionKindUnsupportedException;
 use App\Entity\Step;
 use App\Entity\Task;
 use App\Entity\TaskAuthor;
@@ -13,6 +12,7 @@ use App\Entity\ToolboxMode;
 use App\Repository\StepRepository;
 use App\Repository\TaskRepository;
 use App\Scheduler\ScheduleExpression;
+use App\Session\SessionConstraintException;
 use App\StepModel\StepGraphCodec;
 use App\StepModel\StepGraphValidator;
 use App\StepModel\StepSpec;
@@ -79,8 +79,8 @@ final class TaskCrud
      *
      * @throws \App\StepModel\StepFormatException     when the steps input is malformed
      * @throws \App\Scheduler\ScheduleFormatException when the schedule is not a valid cron expression
-     * @throws SessionKindUnsupportedException        when the kind has no engine behind it yet
-     *                                                (docs/design/SESSION_TASKS.md, build order step 1)
+     * @throws SessionConstraintException             when a session-kind task carries steps or a
+     *                                                schedule (docs/design/SESSION_TASKS.md §8)
      */
     public function create(
         string $title,
@@ -92,13 +92,7 @@ final class TaskCrud
         mixed $steps = null,
         TaskAuthor $author = TaskAuthor::Agent,
     ): Task {
-        // docs/design/SESSION_TASKS.md, build order step 1: the session
-        // slice engine does not exist yet, and nothing branches on kind —
-        // so the label is refused here, at the single write path, rather
-        // than persisted for the engine to silently mis-run.
-        if (!$kind->isImplemented()) {
-            throw SessionKindUnsupportedException::refused(\sprintf('Cannot create a "%s"-kind task', $kind->value));
-        }
+        $this->guardSessionShape($kind, $steps, $schedule);
 
         $specs = $this->codec->parse($steps);
 
@@ -138,8 +132,8 @@ final class TaskCrud
      *
      * @throws \App\StepModel\StepFormatException     when the steps input is malformed
      * @throws \App\Scheduler\ScheduleFormatException when the schedule is not a valid cron expression
-     * @throws SessionKindUnsupportedException        when the kind change has no engine behind it yet
-     *                                                (docs/design/SESSION_TASKS.md, build order step 1)
+     * @throws SessionConstraintException             when the change would put a session-kind task
+     *                                                into a shape it cannot run (§8)
      */
     public function update(int $taskId, array $changes, TaskAuthor $author = TaskAuthor::Agent): Task
     {
@@ -151,6 +145,27 @@ final class TaskCrud
 
         $hasSteps = \array_key_exists('steps', $changes);
         $specs = $hasSteps ? $this->codec->parse($changes['steps']) : null;
+
+        // The session shape is judged on the EFFECTIVE post-change task,
+        // not the submitted fragment: changing an existing task to the
+        // session kind inherits its steps/schedule, and a session whose
+        // shape the engine cannot run must never reach the store — the
+        // write-side twin of the enable/approve gate (docs/design/
+        // SESSION_TASKS.md §8).
+        $effectiveKind = \array_key_exists('kind', $changes) ? $this->coerceKind($changes['kind']) : $task->getKind();
+        if (TaskKind::Session === $effectiveKind) {
+            $effectiveSteps = $hasSteps ? ($specs ?? []) : $this->steps->findForTask($task);
+            if ([] !== $effectiveSteps) {
+                throw SessionConstraintException::stepsNotAllowed();
+            }
+
+            $effectiveSchedule = \array_key_exists('schedule', $changes)
+                ? ScheduleExpression::normalize($changes['schedule'])
+                : $task->getSchedule();
+            if (null !== $effectiveSchedule) {
+                throw SessionConstraintException::scheduleNotAllowed();
+            }
+        }
 
         // SPEC §4.4: the gate is "is this version a record?", and a run makes
         // it one. The runs table is the authority, so read it here — the
@@ -424,12 +439,7 @@ final class TaskCrud
             $task->setBrief($changes['brief']);
         }
         if (\array_key_exists('kind', $changes)) {
-            $kind = $this->coerceKind($changes['kind']);
-            if (!$kind->isImplemented()) {
-                throw SessionKindUnsupportedException::refused(\sprintf('Cannot change a task to the "%s" kind', $kind->value));
-            }
-
-            $task->setKind($kind);
+            $task->setKind($this->coerceKind($changes['kind']));
         }
         if (\array_key_exists('toolbox_mode', $changes)) {
             $task->setToolboxMode($this->coerceToolboxMode($changes['toolbox_mode']));
@@ -461,6 +471,29 @@ final class TaskCrud
         }
 
         return TaskKind::tryFrom($kind) ?? throw new \InvalidArgumentException(\sprintf('Invalid kind "%s" — expected "run" or "session".', $kind));
+    }
+
+    /**
+     * The session-shape gate at the write path (docs/design/SESSION_TASKS.md
+     * §8, build order step 4): a task being created as a session must not
+     * carry steps or a schedule — the same constraints enable/approve
+     * enforce, refused here so a bad shape cannot even be persisted as a
+     * draft. A non-session kind is untouched: this is a session rule, not a
+     * new restriction on ordinary tasks.
+     */
+    private function guardSessionShape(TaskKind $kind, mixed $steps, ?string $schedule): void
+    {
+        if (TaskKind::Session !== $kind) {
+            return;
+        }
+
+        if (null !== $steps && [] !== $steps) {
+            throw SessionConstraintException::stepsNotAllowed();
+        }
+
+        if (null !== ScheduleExpression::normalize($schedule)) {
+            throw SessionConstraintException::scheduleNotAllowed();
+        }
     }
 
     private function coerceToolboxMode(ToolboxMode|string $mode): ToolboxMode
