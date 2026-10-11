@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Sessions in the SPEC — the design note folds into §9 and §5.6 (build
+  order step 7, the last one).** SPEC §9 no longer says "v1 ships `run`
+  only": it carries the two-kind table, the session contract (a *scheduler
+  that launches runs* — each slice an ordinary `Run`, same engine, same
+  claim protocol, same lanes; the session's own machinery is the derived
+  state, the declaration, and the launch of the next slice), the six derived
+  states and where each comes from, the memory-across-slices rule (the
+  transcript does not cross; a new aim is written with `session_objective`,
+  never carried in the declaration), and the shape rules (not scheduled,
+  never synchronous). SPEC §5.6 gains the `## Memories` block as the fourth
+  never-pruned tenant — its own percentage, its drops visible, the objective
+  never dropped.
+
+  **The note's own record closes.** `SESSION_TASKS.md` marks its final build
+  step done, its §13 keeps the original proposal (folded 2026-10-11) and its
+  §14 keeps the review decisions, so the reasoning is not re-litigated from
+  memory. The MCP tool descriptions that still said a session "is refused
+  until its engine lands" now describe what a session actually is.
+
 - **The session UI — steering is a page, and every write goes through the
   store (build order step 6 of `docs/design/SESSION_TASKS.md`).** The session
   page (`/tasks/{id}/session`) shows the derived state with a one-sentence
