@@ -1,0 +1,25 @@
+{#
+    The revision history of one memory entry (docs/design/SESSION_TASKS.md
+    §6.3): every superseded text, newest first, with its writer and when —
+    and a revert for each. Reverting is itself an edit (the current text is
+    kept), so nothing is ever lost: revert-of-a-revert walks back forward.
+#}
+{% if revisions is not empty %}
+    <details class="memory-disclosure history">
+        <summary>History ({{ revisions|length }} replaced revision{{ revisions|length == 1 ? '' : 's' }})</summary>
+        <ul class="memory-history">
+            {% for revision in revisions %}
+                <li>
+                    <p class="muted">
+                        revision {{ revision.revision }} · [{{ revision.source.value == 'operator' ? 'operator' : 'you' }}] · replaced {{ revision.savedAt|date('Y-m-d H:i') }}
+                    </p>
+                    <p class="memory-text">{{ revision.text }}</p>
+                    <form method="post" action="{{ path('app_session_memory_revert', {id: task.id, memoryId: memory.id, revisionId: revision.id}) }}">
+                        <input type="hidden" name="_token" value="{{ csrf_token('session-memory-revert-' ~ memory.id ~ '-' ~ revision.id) }}">
+                        <button type="submit" class="small">Revert to this</button>
+                    </form>
+                </li>
+            {% endfor %}
+        </ul>
+    </details>
+{% endif %}

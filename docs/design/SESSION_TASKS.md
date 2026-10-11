@@ -1,6 +1,6 @@
 # Session tasks — design note
 
-**Status:** agreed · **part-built** (steps 1–5 of §12 landed; steps 6–7
+**Status:** agreed · **part-built** (steps 1–6 of §12 landed; step 7
 pending) · **Scope:** rewrites the `session` row of
 SPEC §9 and the deferred items it names; touches SPEC §4.1, §4.4, §5.6, §6.2,
 §13.4; adds a third lane to `CHAT_AND_CAPACITY.md` §4
@@ -15,7 +15,7 @@ SPEC §9 and the deferred items it names; touches SPEC §4.1, §4.4, §5.6, §6.
 > continuation unit; preemption was always the every-turn yield of §7.2, never
 > the slice boundary. §14 records all three.
 
-> **Where this stands.** Build order steps 1–5 have **landed**: the
+> **Where this stands.** Build order steps 1–6 have **landed**: the
 > half-built `session` label can no longer mis-run; the memory store and its
 > `## Memories` block are built (the store, the caps, the renderer, and the
 > per-request injection seam — see step 2 below); the write tools the model
@@ -25,14 +25,13 @@ SPEC §9 and the deferred items it names; touches SPEC §4.1, §4.4, §5.6, §6.
 > slice through the terminal-commit choke point, a `milestone` launches the
 > next slice in the settlement commit, a settlement without a declaration
 > stops the session for a human, and `app:run:requeue` gains the session
-> pass; and **the lane is built** (step 5): a slice's LLM turns ride the
+> pass; **the lane is built** (step 5): a slice's LLM turns ride the
 > `session` transport, drained last (`chat llm session`), so the order is
-> exactly chat > task > session. `TaskKind::isImplemented()` and
-> `SessionKindUnsupportedException` are **gone** — the engine exists. The
-> shape rules that outlived the blanket gate (no steps, no schedule, never
-> synchronous) are refused at every surface that can author or launch a
-> session. Steps 6–7 remain **not built**; what remains is to build them in
-> the order of §12.
+> exactly chat > task > session; and **the UI is built** (step 6): the
+> session page shows the derived state, the start/resume/pause controls,
+> and the memory — view, edit, add, delete, pin, tier, revert — every write
+> through the store, the single writer. Step 7 remains **not built**: the
+> note folds into SPEC §9/§5.6.
 >
 > One piece *was* half-built and worth remembering as the trap the step-1
 > gate closed: nothing branched on kind, so a task created with
@@ -436,6 +435,25 @@ Edits take effect on the session's next request (§4.1) — the current request 
 already on the wire and is never rewritten mid-flight, but there is no wait for a
 slice boundary.
 
+**Landed 2026-10-11** (build order step 6). `App\Controller\SessionController`
++ `templates/session/` (the page, the note card, the history partial), with
+`App\Admin\SessionPresenter`/`SessionView` deriving the state block: the
+state, what a resume would do (the paused case shows its underlying state —
+`paused (working)`, `paused (owed)`), the controls the state honestly allows
+(Start/Resume, Pause, and a plain re-enable for a mid-slice pause), and the
+memory. Every write goes through `SessionMemoryStore` — the store gained the
+operator operations (`editMemory`, `deleteNote`, `setPinned`, `setTier`,
+`revertToRevision`), so the UI and the tools cannot drift. The store's two
+deletion paths now remove revision rows through the UnitOfWork rather than
+a bulk DQL delete: a bulk delete bypasses it and leaves managed rows
+dangling in the identity map, which the next flush trips over as a Doctrine
+error that looks nothing like its cause (found by the step's own tests, fixed
+here). The proof: `AdminSessionPageTest` walks the whole operator surface
+over real HTTP — the controls, every memory operation, the revision history,
+the refusals (CSRF 403, oversized write, the objective-delete refusal), and
+the task page's cross-link; `SessionMemoryStoreTest` gained the five
+operator operations against the real database.
+
 ### 6.2 Why this does not violate SPEC §4.4
 
 §4.4 makes an enabled task immutable so that *what ran* is preserved — the
@@ -747,8 +765,19 @@ matching the existing lanes. Concurrency is the existing
    their runs over the real `session` lane, and the slice-flow test pins
    that a slice's turn is built as `SessionTurnMessage` while an ordinary
    task's stays `LlmTurnMessage`.
-6. **The UI.** The objective and the notes: view/edit/pin/delete, provenance,
-   revision history, live effect on the next request.
+6. ~~**The UI.**~~ **Done** (2026-10-11). The session page
+   (`/tasks/{id}/session`): the derived state with a one-sentence
+   explanation, the state-aware controls (Start / Resume / Pause, and a
+   plain re-enable for a mid-slice pause), and the memory — objective first
+   with provenance, notes by tier, revision history with revert. Every
+   operator operation (edit, add, delete, pin, tier, revert) goes through
+   `SessionMemoryStore`, which grew the five operations; the revoked-into-
+   oblivion cases (delete the objective, demote a pinned note, revert
+   across memories) are refused by the store with reasons. All writes are
+   POST + CSRF and admin-only, the TaskAdminController discipline. Found
+   and fixed while testing: the store's bulk-DQL revision deletes left the
+   UnitOfWork inconsistent for the next flush; both deletion paths now go
+   through it.
 7. **`SESSION_TASKS.md` → SPEC.** Fold this note into SPEC §9 and §5.6.
 
 Steps 2–4 are the core and are testable without the lane or the UI — which is

@@ -180,6 +180,115 @@ final class SessionMemoryStoreTest extends KernelTestCase
         return new SessionMemoryStore($this->em, $this->memories, hotCap: $hot, coldCap: $cold, writeMaxChars: $writeMax);
     }
 
+    // ── The operator's operations (step 6, §6.1) ────────────────────────
+
+    public function testEditingAMemoryKeepsTheReplacedTextAndAttributesTheNewTextToTheOperator(): void
+    {
+        $store = $this->store();
+        $task = $this->sessionTask();
+
+        $note = $store->addNote($task, 'The importer is half-done.', SessionMemorySource::Session);
+        $store->editMemory($note, 'Stop refactoring — the importer only.', SessionMemorySource::Operator);
+
+        self::assertSame('Stop refactoring — the importer only.', $note->getText());
+        self::assertSame(SessionMemorySource::Operator, $note->getSource(), 'the text the model now reads is the operator\'s — provenance follows the pen');
+        self::assertSame(2, $note->getRevision());
+
+        $history = $this->revisionsFor($note);
+        self::assertCount(1, $history);
+        self::assertSame('The importer is half-done.', $history[0]->getText());
+        self::assertSame(SessionMemorySource::Session, $history[0]->getSource(), 'the superseded text keeps the writer it belonged to');
+    }
+
+    public function testDeletingANoteTakesItsHistoryAndTheObjectiveCannotBeDeleted(): void
+    {
+        $store = $this->store();
+        $task = $this->sessionTask();
+
+        $note = $store->addNote($task, 'note one', SessionMemorySource::Session);
+        $store->editMemory($note, 'note one, edited', SessionMemorySource::Operator);
+        $noteId = (int) $note->getId();
+
+        $store->deleteNote($note);
+
+        self::assertSame([], $this->memories->findNotesFor((int) $task->getId()));
+        self::assertSame(0, $this->countRaw('session_memory_revision', $noteId, 'memory_id'), 'the note\'s history goes with it — history of a thing that no longer exists would be unbounded');
+
+        $objective = $store->setObjective($task, 'The aim.', SessionMemorySource::Operator);
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('objective cannot be deleted');
+
+        $store->deleteNote($objective);
+    }
+
+    public function testPinDragsColdToHotAndSetTierMovesBothWays(): void
+    {
+        $store = $this->store(hot: 1, cold: 5);
+        $task = $this->sessionTask();
+
+        $store->addNote($task, 'note one', SessionMemorySource::Session);
+        $store->addNote($task, 'note two', SessionMemorySource::Session);
+
+        // note one aged cold; pinning is one act that keeps it hot.
+        $one = $this->noteByText($task, 'note one');
+        self::assertTrue($one->isCold());
+        $store->setPinned($one, true);
+        self::assertTrue($this->noteByText($task, 'note one')->isHot(), 'pinning drags the note hot');
+        self::assertTrue($this->noteByText($task, 'note one')->isPinned());
+
+        // Unpin leaves it where it is; demote/promote move it explicitly.
+        $store->setPinned($one, false);
+        self::assertFalse($this->noteByText($task, 'note one')->isPinned());
+        $store->setTier($one, SessionMemoryTier::Cold);
+        self::assertTrue($this->noteByText($task, 'note one')->isCold());
+        $store->setTier($one, SessionMemoryTier::Hot);
+        self::assertTrue($this->noteByText($task, 'note one')->isHot(), 'promotion is one explicit act');
+
+        // A pinned note cannot be demoted — unpin first.
+        $store->setPinned($one, true);
+        try {
+            $store->setTier($one, SessionMemoryTier::Cold);
+            self::fail('demoting a pinned note must be refused');
+        } catch (\LogicException $e) {
+            self::assertStringContainsString('unpin it first', $e->getMessage());
+        }
+    }
+
+    public function testRevertAppliesTheOldTextAndKeepsWhatItReplaced(): void
+    {
+        $store = $this->store();
+        $task = $this->sessionTask();
+
+        $objective = $store->setObjective($task, 'First aim.', SessionMemorySource::Operator);
+        $store->setObjective($task, 'Second aim.', SessionMemorySource::Session);
+        $store->setObjective($task, 'Third aim.', SessionMemorySource::Operator);
+
+        $history = $this->revisionsFor($objective);
+        self::assertCount(2, $history, 'newest first');
+
+        // Revert to the oldest: the second aim.
+        $store->revertToRevision($objective, $history[1]);
+
+        $current = $this->memories->findObjectiveFor((int) $task->getId());
+        self::assertNotNull($current);
+        self::assertSame('Second aim.', $current->getText());
+        self::assertSame(SessionMemorySource::Operator, $current->getSource(), 'a revert is the operator\'s act now');
+        self::assertCount(3, $this->revisionsFor($objective), 'the revert kept what it replaced — nothing is lost');
+
+        // And a cross-memory revert is refused.
+        $note = $store->addNote($task, 'a note', SessionMemorySource::Session);
+        $noteRevision = new SessionMemoryRevision($note, 1, 'a note, first', SessionMemorySource::Session);
+        $this->em->persist($noteRevision);
+        $this->em->flush();
+
+        try {
+            $store->revertToRevision($objective, $noteRevision);
+            self::fail('a revision from another memory row must be refused');
+        } catch (\LogicException $e) {
+            self::assertStringContainsString('does not belong', $e->getMessage());
+        }
+    }
+
     private function sessionTask(): Task
     {
         $task = new Task('Importer session', 'Keep working the importer.', TaskKind::Session, ToolboxMode::Explicit, [], TaskAuthor::User);

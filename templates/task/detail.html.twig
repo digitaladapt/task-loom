@@ -142,12 +142,13 @@
             A session's slices are lane-driven: Run now queues slice 1 (or
             resumes), and the session re-slices itself until it declares
             done or blocked (docs/design/SESSION_TASKS.md §8). Disable is the
-            pause. The session's own memory and state surfaces arrive with
-            the session UI (build order step 6).
+            pause. The state and the memory live on the session page
+            (build order step 6).
         #}
         <p class="muted">This is a <strong>session</strong>: it works in slices, driven by the worker lanes — Run now
             launches the first slice (or resumes an owed, stopped, or blocked one), and a milestone declaration
             launches the next slice automatically.</p>
+        <p><a class="button-link" href="{{ path('app_session_show', {id: task.id}) }}">Session state &amp; memory</a></p>
     {% endif %}
 
     {% if not task.archived %}

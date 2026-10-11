@@ -1155,3 +1155,111 @@ fieldset legend {
     opacity: 0.6;
     margin: 0 0.15rem;
 }
+
+/* ── The session page (docs/design/SESSION_TASKS.md §6.1, step 6) ──────────
+ *
+ * The memory is steering surface, not documentation: the objective reads as
+ * the headline, the notes as cards, and every entry carries its provenance,
+ * its tier and its history. The controls stay visible next to what they
+ * change, the same instinct as the Actions section on the task page.
+ */
+
+.session-state {
+    margin-bottom: 1.5rem;
+}
+
+.session-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-top: 0.75rem;
+}
+
+.session-controls form {
+    margin: 0;
+}
+
+.session-memory h3 {
+    margin: 1.25rem 0 0.5rem;
+    font-size: 1rem;
+}
+
+.memory-card {
+    background: var(--surface);
+    border: 1px solid var(--muted);
+    border-radius: 6px;
+    padding: 0.65rem 0.85rem 0.85rem;
+    margin-bottom: 0.75rem;
+}
+
+.objective-card {
+    border-left: 3px solid var(--accent);
+}
+
+.memory-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: baseline;
+    margin: 0 0 0.35rem;
+}
+
+.memory-badge {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+}
+
+.note-card .memory-badge {
+    color: var(--muted);
+}
+
+.memory-text {
+    margin: 0 0 0.5rem;
+    overflow-wrap: anywhere;
+}
+
+.memory-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    align-items: center;
+}
+
+.memory-disclosure {
+    margin-top: 0.5rem;
+}
+
+.memory-disclosure > summary {
+    cursor: pointer;
+    color: var(--accent);
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+}
+
+.memory-disclosure form {
+    margin-top: 0.5rem;
+}
+
+.memory-disclosure textarea {
+    width: 100%;
+}
+
+.memory-history {
+    list-style: none;
+    padding: 0;
+    margin: 0.5rem 0 0;
+}
+
+.memory-history > li {
+    border-top: 1px solid var(--muted);
+    padding-top: 0.5rem;
+    margin-top: 0.5rem;
+}
+
+.memory-history .memory-text {
+    margin-bottom: 0.35rem;
+}
