@@ -566,6 +566,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   task cannot pin its runs' floor to its widest step. Defaults to 50% of the
   context limit, mirroring the tool-result cap on the other side of the head.
 
+- **The session toolbox surfaces now show the harness tools (SPEC §4.1's
+  harness-tool clause).** The engine path was correct from the day it
+  shipped — a session's frozen toolbox is its declared MCP tools *plus*
+  `session_note`, `session_objective` and `session_declare`, added by the
+  resolver and frozen on the snapshot like everything else — but two
+  operator-facing surfaces told a different story, and the mismatch read as
+  "the session tools are not included":
+
+  - the **Toolbox preview** on the task page resolved only the declared
+    half. A session showed none of the harness tools, and a session whose
+    declared half was empty got the red *"Resolves to an empty toolbox —
+    the run would fail at dispatch"* — which is false for a session, whose
+    whole point is that the harness tools remain. `ToolboxPreview` now
+    carries both halves (`$harness`, from the same `SessionTool` source the
+    resolver uses, so the two cannot drift), the page lists them under a
+    "built-in" heading, and the empty-declaration note says what is still
+    there instead of claiming a dispatch failure.
+  - the **task editor** said "the model only ever sees the tools declared
+    here" with no mention of the always-added tools. Under the picker, a
+    session form now renders a footnote naming the three harness tools and
+    saying the selection may be empty because these are not; it is hidden
+    (server-side) for a run-kind form, where the sentence would be a lie,
+    and the editor script keeps it in step when the kind changes.
+
+  The MCP `task_create` / `task_update` toolbox descriptions carry the same
+  sentence, so an agent author reads it too. And the wire is now pinned for
+  an operator-started slice — the earlier wire proofs crafted their runs by
+  hand, so nothing had asserted the launch path end to end.
+
 ### Changed
 
 - **The toolbox picker is folded shut on the chat pages.** On `/chat` and

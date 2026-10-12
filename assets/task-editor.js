@@ -24,6 +24,7 @@ const editor = document.querySelector('[data-task-editor]');
 if (editor) {
     initStepBuilder(editor);
     initSchedule(editor);
+    initKindNote(editor);
 }
 
 /* ------------------------------------------------------------------ steps */
@@ -166,6 +167,28 @@ function initStepBuilder(root) {
 // file is not loaded there. What stays here is the builder's half of the
 // contract: a freshly cloned step card must be told to settle its panels, and
 // the switcher listens for this bubbling event.
+
+/* ------------------------------------------------------------ kind note */
+
+// The session-only footnote under the toolbox picker (SPEC §4.1's
+// harness-tool clause): a session always also carries the harness's own
+// tools, whatever is declared above. The server renders it hidden for every
+// non-session kind — the truth for a browser without JavaScript — so this
+// only has to keep it in step when the kind select changes.
+function initKindNote(root) {
+    const select = root.querySelector('select[name="kind"]');
+    const note = root.querySelector('[data-session-toolbox-note]');
+    if (!select || !note) {
+        return;
+    }
+
+    const sync = () => {
+        note.hidden = 'session' !== select.value;
+    };
+
+    select.addEventListener('change', sync);
+    sync();
+}
 
 /* --------------------------------------------------------------- schedule */
 

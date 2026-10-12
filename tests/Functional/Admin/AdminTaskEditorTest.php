@@ -137,6 +137,44 @@ final class AdminTaskEditorTest extends WebTestCase
         self::assertStringContainsString('data-schedule', $content);
     }
 
+    /**
+     * The session footnote under the toolbox picker (SPEC §4.1's harness-tool
+     * clause): a session always also carries the harness's own tools, and the
+     * editor says so where the selection is made. Hidden for a run-kind task
+     * — the sentence would be a lie there — and shown, server-rendered, for a
+     * session (a browser without JavaScript never toggles it).
+     */
+    public function testTheSessionKindShowsTheHarnessToolFootnoteBesideTheToolbox(): void
+    {
+        // The blank form: kind defaults to run, so the footnote is present
+        // but hidden — the editor script toggles it when the kind changes.
+        $this->client->request('GET', '/tasks/new');
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+        self::assertStringContainsString('data-session-toolbox-note', $content);
+        self::assertMatchesRegularExpression(
+            '/<p class="muted" data-session-toolbox-note\s+hidden>/',
+            $content,
+            'on a run-kind form the footnote is hidden — the truth for a browser without JavaScript',
+        );
+
+        // Reopening a saved session: shown, un-hidden, with the tool names.
+        $session = new Task('Long haul', 'Keep going.', TaskKind::Session, ToolboxMode::Tags, [], TaskAuthor::User);
+        $this->tasks()->save($session);
+
+        $this->client->request('GET', '/tasks/'.$session->getId().'/edit');
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+        self::assertStringContainsString('session_note', $content);
+        self::assertStringContainsString('session_objective', $content);
+        self::assertStringContainsString('session_declare', $content);
+        self::assertMatchesRegularExpression(
+            '/<p class="muted" data-session-toolbox-note\s*>/',
+            $content,
+            'a session form shows the footnote',
+        );
+    }
+
     public function testTheEditorRequiresAuthentication(): void
     {
         static::ensureKernelShutdown();

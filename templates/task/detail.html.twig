@@ -64,13 +64,24 @@
 <section aria-labelledby="preview-heading" class="preview">
     <h2 id="preview-heading">Toolbox preview</h2>
 
-    {% if preview.resolved is not empty %}
-        <p class="muted">{{ preview.resolved|length }} tool(s) would be available at run start:</p>
-        <ul class="cards">
-        {% for tool in preview.resolved %}
-            <li class="card"><code>{{ tool.server.name }}.{{ tool.name }}</code></li>
-        {% endfor %}
-        </ul>
+    {% if preview.resolved is not empty or preview.harness is not empty %}
+        {% if preview.resolved is not empty %}
+            <p class="muted">{{ preview.resolved|length }} tool(s) from the catalog would be available at run start:</p>
+            <ul class="cards">
+            {% for tool in preview.resolved %}
+                <li class="card"><code>{{ tool.server.name }}.{{ tool.name }}</code></li>
+            {% endfor %}
+            </ul>
+        {% endif %}
+        {% if preview.harness is not empty %}
+            {# SPEC §4.1's harness-tool clause: a session always carries these, whatever it declares above. #}
+            <p class="muted">Plus the harness's own session tools — always included, never declared:</p>
+            <ul class="cards">
+            {% for name in preview.harness %}
+                <li class="card"><code>{{ name }}</code> <span class="muted">(built-in)</span></li>
+            {% endfor %}
+            </ul>
+        {% endif %}
     {% else %}
         <p class="flash flash-error">Resolves to an empty toolbox — the run would fail at dispatch.</p>
     {% endif %}

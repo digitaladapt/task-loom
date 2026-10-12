@@ -110,6 +110,25 @@
         </p>
         {#  Empty prefix: the task's own scalars are top-level form fields. #}
         {{ toolbox_ui.toolbox('', values, known_tags, catalog_tools, errors, 'toolbox') }}
+
+        {#
+            The session footnote (SPEC §4.1's harness-tool clause): a
+            session's frozen toolbox is what is declared above PLUS the
+            harness's own session tools — added at slice start, not
+            removable, and therefore not offered in the picker. Rendered for
+            every kind (the editor script toggles it when the kind select
+            changes) but hidden unless the kind is `session`, because on a
+            run-kind task the sentence would be a lie.
+
+            `hidden` is set server-side when the kind is not session, so a
+            browser without JavaScript — which never toggles it — still
+            reads the truth for the kind actually selected.
+        #}
+        <p class="muted" data-session-toolbox-note {% if values.kind != 'session' %}hidden{% endif %}>
+            A session also always carries the harness's own tools — <code>session_note</code>,
+            <code>session_objective</code> and <code>session_declare</code> — added to every slice
+            on top of your selection. Your selection may be empty; these are not optional.
+        </p>
     </section>
 
     <section aria-labelledby="steps-heading">

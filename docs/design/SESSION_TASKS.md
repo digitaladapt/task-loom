@@ -419,6 +419,31 @@ of tools (no new tools, but only one write per slice, and no way to note
 something mid-slice before it is pruned). The tools are strictly more useful and
 cost one harness surface.
 
+**Post-build correction (2026-10-11): the surfaces now say what the clause
+says.** The engine path was correct from step 3 on — the resolver adds the
+harness tools, the snapshot freezes them, the wire carries them — but two
+operator-facing surfaces told a different story, and the mismatch read as
+"the session tools are not included":
+
+- the **task page's Toolbox preview** resolved only the declared half, so a
+  session showed none of the harness tools, and an empty declared half got
+  the red "resolves to an empty toolbox — the run would fail at dispatch" —
+  false for a session, whose whole point is that the harness tools remain;
+- the **editor** said "the model only ever sees the tools declared here"
+  with no mention of the always-added tools.
+
+The preview now carries both halves — `ToolboxPreview::$harness`, populated
+from the same `SessionTool` source the resolver uses, so the two cannot
+drift — and the editor renders a session-only footnote under the picker
+(toggled by kind, hidden-but-server-rendered for run-kind forms so a
+JavaScript-less browser still reads the truth). The MCP `task_create` /
+`task_update` toolbox descriptions carry the same sentence for agent
+authors. And the wire itself is now pinned for a *real* operator-started
+slice: `SessionSliceFlowTest::testAnOperatorStartedSlicesFirstRequestOffersTheHarnessTools`
+asserts the tool definitions on the first request and the `origin: harness`
+entries in the frozen snapshot — the earlier wire proofs crafted their runs
+by hand, so nothing had pinned the launch path.
+
 ---
 
 ## 6. Steering — the operator can see and edit the memory
