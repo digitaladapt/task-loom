@@ -9,6 +9,7 @@ use App\Entity\Chat;
 use App\Entity\ChatEventType;
 use App\Entity\ChatExchange;
 use App\Entity\ChatExchangeEvent;
+use App\Entity\TurnRole;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\Persistence\ManagerRegistry;
 
@@ -81,6 +82,20 @@ final class ChatExchangeEventRepository extends ServiceEntityRepository
      * rounds* left the model's view — the same nouns the run ledger's
      * `context_trim` speaks.
      *
+     * **The question is never cut away.** When the turn bound would fall
+     * above the newest user-side row — mid tool loop, the newest turns are
+     * rounds and the question sits behind them — the boundary is moved back
+     * to that row, because a request carrying no user message is refused by
+     * the endpoint outright ("No user query found in messages"). The bound
+     * exists to keep the request sendable; a bound that makes one unsendable
+     * would be defeating its own purpose. The question row is a turn start,
+     * so cutting at it keeps the whole-turns-only promise, and the extension
+     * only ever moves the boundary older — it never reaches past the read
+     * the bound was sized for by more than the turns between the question
+     * and the bound. The turns it now carries are excluded from the older
+     * counts by the same arithmetic (`< $boundary`), so nothing is counted
+     * as left behind that rode.
+     *
      * **The returned rows always begin at a turn boundary.** That holds by
      * construction — the boundary *is* a turn-starting row, so the first row
      * fetched is it — and the defensive drop below keeps the promise true if
@@ -110,6 +125,15 @@ final class ChatExchangeEventRepository extends ServiceEntityRepository
         }
 
         $boundary = (int) min(array_map(intval(...), $boundaries));
+
+        // The question rides, wherever the bound falls: see the method note.
+        // The extension can only move the boundary older, and the counts
+        // below are computed against the effective boundary, so a turn the
+        // read now carries is never also counted as left behind.
+        $questionId = $this->newestUserTurnId($chat);
+        if (null !== $questionId && $questionId < $boundary) {
+            $boundary = $questionId;
+        }
 
         /** @var list<ChatExchangeEvent> $rows */
         $rows = $this->createQueryBuilder('e')
@@ -211,6 +235,34 @@ final class ChatExchangeEventRepository extends ServiceEntityRepository
             ->setParameter('types', $types)
             ->setParameter('boundary', $boundary)
             ->getQuery()->getSingleScalarResult();
+    }
+
+    /**
+     * The newest user-side row of the conversation, or null when there is
+     * none (a state the engine never reaches — a reply is only compiled once
+     * an inbound turn exists).
+     *
+     * The same question the wire window's fit asks of a rendered unit
+     * ({@see ChatExchangeEvent::isUserTurn()}), asked of the ledger so the
+     * read's cut can be extended back to it.
+     */
+    private function newestUserTurnId(Chat $chat): ?int
+    {
+        /** @var list<int|string> $ids */
+        $ids = $this->createQueryBuilder('e')
+            ->select('e.id')
+            ->join('e.exchange', 'x')
+            ->where('x.chat = :chat')
+            ->andWhere('e.type IN (:types)')
+            ->andWhere('e.role = :role')
+            ->setParameter('chat', $chat)
+            ->setParameter('types', self::conversationalTypes())
+            ->setParameter('role', TurnRole::User)
+            ->orderBy('e.id', \SortDirection::Descending)
+            ->setMaxResults(1)
+            ->getQuery()->getSingleColumnResult();
+
+        return [] === $ids ? null : (int) $ids[0];
     }
 
     /**

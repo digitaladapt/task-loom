@@ -16,8 +16,9 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * ChatContextWindow at the unit level (SPEC §15.9): the tool-result cap, the
- * whole-turn shed unit, the never-trim-the-head / never-drop-the-newest
- * guarantees, and the fail-closed floor.
+ * whole-turn shed unit, the question reserved from every shed, the
+ * never-trim-the-head / never-drop-the-newest guarantees, and the fail-closed
+ * floor.
  *
  * These are unit tests because the properties are about what the fit *can
  * produce* from a given transcript — decidable without a database, a model,
@@ -83,6 +84,44 @@ final class ChatContextWindowTest extends TestCase
         self::assertNotContains(str_repeat('a', 700), $contents, 'the oldest turn is shed first');
         self::assertContains(str_repeat('b', 700), $contents);
         self::assertContains(str_repeat('c', 700), $contents, 'the newest turn always survives when it fits');
+    }
+
+    /**
+     * THE QUESTION RIDES, EVEN WHEN IT IS NOT THE NEWEST TURN.
+     *
+     * Once a tool loop is under way the newest turns are tool rounds and the
+     * question sits behind them — and the endpoint refuses a request that
+     * carries no user message at all ("No user query found in messages"). So
+     * the question is reserved before any shedding: this budget fits the
+     * head, the newest round, and the question, but not the older round, and
+     * the shed must take the older round — never the question.
+     */
+    public function testTheQuestionIsNeverShedEvenWhenToolRoundsAreNewer(): void
+    {
+        // 600 tokens ≈ 2100 chars: head ~1 token; the question ~200 tokens
+        // (~700 chars); each round ~201 tokens (a ~700-char result plus the
+        // call arguments). Two rounds cannot share the budget with the
+        // question; the question is what stays.
+        $window = new ChatContextWindow(contextLimitTokens: 600, windowTurns: 100);
+
+        $fit = $window->fit(new ChatWireWindow([
+            $this->turn(str_repeat('q', 700)),
+            ...$this->round('old', str_repeat('x', 700)),
+            ...$this->round('new', str_repeat('y', 700)),
+        ]), 'SYS');
+
+        self::assertTrue($fit->trimmed());
+        self::assertSame(1, $fit->keptTurns, 'the question survives');
+        self::assertSame(1, $fit->keptRounds, 'the newest round rides beside it');
+        self::assertSame(1, $fit->droppedRounds, 'the older round is the casualty');
+
+        $roles = array_column($fit->messages, 'role');
+        self::assertContains('user', $roles, 'a request must carry a user message — the endpoint refuses one that does not');
+
+        $contents = array_column($fit->messages, 'content');
+        self::assertContains(str_repeat('q', 700), $contents, 'the question is never shed');
+        self::assertContains(str_repeat('y', 700), $contents);
+        self::assertNotContains(str_repeat('x', 700), $contents, 'the oldest round leaves whole, and first');
     }
 
     /**
@@ -158,6 +197,42 @@ final class ChatContextWindowTest extends TestCase
     }
 
     /**
+     * And the third floor: the newest turn and the question may each fit
+     * alone, but if they cannot fit TOGETHER the request must fail closed —
+     * keeping the newest turn by shedding the question is exactly the request
+     * the endpoint refuses, so it is never produced.
+     */
+    public function testANewestTurnAndQuestionThatCannotFitTogetherFailClosed(): void
+    {
+        // The newest round alone fits (head ~1 + ~201 tokens); the question
+        // (~429 tokens) pushes the pair over the 600-token limit.
+        $window = new ChatContextWindow(contextLimitTokens: 600, windowTurns: 100);
+
+        $this->expectException(ContextExhaustedException::class);
+        $this->expectExceptionMessage('question');
+
+        $window->fit(new ChatWireWindow([
+            $this->turn(str_repeat('q', 1500)),
+            ...$this->round('new', str_repeat('y', 700)),
+        ]), 'SYS');
+    }
+
+    /**
+     * And the floor beneath the floors: a window carrying no user-side turn
+     * at all (a caller that handed the fit tool rounds alone) is refused —
+     * there is no request it could legally become.
+     */
+    public function testAWindowWithNoQuestionAtAllIsRefused(): void
+    {
+        $window = new ChatContextWindow(contextLimitTokens: 100_000, windowTurns: 100);
+
+        $this->expectException(ContextExhaustedException::class);
+        $this->expectExceptionMessage('no question');
+
+        $window->fit(new ChatWireWindow([...$this->round('only', 'x')]), 'SYS');
+    }
+
+    /**
      * A read bound that bites counts into the trim: the turns the read
      * already left behind are added to the fit's own drops, by kind.
      */
@@ -204,5 +279,11 @@ final class ChatContextWindowTest extends TestCase
         $event->setPayload(['tool' => 'get_weather', 'content' => $content, 'isError' => false, 'toolCallId' => $id]);
 
         return $event;
+    }
+
+    /** @return list<ChatExchangeEvent> a whole tool round: the call and one result */
+    private function round(string $id, string $result): array
+    {
+        return [$this->toolCall('call-'.$id), $this->toolResult('call-'.$id, $result)];
     }
 }

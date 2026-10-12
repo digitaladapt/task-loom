@@ -224,6 +224,105 @@ final class ChatContextWindowTest extends KernelTestCase
     }
 
     /**
+     * THE QUESTION RIDES EVEN WHEN THE READ BOUND FALLS ABOVE IT.
+     *
+     * Mid tool loop the newest turns are rounds and the question sits behind
+     * them, so a turn bound of 1 would cut it away — and the endpoint refuses
+     * a request that carries no user message at all ("No user query found in
+     * messages"). The read's cut always reaches back to the question, so the
+     * request keeps its user message and the loop can continue.
+     */
+    public function testTheReadAlwaysReachesBackToTheQuestion(): void
+    {
+        $engine = $this->engineWithWindow(100_000, turns: 1); // the read bound alone bites
+
+        $chat = $this->newChat('Mid-loop read');
+        $exchange = $this->openExchange($chat);
+
+        $exchange->appendEvent(ChatExchangeEvent::turn(
+            ChatEventType::Message,
+            Participant::Andrew,
+            TurnRole::User,
+            ChatOrigin::Web,
+            'the question that must ride',
+        ));
+        $this->appendToolRound($exchange, 'round-1', 40);
+        $this->appendToolRound($exchange, 'round-2', 40);
+        $this->em->flush();
+
+        $sent = null;
+        $this->llm->expects(self::once())
+            ->method('chat')
+            ->willReturnCallback(function (array $messages) use (&$sent): LlmResponse {
+                $sent = $messages;
+
+                return new LlmResponse('answered', 'stop', [], [], null, 5);
+            });
+
+        $engine->reply((int) $exchange->getId());
+
+        self::assertIsArray($sent, 'the model was asked');
+
+        $roles = array_column($sent, 'role');
+        self::assertSame(
+            ['system', 'user', 'assistant', 'tool', 'assistant', 'tool'],
+            $roles,
+            'the request carries the question, then the whole tool rounds — never a request with no user message',
+        );
+
+        $users = array_values(array_filter($sent, static fn (array $m): bool => 'user' === $m['role']));
+        self::assertSame('the question that must ride', $users[0]['content'] ?? null);
+    }
+
+    /**
+     * AND IT RIDES THROUGH THE BUDGET TOO: a mid-loop request whose rounds
+     * outgrow the window sheds the oldest rounds — never the question, which
+     * is reserved before any shedding. The trim still says exactly what left
+     * the model's view.
+     */
+    public function testAMidLoopRequestKeepsTheQuestionEvenWhenRoundsAreShed(): void
+    {
+        $engine = $this->engineWithWindow(1500);
+
+        $chat = $this->newChat('Mid-loop budget');
+        $exchange = $this->openExchange($chat);
+
+        $exchange->appendEvent(ChatExchangeEvent::turn(
+            ChatEventType::Message,
+            Participant::Andrew,
+            TurnRole::User,
+            ChatOrigin::Web,
+            'the question at the start',
+        ));
+        for ($round = 1; $round <= 6; ++$round) {
+            $this->appendToolRound($exchange, 'round-'.$round, 1200);
+        }
+        $this->em->flush();
+
+        $sent = null;
+        $this->llm->expects(self::once())
+            ->method('chat')
+            ->willReturnCallback(function (array $messages) use (&$sent): LlmResponse {
+                $sent = $messages;
+
+                return new LlmResponse('carrying on', 'stop', [], [], null, 5);
+            });
+
+        $engine->reply((int) $exchange->getId());
+
+        self::assertIsArray($sent);
+
+        $users = array_values(array_filter($sent, static fn (array $m): bool => 'user' === $m['role']));
+        self::assertSame('the question at the start', $users[0]['content'] ?? null, 'the question is never shed, whatever the budget does to the rounds');
+
+        $trim = $this->latestTrim($exchange);
+        self::assertNotNull($trim, 'the shed rounds must be recorded');
+        self::assertSame(1, $trim->getPayload()['keptTurns'] ?? null, 'the question is the turn that was kept');
+        self::assertGreaterThan(0, $trim->getPayload()['droppedRounds'] ?? 0);
+        self::assertLessThanOrEqual(1500, (int) ($trim->getPayload()['estimatedTokens'] ?? 0));
+    }
+
+    /**
      * Swap the real window service for the same class with a smaller budget,
      * then build the engine — so the engine constructed in this test (a fresh
      * kernel and container per test) resolves the swapped window.
@@ -310,6 +409,26 @@ final class ChatContextWindowTest extends KernelTestCase
         ));
 
         $this->settle($exchange);
+    }
+
+    /**
+     * Append one whole wire tool round to an exchange: the assistant
+     * `tool_calls` row and its single attested result.
+     */
+    private function appendToolRound(ChatExchange $exchange, string $roundId, int $bodyChars): void
+    {
+        $exchange->appendMachinery(ChatEventType::ToolCall, [
+            'calls' => [
+                ['id' => "call-$roundId", 'name' => 'get_weather', 'arguments' => []],
+            ],
+            'assistantContent' => null,
+        ]);
+        $exchange->appendMachinery(ChatEventType::ToolResult, [
+            'tool' => 'get_weather',
+            'content' => str_repeat('r', $bodyChars),
+            'isError' => false,
+            'toolCallId' => "call-$roundId",
+        ]);
     }
 
     private function openExchange(Chat $chat): ChatExchange
