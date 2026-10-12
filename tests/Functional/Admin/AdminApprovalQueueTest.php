@@ -116,6 +116,50 @@ final class AdminApprovalQueueTest extends WebTestCase
         );
     }
 
+    /**
+     * A session's preview shows BOTH halves (SPEC §4.1's harness-tool
+     * clause): the catalog tools it declares, and the harness's own tools
+     * that ride every slice on top. Before this, the preview resolved only
+     * the declared half — a session read as though the session tools were
+     * absent, which is exactly how it looked when the model then used them.
+     */
+    public function testDetailShowsTheHarnessToolsInASessionToolboxPreview(): void
+    {
+        $task = $this->sessionDraft('Importer session');
+
+        $this->client->request('GET', '/tasks/'.$task->getId());
+
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+        self::assertStringContainsString('harness&#039;s own session tools', $content);
+        self::assertStringContainsString('session_note', $content);
+        self::assertStringContainsString('session_objective', $content);
+        self::assertStringContainsString('session_declare', $content);
+    }
+
+    /**
+     * And an empty declared half is NOT the red dispatch failure for a
+     * session: the harness tools remain, so the toolbox is not empty. An
+     * ordinary task with the same declaration keeps the loud warning.
+     */
+    public function testASessionsEmptyToolboxHalfIsNotPreviewedAsADispatchFailure(): void
+    {
+        $task = $this->sessionDraft('Empty toolbox session');
+
+        $this->client->request('GET', '/tasks/'.$task->getId());
+
+        self::assertResponseIsSuccessful();
+        $content = (string) $this->client->getResponse()->getContent();
+        self::assertStringNotContainsString('Resolves to an empty toolbox', $content);
+        self::assertStringContainsString('still included', $content, 'the no-tags note says what remains');
+
+        // The ordinary task's version of the same declaration still warns.
+        $runKind = $this->makeDraft('Run task', 'b', TaskAuthor::User);
+        $this->client->request('GET', '/tasks/'.$runKind->getId());
+
+        self::assertStringContainsString('Resolves to an empty toolbox', (string) $this->client->getResponse()->getContent());
+    }
+
     public function testEnablePromotesDraft(): void
     {
         $task = $this->makeDraft('To enable', 'b', TaskAuthor::Agent);
@@ -537,6 +581,18 @@ final class AdminApprovalQueueTest extends WebTestCase
     private function makeDraft(string $title, string $brief, TaskAuthor $author): Task
     {
         $task = new Task($title, $brief, TaskKind::Run, ToolboxMode::Tags, ['core'], $author);
+        $this->tasks()->save($task);
+
+        return $task;
+    }
+
+    /**
+     * A session-kind draft whose declared half is empty — legal by design,
+     * because the harness tools are always added (§5).
+     */
+    private function sessionDraft(string $title): Task
+    {
+        $task = new Task($title, 'b', TaskKind::Session, ToolboxMode::Tags, [], TaskAuthor::User);
         $this->tasks()->save($task);
 
         return $task;

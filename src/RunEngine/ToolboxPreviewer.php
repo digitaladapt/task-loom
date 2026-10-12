@@ -6,9 +6,11 @@ namespace App\RunEngine;
 
 use App\Entity\Step;
 use App\Entity\Task;
+use App\Entity\TaskKind;
 use App\Entity\Tool;
 use App\Entity\ToolboxMode;
 use App\Repository\ToolRepository;
+use App\Session\SessionTool;
 
 /**
  * A non-throwing resolution pass for the admin UI (SPEC §8): what would
@@ -42,7 +44,31 @@ final readonly class ToolboxPreviewer
      */
     public function preview(Task $task): ToolboxPreview
     {
-        return $this->previewDeclaration($task->getToolboxMode(), $task->getToolbox(), 'task');
+        $session = TaskKind::Session === $task->getKind();
+        $preview = $this->previewDeclaration($task->getToolboxMode(), $task->getToolbox(), 'task', session: $session);
+
+        if (!$session) {
+            return $preview;
+        }
+
+        // SPEC §4.1's harness-tool clause, mirrored: the resolver adds the
+        // harness's own session tools on top of the declared half, and
+        // refuses a catalog tool carrying a reserved name. The preview shows
+        // both facts — "what would resolve() say, without throwing" — so a
+        // session page never reads as though the harness tools were absent,
+        // and an empty declared half is not misreported as a dispatch
+        // failure it is not.
+        $problems = $preview->problems;
+        foreach ($preview->resolved as $tool) {
+            if (\in_array($tool->getName(), SessionTool::names(), true)) {
+                $problems[] = \sprintf(
+                    'Tool "%s" is reserved for the harness\'s own session tools — a slice refuses this name at start.',
+                    $tool->getName(),
+                );
+            }
+        }
+
+        return new ToolboxPreview($preview->resolved, $problems, SessionTool::names());
     }
 
     /**
@@ -57,7 +83,7 @@ final readonly class ToolboxPreviewer
     /**
      * @param list<string> $declared
      */
-    private function previewDeclaration(ToolboxMode $mode, array $declared, string $subject): ToolboxPreview
+    private function previewDeclaration(ToolboxMode $mode, array $declared, string $subject, bool $session = false): ToolboxPreview
     {
         $resolved = [];
         $problems = [];
@@ -94,7 +120,13 @@ final readonly class ToolboxPreviewer
         // Tags mode: every enabled tool on every enabled server,
         // intersected with the declared tags.
         if ([] === $declared) {
-            $problems[] = \sprintf('The %s declares no tags — the toolbox would be empty.', $subject);
+            // A session's declared half being empty is legal by design (§5:
+            // the harness tools remain, and a session may resolve to zero MCP
+            // tools) — so the message must not claim the toolbox would be
+            // empty, which is only true of an ordinary task.
+            $problems[] = $session
+                ? \sprintf('The %s declares no tags — no catalog tools will be added; the harness\'s own session tools are still included.', $subject)
+                : \sprintf('The %s declares no tags — the toolbox would be empty.', $subject);
 
             return new ToolboxPreview($resolved, $problems);
         }

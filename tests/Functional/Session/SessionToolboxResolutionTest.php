@@ -11,6 +11,7 @@ use App\Entity\TaskAuthor;
 use App\Entity\TaskKind;
 use App\Entity\Tool;
 use App\Entity\ToolboxMode;
+use App\RunEngine\ToolboxPreviewer;
 use App\RunEngine\ToolboxResolutionException;
 use App\RunEngine\ToolboxResolver;
 use Doctrine\ORM\EntityManagerInterface;
@@ -31,6 +32,7 @@ final class SessionToolboxResolutionTest extends KernelTestCase
 {
     private EntityManagerInterface $em; // @phpstan-ignore property.uninitialized (assigned in setUp)
     private ToolboxResolver $resolver; // @phpstan-ignore property.uninitialized (assigned in setUp)
+    private ToolboxPreviewer $previewer; // @phpstan-ignore property.uninitialized (assigned in setUp)
 
     #[\Override]
     protected function setUp(): void
@@ -48,6 +50,7 @@ final class SessionToolboxResolutionTest extends KernelTestCase
         $this->em->clear();
 
         $this->resolver = static::getContainer()->get(ToolboxResolver::class);
+        $this->previewer = static::getContainer()->get(ToolboxPreviewer::class);
     }
 
     public function testASessionsToolboxIsItsCatalogToolsPlusTheHarnessTools(): void
@@ -127,6 +130,76 @@ final class SessionToolboxResolutionTest extends KernelTestCase
         $names = array_map(static fn ($tool): string => $tool->getName(), $this->resolver->resolve($task));
 
         self::assertSame(['session_note'], $names);
+    }
+
+    // ── The preview mirror (SPEC §4.1; the task page's diagnostic) ───────
+
+    /**
+     * What the task page shows must include the harness half: "what would
+     * resolve() say, without throwing" now has two components, and a preview
+     * that showed only the declared half would read as though the session
+     * tools were absent — the exact misreading this pins against.
+     */
+    public function testThePreviewShowsBothHalvesForASession(): void
+    {
+        $this->catalogTool('get_weather');
+        $task = $this->task(TaskKind::Session, ToolboxMode::Explicit, ['get_weather']);
+
+        $preview = $this->previewer->preview($task);
+
+        self::assertSame(['get_weather'], array_map(static fn ($tool): string => $tool->getName(), $preview->resolved));
+        self::assertSame(['session_note', 'session_objective', 'session_declare'], $preview->harness, 'the harness half is shown, not only implied');
+        self::assertFalse($preview->isEmpty());
+        self::assertTrue($preview->isOk());
+    }
+
+    /**
+     * A session whose declared half is empty is not a dispatch failure — the
+     * harness tools remain — so the preview must not say it is one. An
+     * ordinary task's empty toolbox still is, and still says so.
+     */
+    public function testASessionWithAnEmptyDeclaredHalfIsNotPreviewedAsAFailure(): void
+    {
+        $task = $this->task(TaskKind::Session, ToolboxMode::Tags, []);
+
+        $preview = $this->previewer->preview($task);
+
+        self::assertFalse($preview->isEmpty(), 'the harness tools remain — the toolbox is not empty');
+        self::assertSame(['session_note', 'session_objective', 'session_declare'], $preview->harness);
+
+        $problems = implode('; ', $preview->problems);
+        self::assertStringNotContainsString('would be empty', $problems);
+        self::assertStringContainsString('still included', $problems, 'the no-tags note says what is still there');
+    }
+
+    /**
+     * The reserved-name collision is previewed as a problem rather than
+     * thrown (display stays total), and the message names the reservation.
+     */
+    public function testThePreviewFlagsAReservedNameInsteadOfThrowing(): void
+    {
+        $this->catalogTool('session_note');
+        $task = $this->task(TaskKind::Session, ToolboxMode::Explicit, ['session_note']);
+
+        $preview = $this->previewer->preview($task);
+
+        self::assertStringContainsString('reserved for the harness', implode('; ', $preview->problems));
+        self::assertFalse($preview->isOk());
+    }
+
+    /**
+     * And an ordinary task's preview is exactly what it was: no harness half,
+     * and an empty declaration is still the loud failure.
+     */
+    public function testAnOrdinaryTasksPreviewIsUnchanged(): void
+    {
+        $task = $this->task(TaskKind::Run, ToolboxMode::Tags, []);
+
+        $preview = $this->previewer->preview($task);
+
+        self::assertSame([], $preview->harness, 'nothing is added for a run-kind task');
+        self::assertTrue($preview->isEmpty());
+        self::assertStringContainsString('would be empty', implode('; ', $preview->problems));
     }
 
     /**

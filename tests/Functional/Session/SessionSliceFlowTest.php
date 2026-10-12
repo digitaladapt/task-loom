@@ -174,6 +174,61 @@ final class SessionSliceFlowTest extends KernelTestCase
      * run, so chat > task > session is a property of the configuration, not
      * of every dispatch site remembering to pick the right class.
      */
+    /**
+     * A slice the OPERATOR starts carries the harness tools on the wire
+     * (SPEC §4.1's harness-tool clause). The other wire tests craft their
+     * runs by hand; this one goes through the real path — `start()` creates
+     * the first slice exactly as Run now does, and the first request the
+     * model sees must offer `session_note`, `session_objective` and
+     * `session_declare` as tool definitions, not only in the prompt's
+     * toolbox prose.
+     */
+    public function testAnOperatorStartedSlicesFirstRequestOffersTheHarnessTools(): void
+    {
+        $this->catalogTool('get_weather');
+        $task = new Task('Importer session', 'Keep working the importer.', TaskKind::Session, ToolboxMode::Explicit, ['get_weather'], TaskAuthor::User);
+        $task->enable();
+        $this->em->persist($task);
+        $this->em->flush();
+
+        $slice = $this->engine->start($task);
+        $this->bus()->dispatch(new SessionTurnMessage((int) $slice->getId(), 1));
+
+        $chats = [];
+        $this->llm->method('chat')->willReturnCallback(
+            function (array $messages, array $tools) use (&$chats): LlmResponse {
+                $chats[] = [$messages, $tools];
+
+                return $this->response(toolCalls: [
+                    ['id' => 'c1', 'name' => 'session_declare', 'arguments' => ['outcome' => 'done', 'summary' => 'Nothing to do yet.']],
+                ]);
+            },
+        );
+
+        $this->pump();
+
+        self::assertCount(1, $chats, 'the slice made exactly one request before declaring');
+        $names = array_column(array_column($chats[0][1], 'function'), 'name');
+
+        self::assertContains('get_weather', $names, 'the declared catalog tool rides the wire');
+        self::assertContains('session_note', $names);
+        self::assertContains('session_objective', $names);
+        self::assertContains('session_declare', $names);
+
+        // And the frozen snapshot — what every later turn and worker reads —
+        // records the same tools, harness entries marked as such.
+        $this->em->clear();
+        $frozen = $this->runs()[0]->getToolboxSnapshot();
+        $origins = [];
+        foreach ($frozen as $entry) {
+            $origins[$entry['tool']] = $entry['origin'] ?? 'mcp';
+        }
+        self::assertSame('mcp', $origins['get_weather']);
+        self::assertSame('harness', $origins['session_note']);
+        self::assertSame('harness', $origins['session_objective']);
+        self::assertSame('harness', $origins['session_declare']);
+    }
+
     public function testASlicesTurnsAreBuiltForTheSessionLane(): void
     {
         $task = $this->sessionTask();
