@@ -726,7 +726,12 @@ first.
    chat-specific read bound (`TASKLOOM_CHAT_WINDOW_TURNS`). No summarization
    (DESIGN_CONSIDERATIONS §2.3 applies to a conversation too), no new engine,
    no table. (Note this was a *context* problem, not a storage one: the
-   ledger keeps everything, and still does.)
+   ledger keeps everything, and still does.) One refinement was needed after
+   the first build: the question (the newest user-side turn) is reserved
+   before any shedding and the read always reaches back to it — mid tool
+   loop the newest turns are rounds, and an oldest-first shed could
+   otherwise leave a request with no user message, which the endpoint
+   refuses (task-weaver #36 / context-loom #8, the same trap kept).
 3. **Which human?** The roster makes a second human an addition, but
    nothing yet decides *which* participant an inbound message is from. v1:
    one human, identity from the session.

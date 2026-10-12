@@ -31,7 +31,8 @@ Successor to task-loop (Python) and task-weaver (PHP/Symfony). Design docs:
   (SPEC §15). Its turns ride a `chat` lane the LLM workers drain **first**, so a waiting
   human is served before the next task turn — which reorders the queue, it does not add
   capacity. A conversation never ends, so it is fitted to the model's window on every
-  request: the oldest whole turns are shed when the transcript outgrows it, with a
+  request: the oldest whole turns are shed when the transcript outgrows it — never the
+  question, which is reserved before any shedding — with a
   visible record and a plain-words notice on the page (SPEC §15.9).
   See "Concurrency" below.
 
@@ -407,7 +408,7 @@ inline. Key knobs:
 | `TASKLOOM_STEP_BUDGET` | Max tool-call exchanges per run (fail closed) |
 | `TASKLOOM_CONTEXT_LIMIT` | Context window for the fail-closed token budget — used by runs and chats alike (SPEC §5.6, §15.9) |
 | `TASKLOOM_CHAT_TOOL_ROUNDS` | Ceiling on tool round-trips in one chat reply (default `6`; `0` disables chat tools — SPEC §15.8) |
-| `TASKLOOM_CHAT_WINDOW_TURNS` | How many turns of a conversation one request may carry before the oldest are shed from the model's window (default `100` — SPEC §15.9) |
+| `TASKLOOM_CHAT_WINDOW_TURNS` | How many turns of a conversation one request may carry before the oldest are shed from the model's window (default `100`; the request always reaches back to the question regardless — SPEC §15.9) |
 | `TASKLOOM_MAX_INPUT_ARTIFACT_PCT` | Cap on the whole Inputs block (a stepped run's dependency outputs), split evenly across the inputs (default `50`) |
 | `TASKLOOM_SESSION_HOT` / `TASKLOOM_SESSION_COLD` | Session memory: notes injected per request / notes retained beyond that (defaults `5` / `25`; build order step 2 of `docs/design/SESSION_TASKS.md`) |
 | `TASKLOOM_SESSION_WRITE_MAX_CHARS` | Session memory: per-write size cap for a note or the objective (default `2000`) |

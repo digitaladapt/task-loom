@@ -277,6 +277,24 @@ class ChatExchangeEvent extends LedgerEvent
     }
 
     /**
+     * Whether this row is the user side of the conversation — a
+     * conversational turn rendered on the `user` role.
+     *
+     * The fact the endpoint's "at least one user message" requirement is
+     * about (SPEC §15.9): a wire request carrying no user message is refused
+     * outright ("No user query found in messages"), so the chat context
+     * window reserves the newest such turn before any shedding and the wire
+     * read always reaches back to it — however deep the newest turns sit.
+     * Stated here, on the columns, because both readers ask the same
+     * question of two different shapes: the read asks it of a query, the fit
+     * of a rendered unit's first row.
+     */
+    public function isUserTurn(): bool
+    {
+        return $this->type->isConversational() && TurnRole::User === $this->role;
+    }
+
+    /**
      * Whether this event should appear in the conversation the human reads.
      *
      * The page shows what was *said*, plus — deliberately — a readable line

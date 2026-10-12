@@ -1136,12 +1136,19 @@ is not an exception).
   knob the run window reads, because the window is a fact about the model,
   not about which lane is asking. The fit counts the whole request: the head
   and the tool definitions, besides the turns.
-- **The head is never trimmed, and neither is the newest turn.** The system
-  message is the conversation's constitution. The newest turn is the
-  question being answered: a request that cannot fit head + newest turn fails
-  the exchange closed with a named reason (ErrorClass `context_exhausted`) —
-  never a transcript with no question in it, and never a request that flies
-  at the provider to return a raw transport error to a person.
+- **The head is never trimmed, and neither is the question.** The system
+  message is the conversation's constitution. The question — the newest
+  turn that carries a user-side row — is what the request is *for*: a
+  request carrying no user message is refused by the endpoint outright
+  ("No user query found in messages"), so the question is reserved before
+  any shedding and rides whatever the budget does to the turns around it.
+  Before the first tool round the question *is* the newest turn; mid tool
+  loop it sits behind the rounds, which is where an oldest-first shed could
+  reach it — the trap this section originally left open. A request that
+  cannot fit head + question + newest turn fails the exchange closed with a
+  named reason (ErrorClass `context_exhausted`) — never a transcript with
+  no question in it, and never a request that flies at the provider to
+  return a raw transport error to a person.
 - **The shedding is visible, with exact counts.** Every trim writes a
   `context_trim` row saying how many turns and tool rounds were kept and
   dropped (SPEC §15.8's rule extends here: a person is waiting, so the
@@ -1153,8 +1160,11 @@ is not an exception).
 - **`TASKLOOM_CHAT_WINDOW_TURNS` (default 100)** bounds how deep into a
   conversation one request reaches at all — a *read* bound, separate from the
   run window's exchange count for the same reason chat's tool-round ceiling
-  is separate from the step budget (`CHAT_TOOLS.md` §4). Everything older is
-  out of the read and counted into the trim.
+  is separate from the step budget (`CHAT_TOOLS.md` §4). Its one exception is
+  the question: when the bound would fall above the newest user-side row, the
+  read's cut is extended back to it — a bound whose whole purpose is a
+  sendable request must never make one unsendable. Everything older is out of
+  the read and counted into the trim.
 
 What this is *not*: a second engine, a table, or a summarizer. The fit lives
 in `App\Chat\ChatContextWindow`, sharing the token estimate and the capping

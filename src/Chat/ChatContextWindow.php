@@ -42,10 +42,30 @@ use App\Entity\ChatExchangeEvent;
  * ## What is always kept
  *
  * The prompt head (the system message) is never trimmed, exactly as a run's
- * head is never pruned: it is the conversation's constitution. And because a
- * chat's whole reason for a request is the turn being answered, the *newest*
- * turn is not optional either — a request that cannot fit the newest turn
- * fails closed instead of sending a conversation with no question in it.
+ * head is never pruned: it is the conversation's constitution. The *newest*
+ * turn is not optional either — it is where the loop resumes, and a request
+ * that cannot fit it fails closed.
+ *
+ * And between those two rules sits the one this class originally missed:
+ * **the question — the newest unit carrying a user-side turn — is never
+ * shed.** Before the first tool round it *is* the newest turn, which is why
+ * "the newest turn is the question being answered" read true right up until
+ * it didn't: mid tool loop the newest turns are tool rounds and the question
+ * sits behind them, where the oldest-first shed could reach it. The request
+ * that remains then carries no user message at all, and the endpoint refuses
+ * it outright ("No user query found in messages") — a raw provider failure
+ * in front of a person, which is the exact shape of failure the fail-closed
+ * discipline exists to prevent. The predecessor project recorded the same
+ * trap: pruning may remove anything that is redundant, never anything that
+ * is structurally required.
+ *
+ * So the question is reserved before any shedding — it rides whatever the
+ * budget does to the turns around it — and a fit where the question and the
+ * newest turn cannot sit together fails closed with a named reason, because
+ * the only fit that excludes one of them is a request the endpoint already
+ * refused or a loop that cannot continue. The read's half of the same
+ * invariant — the read always reaches back to the question — is stated on
+ * {@see \App\Repository\ChatExchangeEventRepository::findWireWindow()}.
  *
  * ## The budget is the model's; the read bound is the lane's
  *
@@ -55,8 +75,11 @@ use App\Entity\ChatExchangeEvent;
  * (`TASKLOOM_CHAT_WINDOW_TURNS`), which limits how deep into a conversation
  * one request reaches at all, on the same reasoning that gave chat its own
  * tool-round ceiling instead of reusing the run's step budget
- * (`CHAT_TOOLS.md` §4). Everything the read left behind is counted into the
- * trim this class reports — nothing leaves the model's view unrecorded.
+ * (`CHAT_TOOLS.md` §4). The bound has one exception, and it is not history:
+ * the read always reaches back to the question, wherever the bound falls,
+ * because a bound whose whole purpose is a sendable request must never make
+ * one unsendable. Everything the read left behind is counted into the trim
+ * this class reports — nothing leaves the model's view unrecorded.
  */
 final readonly class ChatContextWindow
 {
@@ -75,7 +98,10 @@ final readonly class ChatContextWindow
      * The engine passes this to the wire read
      * ({@see \App\Repository\ChatExchangeEventRepository::findWireWindow()}):
      * the read and the fit must agree on the bound, or the window would be
-     * counting against a depth the read never claimed.
+     * counting against a depth the read never claimed. The read's one
+     * exception — the question always rides, wherever the bound falls — is
+     * the read's to make, so the fit never sees a window this bound did not
+     * describe.
      */
     public function maxTurns(): int
     {
@@ -109,14 +135,17 @@ final readonly class ChatContextWindow
 
     /**
      * Build the message list sent to the model: the system message, then as
-     * many of the newest turns as the budget allows. Fails closed with a
-     * named reason if even the head — or the head plus the newest turn —
-     * cannot fit.
+     * many of the newest turns as the budget allows — with the question
+     * reserved: the newest unit carrying a user-side turn is set aside before
+     * the oldest-first drop starts, so the drop can take only the turns
+     * around it (a request with no user message is refused by the endpoint).
+     * Fails closed with a named reason if even the head — or the head plus
+     * the question and the newest turn — cannot fit.
      *
      * @param ChatWireWindow             $window          the wire read: the newest whole turns, plus what it left behind
      * @param list<array<string, mixed>> $toolDescriptors the OpenAI tool descriptors sent on the same request
      *
-     * @throws ContextExhaustedException when the head, or the head plus the newest turn, exceeds the budget
+     * @throws ContextExhaustedException when the head, or the head plus the question and the newest turn, exceeds the budget
      */
     public function fit(ChatWireWindow $window, string $systemMessage, array $toolDescriptors = []): ChatContextWindowResult
     {
@@ -148,16 +177,54 @@ final readonly class ChatContextWindow
         }
 
         $newest = \count($units) - 1;
+
+        // The question — the newest unit carrying a user-side turn. It is
+        // reserved before any shedding, because a request it cannot ride in
+        // is one the endpoint refuses and a person watches fail.
+        $question = null;
+        for ($index = $newest; $index >= 0; --$index) {
+            if (self::carriesUserTurn($units[$index])) {
+                $question = $index;
+                break;
+            }
+        }
+
+        if (null === $question) {
+            // Defensive: a reply is only compiled once an inbound turn
+            // exists, so this arm is unreachable in the steady state — and it
+            // is a refusal, not a send, because there is no request this
+            // window could legally become.
+            throw new ContextExhaustedException('context exhausted: no question is in the window — no unit carries a user-side turn, and a request with no user message is refused by the endpoint.');
+        }
+
         if ($fixedTokens + $costs[$newest] > $this->contextLimitTokens) {
             throw new ContextExhaustedException(\sprintf('context exhausted: the prompt head, tool definitions, and the newest turn alone are an estimated %d tokens > limit %d', $fixedTokens + $costs[$newest], $this->contextLimitTokens));
         }
 
-        // Newest-first, oldest dropped until the window fits. The drop stops
-        // at the first turn that does not fit, so what remains is one
-        // contiguous stretch of the end of the conversation.
+        // And the question and the newest turn must fit *together*: keeping
+        // either while shedding the other is a request the endpoint refuses,
+        // or one the loop cannot continue from.
+        if ($question !== $newest && $fixedTokens + $costs[$newest] + $costs[$question] > $this->contextLimitTokens) {
+            throw new ContextExhaustedException(\sprintf('context exhausted: the question and the newest turn, with the prompt head and tool definitions, are an estimated %d tokens > limit %d — the question is never shed, and the newest turn is where the loop resumes', $fixedTokens + $costs[$newest] + $costs[$question], $this->contextLimitTokens));
+        }
+
+        // Newest-first, oldest dropped until the window fits — with the
+        // question reserved: a drop may take only turns that are neither the
+        // question nor the newest, so the kept set is the newest stretch of
+        // the conversation plus the question, whatever the budget does to
+        // the turns between them.
         $tokens = $fixedTokens;
         $keptIndexes = [];
+        if ($question !== $newest) {
+            $tokens += $costs[$question];
+            $keptIndexes[$question] = true;
+        }
+
         for ($index = $newest; $index >= 0; --$index) {
+            if (isset($keptIndexes[$index])) {
+                continue;
+            }
+
             if ($tokens + $costs[$index] > $this->contextLimitTokens) {
                 break;
             }
@@ -249,6 +316,17 @@ final readonly class ChatContextWindow
     private static function isRound(array $unit): bool
     {
         return ChatEventType::ToolCall === $unit[0]->getType();
+    }
+
+    /**
+     * Whether this unit carries the user side of the conversation — the
+     * question, wherever it sits ({@see ChatExchangeEvent::isUserTurn()}).
+     *
+     * @param list<ChatExchangeEvent> $unit
+     */
+    private static function carriesUserTurn(array $unit): bool
+    {
+        return $unit[0]->isUserTurn();
     }
 
     /**

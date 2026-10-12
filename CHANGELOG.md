@@ -660,6 +660,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A chat request can no longer be sent with no question in it.** Once a
+  tool loop was under way, the newest turns were tool rounds and the question
+  sat behind them — so the context window's oldest-first shed could drop the
+  human's message while keeping the rounds, and the request that went out
+  carried no user message at all. The endpoint refuses that outright ("No
+  user query found in messages"), which surfaced as a raw provider failure
+  (HTTP 500) in front of a person. The question — the newest turn carrying a
+  user-side row — is now reserved before any shedding: it rides whatever the
+  budget does to the turns around it, and a fit where the question and the
+  newest turn cannot sit together fails the exchange closed with a named
+  reason instead. The read's half is fixed too: `findWireWindow()` always
+  reaches back to the question even when `TASKLOOM_CHAT_WINDOW_TURNS` would
+  cut above it, because a bound whose whole purpose is a sendable request
+  must never make one unsendable. This is the same trap the predecessor
+  project recorded (task-weaver #36, context-loom #8): pruning may remove
+  anything that is redundant, never anything that is structurally required.
+  (The run lane never had this hole — its prompt head pins a user message by
+  construction.)
+
 - **A `session`-kind task can no longer mis-run as an ordinary single-pass
   run.** The kind has existed since v1 and the MCP tool schemas advertise it,
   but nothing branched on kind: a task created with `kind: "session"` was
