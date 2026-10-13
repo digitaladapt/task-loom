@@ -654,7 +654,7 @@ final class RunEngine
             'content' => $response->content,
             'reasoningContent' => $response->reasoningContent,
             'usage' => $response->usage,
-        ];
+        ] + $response->ledgerAdditions();
 
         if (!$response->wantsToolCall()) {
             // Terminal message: completion must BE the result (SPEC §5.4).
@@ -669,7 +669,11 @@ final class RunEngine
             $sessionSlice = TaskKind::Session === $run->getTask()->getKind();
 
             $this->commitTerminal($run, $async, function () use ($run, $response, $responsePayload, $sessionSlice): void {
-                $this->appendEvent($run, RunEventType::LlmResponse, $responsePayload, durationMs: $response->durationMs);
+                // A generation a guard cut short still has the stop recorded
+                // on its response event (the error class and the timing ride
+                // there), so the run's own completion stays "what the model
+                // said" while the reason it ends early remains readable.
+                $this->appendEvent($run, RunEventType::LlmResponse, $responsePayload, errorClass: $response->stop?->errorClass(), durationMs: $response->durationMs);
 
                 if ($sessionSlice) {
                     $run->markIncomplete();
@@ -679,15 +683,20 @@ final class RunEngine
                         ['reason' => 'terminal message with no session_declare — a slice settles by declaration; the session stops for a human (docs/design/SESSION_TASKS.md §8)'],
                     );
                 } elseif (null !== $response->content && '' !== trim($response->content)) {
+                    // Partial output is output: a cut that captured a
+                    // terminal message still completes the run with what was
+                    // said — the stop on the response event is what makes the
+                    // truncation visible rather than silent.
                     $run->markSucceeded();
                     $this->appendEvent($run, RunEventType::Completion, ['result' => $response->content]);
                 } else {
                     $run->markIncomplete();
+                    $stop = $response->stop;
                     $this->appendEvent(
                         $run,
                         RunEventType::Failure,
-                        ['reason' => 'terminal message with no content — no completion declaration'],
-                        errorClass: ErrorClass::LlmMalformedResponse,
+                        ['reason' => null !== $stop ? $stop->detail : 'terminal message with no content — no completion declaration'],
+                        errorClass: $stop?->errorClass() ?? ErrorClass::LlmMalformedResponse,
                     );
                 }
                 $this->em->flush();
@@ -735,7 +744,7 @@ final class RunEngine
         // anywhere before this commit leaves no trace and the redelivered
         // LLM turn re-executes; after it, the tool turn has a carrier.
         $this->commitTurn(function () use ($run, $state, $step, $response, $responsePayload, $calls): void {
-            $this->appendEvent($run, RunEventType::LlmResponse, $responsePayload, durationMs: $response->durationMs);
+            $this->appendEvent($run, RunEventType::LlmResponse, $responsePayload, errorClass: $response->stop?->errorClass(), durationMs: $response->durationMs);
             $state->pendingToolTurn = new PendingToolTurn(
                 step: $step,
                 assistantContent: $response->content,

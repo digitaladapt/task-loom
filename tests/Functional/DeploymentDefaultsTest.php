@@ -51,6 +51,17 @@ final class DeploymentDefaultsTest extends WebTestCase
         'TASKLOOM_CIRCUIT_BREAKER' => 3,
         'TASKLOOM_LLM_MODEL' => 'qwen3:14b',
         'TASKLOOM_LLM_TIMEOUT' => 300,
+        // The stream guards (the streaming-capture change): each window has a
+        // deployment default so a knob a deployment omits cannot 500 a page,
+        // and so the three places that state the numbers cannot disagree.
+        'TASKLOOM_LLM_FIRST_TOKEN_TIMEOUT' => 90,
+        'TASKLOOM_LLM_SILENCE_TIMEOUT' => 120,
+        'TASKLOOM_LLM_SOFT_DEADLINE' => 300,
+        'TASKLOOM_LLM_SOFT_EXTENSION' => 150,
+        'TASKLOOM_LLM_MAX_EXTENSIONS' => 2,
+        'TASKLOOM_LLM_MAX_DURATION' => 900,
+        'TASKLOOM_LLM_LOOP_MIN_SPAN' => 160,
+        'TASKLOOM_LLM_LOOP_MIN_REPEATS' => 6,
     ];
 
     public function testEveryTuningKnobHasADeploymentDefault(): void

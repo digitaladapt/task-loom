@@ -28,6 +28,19 @@ x-taskloom-env: &taskloom-env
   TASKLOOM_LLM_MODEL: ${TASKLOOM_LLM_MODEL:-qwen3:14b}
   TASKLOOM_LLM_API_KEY: ${TASKLOOM_LLM_API_KEY:-}
   TASKLOOM_LLM_TIMEOUT: ${TASKLOOM_LLM_TIMEOUT:-300}
+  # The stream guards (the streaming-capture change): four windows that
+  # replace the one blunt timeout, each naming its own failure mode. See
+  # .env.example and App\Llm\LlmGuards for what each means; MAX_DURATION is
+  # the number the claim/shutdown arithmetic below binds itself by.
+  TASKLOOM_LLM_FIRST_TOKEN_TIMEOUT: ${TASKLOOM_LLM_FIRST_TOKEN_TIMEOUT:-90}
+  TASKLOOM_LLM_SILENCE_TIMEOUT: ${TASKLOOM_LLM_SILENCE_TIMEOUT:-120}
+  TASKLOOM_LLM_SOFT_DEADLINE: ${TASKLOOM_LLM_SOFT_DEADLINE:-300}
+  TASKLOOM_LLM_SOFT_EXTENSION: ${TASKLOOM_LLM_SOFT_EXTENSION:-150}
+  TASKLOOM_LLM_MAX_EXTENSIONS: ${TASKLOOM_LLM_MAX_EXTENSIONS:-2}
+  TASKLOOM_LLM_MAX_DURATION: ${TASKLOOM_LLM_MAX_DURATION:-900}
+  # The loop detector: stop a generation that is provably repeating itself.
+  TASKLOOM_LLM_LOOP_MIN_SPAN: ${TASKLOOM_LLM_LOOP_MIN_SPAN:-160}
+  TASKLOOM_LLM_LOOP_MIN_REPEATS: ${TASKLOOM_LLM_LOOP_MIN_REPEATS:-6}
   # Debug: dump the raw LLM response body to the log (off by default).
   TASKLOOM_DEBUG_RAW_LLM: ${TASKLOOM_DEBUG_RAW_LLM:-0}
   # Concurrency: llm workers to run (each holds one request on the wire).
@@ -48,8 +61,9 @@ x-taskloom-env: &taskloom-env
   TASKLOOM_WORKER_TIME_LIMIT: ${TASKLOOM_WORKER_TIME_LIMIT:-3600}
   TASKLOOM_WORKER_MEMORY_LIMIT: ${TASKLOOM_WORKER_MEMORY_LIMIT:-256M}
   # Take a leftover claim of any age at boot. Correct for this file's single-
-  # container shape; raise it (to TASKLOOM_LLM_TIMEOUT + 60) only if you add a
-  # second fleet against the same database — see App\RunEngine\ClaimReaper.
+  # container shape; raise it (to TASKLOOM_LLM_MAX_DURATION + 60 — the
+  # streaming hard cap, which is now the longest a turn can run) only if you
+  # add a second fleet against the same database — see App\RunEngine\ClaimReaper.
   TASKLOOM_FLEET_GRAB_AFTER: ${TASKLOOM_FLEET_GRAB_AFTER:-0}
   # Run migrations at container boot. Leave 0: the `migrate` service above owns
   # schema changes (§8.6), and a container that migrates at boot cannot be

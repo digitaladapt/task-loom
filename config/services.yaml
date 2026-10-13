@@ -65,6 +65,42 @@ parameters:
     TASKLOOM_CIRCUIT_BREAKER: 3
     TASKLOOM_LLM_MODEL: 'qwen3:14b'
     TASKLOOM_LLM_TIMEOUT: 300
+    #
+    # The stream guards (the streaming-capture change). These replace the one
+    # blunt whole-request timeout with windows that name what went wrong:
+    #
+    #   FIRST_TOKEN_TIMEOUT — no output at all within this many seconds:
+    #                         prefill or a queue, never started.
+    #   SILENCE_TIMEOUT     — model output stopped mid-stream this long: the
+    #                         endpoint is wedged but the connection is not.
+    #   SOFT_DEADLINE       — output still flowing here earns bounded
+    #                         extensions (SOFT_EXTENSION × MAX_EXTENSIONS).
+    #   MAX_DURATION        — the hard cap, for every generation, flowing or
+    #                         not; the number the deployment arithmetic
+    #                         (stop_grace_period, claim staleness) binds
+    #                         itself by.
+    #
+    # Deliberately static (not derived from TASKLOOM_LLM_TIMEOUT): one knob
+    # stating one number keeps the three places a knitter reads in agreement.
+    # Raise SOFT_DEADLINE alongside MAX_DURATION if you raise the old
+    # LLM_TIMEOUT past 300 — the constructor refuses a hard cap below the
+    # soft deadline, or extensions that could never all fit under it.
+    #
+    # The loop detector: stop a generation that is provably repeating itself
+    # instead of letting it run to a time cap. MIN_SPAN is the repeated
+    # region's minimum length in characters, MIN_REPEATS the minimum number
+    # of repetitions; the defaults need a 27+ character block 6 times, an
+    # 8-character block 20 times, or the single letter "a" 160 times —
+    # conservative on purpose, because a false positive discards real output.
+    # A cut is recorded with its evidence (what repeated, how often).
+    TASKLOOM_LLM_FIRST_TOKEN_TIMEOUT: 90
+    TASKLOOM_LLM_SILENCE_TIMEOUT: 120
+    TASKLOOM_LLM_SOFT_DEADLINE: 300
+    TASKLOOM_LLM_SOFT_EXTENSION: 150
+    TASKLOOM_LLM_MAX_EXTENSIONS: 2
+    TASKLOOM_LLM_MAX_DURATION: 900
+    TASKLOOM_LLM_LOOP_MIN_SPAN: 160
+    TASKLOOM_LLM_LOOP_MIN_REPEATS: 6
 
 services:
     # default configuration for services in *this* file
@@ -178,6 +214,21 @@ services:
             # `default::` so an unset variable resolves to null (off)
             # instead of failing the boot.
             $debugRawResponse: '%env(default::TASKLOOM_DEBUG_RAW_LLM)%'
+            # The guard windows (the streaming-capture change): built as a
+            # service so all eight are validated in one place and a bad
+            # value names its knob at boot (see App\Llm\LlmGuards).
+            $guards: '@App\Llm\LlmGuards'
+
+    App\Llm\LlmGuards:
+        arguments:
+            $firstTokenSeconds: '%env(float:default:TASKLOOM_LLM_FIRST_TOKEN_TIMEOUT:TASKLOOM_LLM_FIRST_TOKEN_TIMEOUT)%'
+            $silenceSeconds: '%env(float:default:TASKLOOM_LLM_SILENCE_TIMEOUT:TASKLOOM_LLM_SILENCE_TIMEOUT)%'
+            $softDeadlineSeconds: '%env(float:default:TASKLOOM_LLM_SOFT_DEADLINE:TASKLOOM_LLM_SOFT_DEADLINE)%'
+            $softExtensionSeconds: '%env(float:default:TASKLOOM_LLM_SOFT_EXTENSION:TASKLOOM_LLM_SOFT_EXTENSION)%'
+            $maxSoftExtensions: '%env(int:default:TASKLOOM_LLM_MAX_EXTENSIONS:TASKLOOM_LLM_MAX_EXTENSIONS)%'
+            $maxDurationSeconds: '%env(float:default:TASKLOOM_LLM_MAX_DURATION:TASKLOOM_LLM_MAX_DURATION)%'
+            $loopMinSpanChars: '%env(int:default:TASKLOOM_LLM_LOOP_MIN_SPAN:TASKLOOM_LLM_LOOP_MIN_SPAN)%'
+            $loopMinRepeats: '%env(int:default:TASKLOOM_LLM_LOOP_MIN_REPEATS:TASKLOOM_LLM_LOOP_MIN_REPEATS)%'
 
     # Admin auth (SPEC §4.3): one env-provided password for the UI's session
     # login, one env-provided key for the MCP bearer endpoint, one admin
