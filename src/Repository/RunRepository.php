@@ -97,6 +97,26 @@ final class RunRepository extends ServiceEntityRepository
     }
 
     /**
+     * The newest top-level runs of one task, newest first, bounded — the
+     * history window the undeclared-streak walk reads
+     * (docs/design/SESSION_ENDINGS.md §4): the streak feeds a count that
+     * can never grow past its own bound without a stop breaking the run,
+     * so a bounded window is exact, not an approximation.
+     *
+     * @return list<Run>
+     */
+    public function findNewestForTask(Task $task, int $limit): array
+    {
+        return $this->createQueryBuilder('r')
+            ->where('r.task = :task')
+            ->andWhere('r.parent IS NULL')
+            ->setParameter('task', $task)
+            ->orderBy('r.id', \SortDirection::Descending)
+            ->setMaxResults($limit)
+            ->getQuery()->getResult();
+    }
+
+    /**
      * Recent runs across all tasks, newest first — the run history list
      * (SPEC §8). Top-level runs only, for the same reason findAttention()
      * is: a stepped task's run is its parent aggregator, and the children

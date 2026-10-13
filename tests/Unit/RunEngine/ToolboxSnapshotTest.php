@@ -6,9 +6,11 @@ namespace App\Tests\Unit\RunEngine;
 
 use App\Entity\McpServer;
 use App\Entity\ServerProtocol;
+use App\Entity\SessionDeclarationOutcome;
 use App\Entity\Tool;
 use App\Entity\ToolDefinition;
 use App\RunEngine\ToolboxSnapshot;
+use App\Session\SessionDeclareTool;
 use App\Session\SessionTool;
 use PHPUnit\Framework\TestCase;
 
@@ -112,6 +114,45 @@ final class ToolboxSnapshotTest extends TestCase
 
         self::assertCount(1, $tools);
         self::assertSame('get_weather', $tools[0]->getName(), 'the MCP-only reader (chat) never surfaces a session tool');
+    }
+
+    /**
+     * The filtered declaration round-trips through the REAL snapshot — not
+     * just {@see SessionDeclareTool::fromSnapshot()} — because the rebuild
+     * is where the design note planted its landmine (docs/design/
+     * SESSION_ENDINGS.md §3): a read path that re-derived from the enum
+     * case would silently re-widen a session's vocabulary on the first
+     * rehydrated turn.
+     */
+    public function testTheFilteredDeclarationRoundTripsThroughTheSnapshot(): void
+    {
+        $frozen = SessionDeclareTool::for([SessionDeclarationOutcome::Milestone]);
+
+        $snapshot = ToolboxSnapshot::fromDefinitions([SessionTool::Note, SessionTool::Objective, $frozen]);
+        self::assertSame('harness', $snapshot[2]['origin']);
+        self::assertSame('session_declare', $snapshot[2]['tool']);
+
+        $rebuilt = ToolboxSnapshot::toDefinitions($snapshot);
+
+        self::assertInstanceOf(SessionDeclareTool::class, $rebuilt[2]);
+        self::assertSame(['milestone'], $rebuilt[2]->labels(), 'the frozen set survives the rebuild');
+        self::assertSame($frozen->getSchema(), $rebuilt[2]->getSchema());
+    }
+
+    /**
+     * A snapshot written before the endings existed — or by a hand-built
+     * run — carries the unfiltered declaration: the rebuild reads the
+     * stored enum, which is the full vocabulary, exactly as that run was
+     * frozen. No behavior changes for an already-running slice.
+     */
+    public function testAnUnfilteredDeclarationRebuildsAsTheFullVocabulary(): void
+    {
+        $snapshot = ToolboxSnapshot::fromDefinitions([SessionTool::Note, SessionTool::Objective, SessionTool::Declare]);
+
+        $rebuilt = ToolboxSnapshot::toDefinitions($snapshot);
+
+        self::assertInstanceOf(SessionDeclareTool::class, $rebuilt[2]);
+        self::assertSame(['milestone', 'done', 'blocked'], $rebuilt[2]->labels());
     }
 
     public function testAnUnknownDefinitionIsRefusedLoudly(): void

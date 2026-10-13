@@ -11,6 +11,7 @@ use App\Entity\Tool;
 use App\Entity\ToolboxMode;
 use App\Entity\ToolDefinition;
 use App\Repository\ToolRepository;
+use App\Session\SessionEndings;
 use App\Session\SessionTool;
 
 /**
@@ -31,11 +32,20 @@ use App\Session\SessionTool;
  *
  * resolveStep() is the same resolution for a step's declaration: under
  * run-per-step a step's toolbox IS its child run's toolbox (SPEC §13.1).
+ *
+ * A session's `session_declare` entry rides **filtered**: which endings the
+ * session may make is part of its constitution (§5/§8, docs/design/
+ * SESSION_ENDINGS.md), so the resolver swaps the enum's canonical case for
+ * {@see SessionDeclareTool} — the variant whose schema and description
+ * admit exactly the deployment's endings. The settle path then refuses
+ * against the declared entry's own frozen set, and the prompt renders from
+ * the same one ({@see PromptCompiler}).
  */
 final readonly class ToolboxResolver
 {
     public function __construct(
         private ToolRepository $tools,
+        private SessionEndings $endings = new SessionEndings(),
     ) {
     }
 
@@ -71,7 +81,12 @@ final readonly class ToolboxResolver
             }
         }
 
-        return [...$mcp, ...SessionTool::cases()];
+        // The declaration rides filtered (docs/design/SESSION_ENDINGS.md
+        // §3): the declare entry the wire carries admits exactly the
+        // session's endings, and the settle path refuses against this same
+        // frozen entry. The two write tools are ungoverned — a session's
+        // notes and objective are not part of its ending policy.
+        return [...$mcp, SessionTool::Note, SessionTool::Objective, $this->endings->declareTool()];
     }
 
     /**

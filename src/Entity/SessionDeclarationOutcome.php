@@ -26,4 +26,33 @@ enum SessionDeclarationOutcome: string
     case Milestone = 'milestone';
     case Done = 'done';
     case Blocked = 'blocked';
+
+    /**
+     * What the outcome MEANS, one phrase — the single rendering every
+     * surface builds from (docs/design/SESSION_ENDINGS.md §7, phase 0): the
+     * tool description, the schema's `outcome` description, the prompt's
+     * bullets and the settle path's refusals all compose this rather than
+     * restating it.
+     */
+    public function meaning(): string
+    {
+        return match ($this) {
+            self::Milestone => 'progress made, more to do — the harness launches the next slice',
+            self::Done => 'the session\'s goal is complete',
+            self::Blocked => 'you need a human',
+        };
+    }
+
+    /**
+     * The outcome's bullet for the slice prompt's `## Completion` section
+     * (a session's admissible subset renders its bullets only).
+     */
+    public function bullet(): string
+    {
+        return match ($this) {
+            self::Milestone => '- milestone — progress made, more to do. The harness launches the next slice automatically; the summary is what it carries to the operator.',
+            self::Done => '- done — the session\'s goal is complete; the session ends.',
+            self::Blocked => '- blocked — you need a human; the session stops for attention.',
+        };
+    }
 }

@@ -60,6 +60,14 @@ parameters:
     # — a smaller bound than a run's, because a slice is a bounded unit and
     # its failure mode is "stop and ask", not "keep going".
     TASKLOOM_SESSION_SLICE_BUDGET: 25
+    # Session endings (docs/design/SESSION_ENDINGS.md): which declarations a
+    # session's slices may make, what a settlement WITHOUT one means, and
+    # the streak bound that keeps `continue` from looping ever. The defaults
+    # are the pre-knob behavior exactly: every ending, and `stop`. An
+    # endless session is `endings=milestone,blocked` + `undeclared=continue`.
+    TASKLOOM_SESSION_ENDINGS: 'milestone,done,blocked'
+    TASKLOOM_SESSION_UNDECLARED: 'stop'
+    TASKLOOM_SESSION_MAX_UNDECLARED: 3
     TASKLOOM_STEP_BUDGET: 50
     TASKLOOM_TOOL_RETRIES: 2
     TASKLOOM_CIRCUIT_BREAKER: 3
@@ -280,6 +288,20 @@ services:
             $hotCap: '%env(int:default:TASKLOOM_SESSION_HOT:TASKLOOM_SESSION_HOT)%'
             $coldCap: '%env(int:default:TASKLOOM_SESSION_COLD:TASKLOOM_SESSION_COLD)%'
             $writeMaxChars: '%env(int:default:TASKLOOM_SESSION_WRITE_MAX_CHARS:TASKLOOM_SESSION_WRITE_MAX_CHARS)%'
+
+    # The session's endings constitution (docs/design/SESSION_ENDINGS.md):
+    # one derivation — which declarations a session may make, what silence
+    # means, and the streak bound — read by the resolver (the frozen
+    # `session_declare` entry), the slice prompt, the settle path and the
+    # derived state. Freezing is per slice: the resolver bakes the filtered
+    # entry into the toolbox snapshot and the slice engine freezes the
+    # policy into the checkpoint, so a knob that moves mid-slice cannot
+    # change what that slice's ending means.
+    App\Session\SessionEndings:
+        arguments:
+            $endings: '%env(default:TASKLOOM_SESSION_ENDINGS:TASKLOOM_SESSION_ENDINGS)%'
+            $undeclared: '%env(default:TASKLOOM_SESSION_UNDECLARED:TASKLOOM_SESSION_UNDECLARED)%'
+            $maxUndeclared: '%env(int:default:TASKLOOM_SESSION_MAX_UNDECLARED:TASKLOOM_SESSION_MAX_UNDECLARED)%'
 
     # The session slice engine (docs/design/SESSION_TASKS.md §8, build order
     # step 4): derives a session's state, creates slices, and launches the

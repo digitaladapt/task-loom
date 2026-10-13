@@ -46,6 +46,9 @@ final class DeploymentDefaultsTest extends WebTestCase
         'TASKLOOM_SESSION_WRITE_MAX_CHARS' => 2000,
         'TASKLOOM_SESSION_MAX_MEMORY_PCT' => 10,
         'TASKLOOM_SESSION_SLICE_BUDGET' => 25,
+        'TASKLOOM_SESSION_ENDINGS' => 'milestone,done,blocked',
+        'TASKLOOM_SESSION_UNDECLARED' => 'stop',
+        'TASKLOOM_SESSION_MAX_UNDECLARED' => 3,
         'TASKLOOM_STEP_BUDGET' => 50,
         'TASKLOOM_TOOL_RETRIES' => 2,
         'TASKLOOM_CIRCUIT_BREAKER' => 3,
@@ -149,6 +152,34 @@ final class DeploymentDefaultsTest extends WebTestCase
                 \sprintf('ChatContextWindow::$%s should resolve to the deployment value (%s).', $property, $value),
             );
         }
+    }
+
+    /**
+     * The session endings constitution (docs/design/SESSION_ENDINGS.md)
+     * resolves from the deployment like every other knob — and the SERVICE
+     * agrees with whatever the environment resolved to, which is the
+     * property that holds whether or not a value was supplied.
+     */
+    public function testTheSessionEndingsResolveTheirKnobsFromTheDeployment(): void
+    {
+        $container = static::getContainer();
+
+        $endings = $container->get('test.service_container')->get(\App\Session\SessionEndings::class);
+        \assert($endings instanceof \App\Session\SessionEndings);
+
+        self::assertSame(
+            array_map(trim(...), explode(',', (string) $container->getParameter('TASKLOOM_SESSION_ENDINGS'))),
+            $endings->labels(),
+            'the endings service must speak the deployment\'s endings',
+        );
+        self::assertSame(
+            $container->getParameter('TASKLOOM_SESSION_UNDECLARED'),
+            $endings->undeclared->value,
+        );
+        self::assertSame(
+            $container->getParameter('TASKLOOM_SESSION_MAX_UNDECLARED'),
+            $endings->maxUndeclared,
+        );
     }
 
     /**

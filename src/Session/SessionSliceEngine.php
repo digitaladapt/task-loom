@@ -8,6 +8,7 @@ use App\Entity\ErrorClass;
 use App\Entity\Run;
 use App\Entity\RunEvent;
 use App\Entity\RunEventType;
+use App\Entity\RunStatus;
 use App\Entity\RunTrigger;
 use App\Entity\SessionDeclarationOutcome;
 use App\Entity\Task;
@@ -69,6 +70,7 @@ final readonly class SessionSliceEngine
         private EntityManagerInterface $em,
         private MessageBusInterface $bus,
         private array $budgets = [],
+        private SessionEndings $endings = new SessionEndings(),
     ) {
     }
 
@@ -108,13 +110,42 @@ final readonly class SessionSliceEngine
             return SessionState::Fresh;
         }
 
-        // Newest first (findForTask): the last slice's declaration decides.
-        return match ($runs[0]->getDeclarationOutcome()) {
+        // Newest first (findForTask): the last slice's declaration decides —
+        // and when there is none, the policy the slice froze does
+        // (docs/design/SESSION_ENDINGS.md §4): a succeeded, undeclared
+        // slice under `continue` is the same owed-next-slice shape a
+        // milestone is, so a lost launch is repaired by the sweep the same
+        // way. Everything that actually went wrong — a failed turn, an
+        // exhausted budget, a tripped breaker — is not `succeeded` and
+        // still derives `stopped`: §8's "no automatic slice retry" stays
+        // true for everything that broke.
+        $last = $runs[0];
+
+        return match ($last->getDeclarationOutcome()) {
             SessionDeclarationOutcome::Milestone => SessionState::Owed,
             SessionDeclarationOutcome::Done => SessionState::Complete,
             SessionDeclarationOutcome::Blocked => SessionState::Blocked,
-            null => SessionState::Stopped,
+            null => self::continuesUndeclared($last) ? SessionState::Owed : SessionState::Stopped,
         };
+    }
+
+    /**
+     * Whether a terminal slice is an undeclared continuation: it succeeded
+     * with no declaration, and its frozen policy says an undeclared
+     * settlement continues. Read from the checkpoint — the same frozen
+     * source the settlement itself judged by.
+     */
+    private static function continuesUndeclared(Run $slice): bool
+    {
+        if (RunStatus::Succeeded !== $slice->getStatus()) {
+            return false;
+        }
+
+        $undeclared = $slice->getCheckpoint()['undeclared'] ?? null;
+
+        return $undeclared instanceof SessionUndeclared
+            ? SessionUndeclared::Continue === $undeclared
+            : SessionUndeclared::Continue->value === $undeclared;
     }
 
     /**
@@ -300,7 +331,14 @@ final readonly class SessionSliceEngine
                 stepBudget: $this->budgets['slice_budget'] ?? 25,
                 toolRetries: $this->budgets['tool_retries'] ?? 2,
                 circuitBreakerThreshold: $this->budgets['circuit_breaker'] ?? 3,
-                promptHead: $this->prompts->compileForSlice($task, $tools),
+                promptHead: $this->prompts->compileForSlice($task, $tools, $this->endings),
+                // The endings policy is constitution, frozen per slice
+                // (docs/design/SESSION_ENDINGS.md §2): the settlement's
+                // judgment — and the streak it counts — read it from the
+                // checkpoint, so a knob that moves mid-slice cannot change
+                // what this slice's ending means.
+                undeclared: $this->endings->undeclared,
+                maxUndeclared: $this->endings->maxUndeclared,
             ))->toCheckpoint());
         } catch (ToolboxResolutionException $e) {
             if (!$recordFailures) {

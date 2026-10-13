@@ -44,8 +44,9 @@ use Symfony\Component\Messenger\MessageBusInterface;
  *    final consumer, an uncommitted settlement) and apply it. This is what
  *    no turn re-dispatch can see: repair at the graph layer.
  * 3. **Session pass** — for every enabled session, re-derive whether the
- *    next slice is owed (the last slice declared a `milestone` but no
- *    successor committed) and launch it. Same posture as the graph
+ *    next slice is owed (the last slice settled owing more work — a declared
+ *    `milestone`, or an undeclared continuation under the `continue` policy —
+ *    but no successor committed) and launch it. Same posture as the graph
  *    reconcile, one level up: a session's slices are its graph.
  * 4. **Turn sweep** — for every active turn-executing run, re-derive its
  *    owed turn and dispatch; the case a purged queue leaves behind.
@@ -311,8 +312,9 @@ final class RunRequeueCommand extends Command
     /**
      * The session half of the sweep (docs/design/SESSION_TASKS.md §8): for
      * every enabled session, re-derive whether the next slice is owed — the
-     * last slice declared a `milestone` and no successor committed — and
-     * launch it. Same posture as the graph reconcile: it repairs what no
+     * last slice settled owing more work (a declared `milestone`, or an
+     * undeclared continuation under `continue`) and no successor committed —
+     * and launch it. Same posture as the graph reconcile: it repairs what no
      * turn dispatch can see (an owed slice whose launch was lost with the
      * process that owed it), and converges to nothing when healthy.
      *

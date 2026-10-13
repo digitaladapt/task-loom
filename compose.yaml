@@ -123,6 +123,13 @@ x-taskloom-env: &taskloom-env
   # A session slice's exchange budget (build order step 4): exchanges per
   # slice before it settles without declaring — "stop and ask a human".
   TASKLOOM_SESSION_SLICE_BUDGET: ${TASKLOOM_SESSION_SLICE_BUDGET:-25}
+  # The session's endings (docs/design/SESSION_ENDINGS.md): which
+  # declarations its slices may make, what a settlement without one means,
+  # and the streak bound on `continue`. Defaults keep the pre-knob
+  # behavior: every ending, and stop.
+  TASKLOOM_SESSION_ENDINGS: ${TASKLOOM_SESSION_ENDINGS:-milestone,done,blocked}
+  TASKLOOM_SESSION_UNDECLARED: ${TASKLOOM_SESSION_UNDECLARED:-stop}
+  TASKLOOM_SESSION_MAX_UNDECLARED: ${TASKLOOM_SESSION_MAX_UNDECLARED:-3}
   # Absolute URLs in non-HTTP contexts: must match the public-facing address.
   DEFAULT_URI: ${DEFAULT_URI:-http://localhost:8080}
   # SQLite (WAL) on the data volume; the lanes share this file.

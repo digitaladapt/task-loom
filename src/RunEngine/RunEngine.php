@@ -19,16 +19,19 @@ use App\Entity\Tool;
 use App\Entity\ToolDefinition;
 use App\Llm\LlmClientInterface;
 use App\Llm\LlmRequestException;
+use App\Llm\LlmResponse;
 use App\Message\LlmTurnMessage;
 use App\Message\SessionTurnMessage;
 use App\Message\ToolTurnMessage;
 use App\Repository\RunRepository;
 use App\Session\SessionConstraintException;
+use App\Session\SessionDeclareTool;
 use App\Session\SessionMemoryRenderer;
 use App\Session\SessionMemoryWriteException;
 use App\Session\SessionSliceEngine;
 use App\Session\SessionTool;
 use App\Session\SessionToolRunner;
+use App\Session\SessionUndeclared;
 use App\Toolbox\ToolSchemaValidator;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\EntityNotFoundException;
@@ -658,17 +661,32 @@ final class RunEngine
 
         if (!$response->wantsToolCall()) {
             // Terminal message: completion must BE the result (SPEC §5.4).
-            // For a session slice the completion IS the declaration — a
-            // terminal message settles the slice WITHOUT one, which §8
-            // treats as "the session stops and needs a human": loud in the
-            // ledger, no retry, and no Completion artifact that would
-            // pretend the slice delivered anything.
+            // For a session slice the completion IS the declaration — what a
+            // terminal message means instead is the session's `undeclared`
+            // policy, frozen in the checkpoint (docs/design/
+            // SESSION_ENDINGS.md §4): `stop` (the default, and the shape
+            // every deployment had before the knob) settles the slice
+            // WITHOUT a declaration and stops the session for a human —
+            // loud in the ledger, no retry, and no Completion artifact that
+            // would pretend the slice delivered anything; `continue`
+            // settles a non-empty message as a continuation and launches
+            // the next slice, bounded by a counted streak.
             //
             // Response event and terminal status commit together — and, for
             // a step child, the graph's advancement commits with them.
             $sessionSlice = TaskKind::Session === $run->getTask()->getKind();
 
-            $this->commitTerminal($run, $async, function () use ($run, $response, $responsePayload, $sessionSlice): void {
+            // Under `continue` the streak of consecutive undeclared
+            // settlements bounds the loop (docs/design/SESSION_ENDINGS.md
+            // §4): it is DERIVED from the committed rows here — a stored
+            // counter would be a second source of truth about progress —
+            // and read before the terminal commit opens, so the settlement
+            // itself is unencumbered.
+            $priorUndeclaredStreak = $sessionSlice && SessionUndeclared::Continue === $state->undeclared
+                ? $this->undeclaredStreakFor($run, $state->maxUndeclared)
+                : 0;
+
+            $this->commitTerminal($run, $async, function () use ($run, $state, $response, $responsePayload, $sessionSlice, $priorUndeclaredStreak): void {
                 // A generation a guard cut short still has the stop recorded
                 // on its response event (the error class and the timing ride
                 // there), so the run's own completion stays "what the model
@@ -676,12 +694,7 @@ final class RunEngine
                 $this->appendEvent($run, RunEventType::LlmResponse, $responsePayload, errorClass: $response->stop?->errorClass(), durationMs: $response->durationMs);
 
                 if ($sessionSlice) {
-                    $run->markIncomplete();
-                    $this->appendEvent(
-                        $run,
-                        RunEventType::Failure,
-                        ['reason' => 'terminal message with no session_declare — a slice settles by declaration; the session stops for a human (docs/design/SESSION_TASKS.md §8)'],
-                    );
+                    $this->settleUndeclaredSlice($run, $state, $response, $priorUndeclaredStreak);
                 } elseif (null !== $response->content && '' !== trim($response->content)) {
                     // Partial output is output: a cut that captured a
                     // terminal message still completes the run with what was
@@ -784,7 +797,7 @@ final class RunEngine
         // standard error feedback, so the model re-issues it cleanly.
         $refuseRound = false;
         foreach ($pending->calls as $call) {
-            if (($toolMap[$call['name']] ?? null) === SessionTool::Declare) {
+            if (null !== $this->declarationTool($toolMap[$call['name']] ?? null)) {
                 $refuseRound = \count($pending->calls) > 1;
                 break;
             }
@@ -794,14 +807,15 @@ final class RunEngine
             while ($pending->nextIndex < \count($pending->calls)) {
                 $call = $pending->calls[$pending->nextIndex];
                 $tool = $toolMap[$call['name']] ?? null;
+                $declaration = $this->declarationTool($tool);
 
-                if (SessionTool::Declare === $tool) {
+                if (null !== $declaration) {
                     if ($refuseRound) {
                         $pending->results[] = $this->refuseCall($run, $call, self::DECLARATION_ALONE_DETAIL);
                     } else {
-                        $errors = ToolSchemaValidator::validate($tool->getSchema(), $call['arguments']);
+                        $errors = ToolSchemaValidator::validate($declaration->getSchema(), $call['arguments']);
                         $outcome = $this->declaredOutcome($call['arguments']);
-                        if ([] === $errors && null !== $outcome) {
+                        if ([] === $errors && null !== $outcome && $declaration->allows($outcome)) {
                             // The declaration is the completion: settle the
                             // slice — and, for a milestone, launch the next
                             // slice — in one terminal commit, and stop the
@@ -809,9 +823,19 @@ final class RunEngine
                             return $this->settleSlice($run, $state, $call, $outcome, $async);
                         }
 
-                        $detail = [] !== $errors
-                            ? implode('; ', $errors)
-                            : 'outcome must be one of: milestone, done, blocked';
+                        // For a well-formed call naming an outcome the session
+                        // cannot make, prefer the endings-aware refusal over the
+                        // schema validator's generic enum message — "done is not
+                        // available; declare milestone instead" teaches, while
+                        // "must be one of: milestone" reads as a typo. Any
+                        // OTHER shape error (missing summary, blank, extras)
+                        // stays the validator's, whose message is exact.
+                        $detail = match (true) {
+                            null === $outcome => [] !== $errors ? implode('; ', $errors) : 'outcome must be one of: '.$declaration->labelList(),
+                            !$declaration->allows($outcome) => $declaration->describeUnavailable($outcome),
+                            default => implode('; ', $errors),
+                        };
+
                         $pending->results[] = $this->refuseCall($run, $call, $detail);
                     }
                 } elseif ($refuseRound) {
@@ -888,10 +912,11 @@ final class RunEngine
     }
 
     /**
-     * The declaration's outcome from its schema-validated arguments, or
-     * null when the value is not one of the three (a schema the validator
-     * could not enforce, or a hand-built call): the caller refuses with
-     * feedback rather than guessing.
+     * The declaration's outcome from its arguments, or null when the value
+     * is not a vocabulary member (a schema the validator could not enforce,
+     * or a hand-built call): the caller refuses with feedback rather than
+     * guessing. Membership in the SESSION's endings is a separate gate —
+     * the frozen tool's own ({@see SessionDeclareTool::allows()}).
      *
      * @param array<string, mixed> $arguments
      */
@@ -900,6 +925,18 @@ final class RunEngine
         $outcome = $arguments['outcome'] ?? null;
 
         return \is_string($outcome) ? SessionDeclarationOutcome::tryFrom($outcome) : null;
+    }
+
+    /**
+     * The declaration tool a call names, or null when the call is not the
+     * declaration. Since the endings freeze (docs/design/SESSION_ENDINGS.md
+     * §3) this is always the FILTERED {@see SessionDeclareTool} variant:
+     * the snapshot's `session_declare` harness entry rebuilds as one,
+     * whatever it was frozen as.
+     */
+    private function declarationTool(?ToolDefinition $tool): ?SessionDeclareTool
+    {
+        return $tool instanceof SessionDeclareTool ? $tool : null;
     }
 
     /**
@@ -982,6 +1019,117 @@ final class RunEngine
     }
 
     /**
+     * Settle a slice whose terminal message carried NO declaration
+     * (docs/design/SESSION_TASKS.md §8's *(none)* row, docs/design/
+     * SESSION_ENDINGS.md §4). What that means is the policy the slice
+     * froze in its checkpoint:
+     *
+     *  - `stop` (the built-in default, and the shape every deployment had
+     *    before the knob): the session stops for a human — the slice
+     *    settles `incomplete` with a loud ledger line, and nothing
+     *    launches. No retry.
+     *  - `continue`: a non-empty message is a legitimate settlement. The
+     *    slice succeeds with the message as its Completion artifact, a
+     *    typed `undeclared` marker records the pattern for the digest, and
+     *    the next slice launches in this same commit — UNLESS the counted
+     *    streak reaches `maxUndeclared`, which stops the session for a
+     *    human just as loudly (the circuit breaker's shape: a count, not a
+     *    judgment).
+     *
+     * An EMPTY message stops under either policy: a slice that ends saying
+     * nothing is a stall, not a settlement. And a message the streaming
+     * guards CUT SHORT stops under either policy too — a cut is the harness
+     * stopping a generation that misbehaved, not the model choosing to end
+     * its slice, and continuing past it would defeat the guard that fired;
+     * the stop's class and detail ride the failure so the truncation is
+     * visible.
+     *
+     * Runs inside the terminal commit closure; the caller flushes after.
+     */
+    private function settleUndeclaredSlice(Run $run, LoopState $state, LlmResponse $response, int $priorUndeclaredStreak): void
+    {
+        $content = $response->content;
+        $hasContent = null !== $content && '' !== trim($content);
+
+        // A generation the streaming guards cut short (looping, silent, past
+        // the duration cap, a failed stream) is not a settlement: the model
+        // did not choose to end its slice — the harness stopped it. It stops
+        // the session for a human under EITHER policy, with the stop's own
+        // class and detail on the failure so the truncation is visible
+        // rather than silent; continuing past a cut would defeat the very
+        // guard that fired. (A cut that captured nothing at all never
+        // reaches here: the client throws, and the slice settles failed with
+        // the named reason.)
+        if (null !== $response->stop) {
+            $run->markIncomplete();
+            $this->appendEvent(
+                $run,
+                RunEventType::Failure,
+                ['reason' => \sprintf('terminal message cut by a guard: %s — the slice declared nothing; the session stops for a human (docs/design/SESSION_ENDINGS.md §4)', $response->stop->detail)],
+                errorClass: $response->stop->errorClass(),
+            );
+
+            return;
+        }
+
+        $continues = $hasContent
+            && SessionUndeclared::Continue === $state->undeclared
+            && $priorUndeclaredStreak + 1 < $state->maxUndeclared;
+
+        if ($continues) {
+            $run->markSucceeded();
+            $this->appendEvent($run, RunEventType::Undeclared, ['streak' => $priorUndeclaredStreak + 1, 'max' => $state->maxUndeclared]);
+            $this->appendEvent($run, RunEventType::Completion, ['result' => $content]);
+            $this->em->flush();
+
+            // The continuation's launch, exactly as a milestone's: the
+            // settled slice and the successor's carrier live or die in
+            // this one commit (§8's advancement contract).
+            $slices = $this->slices ?? throw new \LogicException('The run engine has no slice engine — an undeclared continuation cannot launch its next slice. Wire App\\Session\\SessionSliceEngine in services.yaml.');
+            $slices->advance($run);
+
+            return;
+        }
+
+        $reason = match (true) {
+            !$hasContent => 'terminal message with no session_declare and no content — a slice that ends saying nothing is a stall, not a settlement; the session stops for a human (docs/design/SESSION_ENDINGS.md §4)',
+            SessionUndeclared::Continue === $state->undeclared => \sprintf('terminal message with no session_declare — %d consecutive undeclared settlements; the session stops for a human (docs/design/SESSION_ENDINGS.md §4)', $priorUndeclaredStreak + 1),
+            default => 'terminal message with no session_declare — a slice settles by declaration; the session stops for a human (docs/design/SESSION_TASKS.md §8)',
+        };
+
+        $run->markIncomplete();
+        $this->appendEvent($run, RunEventType::Failure, ['reason' => $reason]);
+    }
+
+    /**
+     * The count of consecutive undeclared settlements directly preceding
+     * this slice — the newest-first walk of its committed siblings that
+     * stops at the first slice that declared or did not succeed
+     * (docs/design/SESSION_ENDINGS.md §4). A succeeded slice with no
+     * declaration IS an undeclared continuation; the walk is bounded
+     * because the streak it feeds can never grow past its own ceiling
+     * without a stop breaking the run.
+     */
+    private function undeclaredStreakFor(Run $run, int $limit): int
+    {
+        $streak = 0;
+
+        foreach ($this->runs->findNewestForTask($run->getTask(), $limit + 1) as $candidate) {
+            if ($candidate->getId() === $run->getId()) {
+                continue; // the slice settling right now is not history yet
+            }
+
+            if (RunStatus::Succeeded !== $candidate->getStatus() || null !== $candidate->getDeclarationOutcome()) {
+                break;
+            }
+
+            ++$streak;
+        }
+
+        return $streak;
+    }
+
+    /**
      * Execute one tool call: validate → dispatch → result, with retries
      * feeding errors back to the model (§5.1, §5.2).
      *
@@ -1006,6 +1154,13 @@ final class RunEngine
         $arguments = $call['arguments'];
 
         $tool = $toolMap[$toolName] ?? null;
+
+        if ($tool instanceof SessionDeclareTool) {
+            // The declaration settles through the tool turn's settle path
+            // and is intercepted there; reaching dispatch would be a
+            // wiring bug.
+            throw new \LogicException('session_declare settles the slice through the engine\'s settle path — it is never dispatched as an ordinary tool call.');
+        }
 
         if ($tool instanceof SessionTool) {
             return $this->executeHarnessToolCall($run, $tool, $call);

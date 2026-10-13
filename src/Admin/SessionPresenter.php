@@ -76,7 +76,7 @@ final readonly class SessionPresenter
             SessionState::Working => SessionState::Paused === $state
                 ? 'Paused mid-slice: the in-flight slice finishes on its own; no next slice launches until you enable it again.'
                 : 'A slice is in flight on the session lane; the next starts only if this one declares a milestone.',
-            SessionState::Owed => 'The last slice declared a milestone and the next slice is due — it launches automatically; Resume exists to re-launch it if that dispatch was ever lost.',
+            SessionState::Owed => 'The last slice settled owing more work — a declared milestone, or an undeclared continuation — and the next slice is due; it launches automatically. Resume exists to re-launch it if that dispatch was ever lost.',
             SessionState::Complete => 'The last slice declared done — the session is complete.'.
                 ' A done session is terminal: the work continues as a new session, or by approving a replacement.',
             SessionState::Blocked => 'The last slice declared blocked — it needs a human. Resume launches the next slice once you have done what it asked for.',

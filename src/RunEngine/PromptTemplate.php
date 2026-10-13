@@ -83,29 +83,15 @@ final readonly class PromptTemplate
         TXT;
 
     /**
-     * A session slice's completion text (docs/design/SESSION_TASKS.md §8).
-     * Harness-owned rather than configurable: a slice ends in a typed
-     * `session_declare` call, not a prose final message, and an operator's
-     * run-level completion prose would be actively wrong here. Kept beside
-     * DEFAULT_COMPLETION so the two contracts read side by side.
+     * A session slice's completion text used to live here as
+     * SLICE_COMPLETION. It is now DERIVED — one of the five hand-written
+     * restatements of the declaration vocabulary the endings work collapsed
+     * (docs/design/SESSION_ENDINGS.md): the text renders from
+     * {@see \App\Session\SessionEndings::completionText()}, bullets only
+     * for the endings the session actually has. Kept out of this class on
+     * purpose — PromptTemplate's knobs are deployment-wide prompt text,
+     * while a slice's ending contract is constitution, frozen per session.
      */
-    public const string SLICE_COMPLETION = <<<'TXT'
-        This is a slice: end it by calling session_declare with its outcome
-        and a summary of the work.
-
-        - milestone — progress made, more to do. The harness launches the
-          next slice automatically; the summary is what it carries to the
-          operator.
-        - done — the session's goal is complete; the session ends.
-        - blocked — you need a human; the session stops for attention.
-
-        Call session_declare ALONE, with no other tool calls in that round.
-        If the aim has changed, write it first with session_objective.
-
-        A slice that ends without a declaration stops the session for a
-        human — it is never treated as a completion.
-        TXT;
-
     private ?string $preamble;
     private ?string $completion;
     private bool $listTools;

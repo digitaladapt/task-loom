@@ -533,7 +533,7 @@ Two kinds, same engine:
 | Workspace | — | optional, and an ordinary MCP server; a session runs with none |
 | Steering | replacement task (§4.4) | same, **plus** live memory edits by the operator: the objective, and the notes |
 | Priority | `llm` lane | `session` lane, below `llm`: chat > task > session (no separate concurrency knob — a paused/blocked/done session has no lane message, so the lane alone orders the work) |
-| Completion | justified completion declaration, then done | `session_declare`: `milestone` → next slice; `done` → complete; `blocked` → attention; a settlement **without** a declaration stops the session for a human |
+| Completion | justified completion declaration, then done | `session_declare`: `milestone` → next slice; `done` → complete; `blocked` → attention; a settlement **without** a declaration disposes by the session's endings policy — `stop` (default): the session stops for a human; `continue`: the slice settles succeeded and the next slice launches, bounded by a counted streak (`SESSION_ENDINGS.md`) |
 
 **A session is a scheduler that launches runs.** Each slice is an ordinary `Run`
 through the existing engine — same two-phase LLM/tool loop, same claim protocol,
@@ -545,11 +545,13 @@ stored), the declaration that settles a slice, and the launch of the next one.
 Nothing polls; in steady state nothing is ever "owed".
 
 **Derived session states:** `fresh` (enabled, no slice has run), `working` (a
-slice in flight), `owed` (the last declaration was `milestone`;
-launched at settlement, re-derived by `app:run:requeue` after a lost
-dispatch), `complete` (last declaration `done`), `blocked` (last declaration
-`blocked`), `stopped` (the last slice settled without a declaration — an
-exhausted slice budget, a failed turn, a tripped breaker; loud, and no retry),
+slice in flight), `owed` (the last slice settled owing more work — a declared
+`milestone`, or an undeclared continuation under the `continue` policy; launched
+at settlement, re-derived by `app:run:requeue` after a lost dispatch), `complete`
+(last declaration `done`), `blocked` (last declaration `blocked`), `stopped`
+(the last slice settled without a declaration in a way the policy does not
+continue — an exhausted slice budget, a failed turn, a tripped breaker, an
+empty message, or an undeclared streak that hit its bound; loud, and no retry),
 and `paused` (the task is disabled — the operator's switch; the current slice
 finishes, no more launch).
 
