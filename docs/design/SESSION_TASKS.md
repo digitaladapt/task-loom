@@ -410,6 +410,22 @@ for slices too. And it is **alone in its round**: a tool round that arrives with
 standard retry path) — the settle path must have no ambiguity about which calls
 ran, and nothing comes after the declaration.
 
+**Which endings a session has is constitution (added 2026-10-13,
+`SESSION_ENDINGS.md`).** The three outcomes are the closed vocabulary; a
+session may be admitted a subset of them, with the choice frozen per slice
+like everything constitutional: the resolver swaps the canonical Declare
+case for the filtered `session_declare` entry (`App\Session\SessionDeclareTool`)
+whose schema and description admit exactly the session's endings, and the
+settle path refuses against that same frozen set — a declaration the session
+cannot make comes back naming what it *can* ("done" is not available to
+this session — it has no completion; ... The only outcome it can declare:
+milestone"). The slice prompt renders from the same derivation, so the prose
+cannot teach an ending the wire refuses. The deployment knobs are
+`TASKLOOM_SESSION_ENDINGS` / `TASKLOOM_SESSION_UNDECLARED` /
+`TASKLOOM_SESSION_MAX_UNDECLARED` (§11); a session with no `done` runs until
+the operator stops it, and the absence is stated in the prompt rather than
+implied.
+
 The model's write surface is append-and-replace only: it cannot delete a note,
 edit history, demote, or pin. Those are operator actions (§6); the asymmetry is
 deliberate.
@@ -607,7 +623,7 @@ A slice ends in a **typed declaration** — a harness tool call (§5), not prose
 | `milestone` | progress made, more to do | settle the slice; launch the next slice **in the same commit** |
 | `done` | the project is complete | settle; the session is complete (terminal) |
 | `blocked` | needs a human | settle; the session is blocked — it appears for attention |
-| *(none)* | the slice settled without declaring (failed / incomplete / needs_attention) | the session stops and needs a human — loud, no retry |
+| *(none)* | the slice settled without declaring — the policy decides: `stop` (default) or `continue` (below) | `stop`: the session stops and needs a human — loud, no retry. `continue`: a non-empty message settles the slice succeeded and the next slice launches, bounded by a counted streak (§8.1) |
 
 `milestone` is where SPEC §9's "model declares milestone/done" becomes concrete.
 The declaration carries the go/no-go **and the slice's summary** — the summary is
@@ -615,6 +631,35 @@ the slice's artifact, what SPEC §5.4's completion declaration is for a run, and
 what the ledger and digest show. It deliberately does **not** carry state for the
 next slice: the transcript does not cross (§2). If the aim has changed, the model
 writes it (`session_objective`) before declaring.
+
+### 8.1 Silence: `stop` (the default) and `continue`
+
+A slice that ends with a terminal message and no declaration is the *(none)*
+row, and its disposal is a per-session policy (`SESSION_ENDINGS.md` §4),
+frozen in the slice's checkpoint beside the budgets:
+
+- **`stop`** — the built-in default, and the shape every deployment had
+  before the knob: the slice settles `incomplete` with a loud ledger line
+  ("a slice settles by declaration; the session stops for a human"), nothing
+  launches, and no Completion artifact pretends the slice delivered anything.
+- **`continue`** — an undeclared ending is a legitimate settlement: a
+  non-empty message settles the slice **succeeded** with the message as its
+  Completion artifact, a typed `undeclared` ledger marker records the
+  pattern (streak and bound), and the next slice launches in the settlement
+  commit, exactly as a `milestone` does. The derived state honours the
+  policy — a succeeded, undeclared slice under `continue` is `owed`, so the
+  requeue sweep repairs a lost launch the same way — and everything that
+  actually went wrong (an exhausted slice budget, a failed turn, a tripped
+  breaker) is not `succeeded` and still derives `stopped`: the no-retry rule
+  above holds for everything that broke.
+- **An empty message stops under either policy.** A slice that ends saying
+  nothing is a stall, not a settlement.
+- **The streak is the bound.** `TASKLOOM_SESSION_MAX_UNDECLARED`
+  consecutive undeclared settlements stop the session for a human — a
+  counted streak, the circuit breaker's shape (a count, not a judgment,
+  and no semantic progress detector, which would be a second source of
+  truth about progress). The count is derived from the committed rows at
+  settlement time — never stored, for the same reason the state is not.
 
 **The next slice is launched at the settlement commit.** When a slice settles
 with `milestone`, the next slice's run row and its first lane message commit in
@@ -644,6 +689,14 @@ as the scheduler treats a classified launch failure (SPEC §14.5): loud, never a
 silent retry storm. Auto-retry would also be a second, invisible source of truth
 about progress, which is the kind of thing this project refuses on principle. The
 operator's **resume** is one action, on a page that says why it stopped.
+
+The `continue` policy (§8.1) narrows this rule without bending it: it makes a
+*clean* undeclared ending — a non-empty terminal message, a slice that did not
+fail — a legitimate settlement the session continues from, bounded by the
+counted streak. Everything the paragraph above lists is untouched: those
+settlements are not clean (`incomplete` / `needs_attention`), they derive
+`stopped` under either policy, and nothing retries them. What `continue`
+changes is what "undeclared" *means*, not what "went wrong" means.
 
 Lifecycle controls (operator): **start** (enable + launch slice 1), **pause**
 (disable — the current slice finishes, no more are launched), **resume** (launch
@@ -720,6 +773,9 @@ a requirement. Revisit alongside the ceiling if a churning loop is ever observed
 | Env | Default | Meaning |
 |---|---|---|
 | `TASKLOOM_SESSION_SLICE_BUDGET` | 25 | steps per slice before it settles without declaring |
+| `TASKLOOM_SESSION_ENDINGS` | `milestone,done,blocked` | the declarations a session's slices may make (`SESSION_ENDINGS.md`) |
+| `TASKLOOM_SESSION_UNDECLARED` | `stop` | what a settlement without a declaration means: `stop` (human) or `continue` (next slice) |
+| `TASKLOOM_SESSION_MAX_UNDECLARED` | 3 | consecutive undeclared settlements before a `continue` session stops for a human |
 | `TASKLOOM_SESSION_HOT` | 5 | notes injected per session |
 | `TASKLOOM_SESSION_COLD` | 25 | notes retained per session |
 | `TASKLOOM_SESSION_WRITE_MAX_CHARS` | 2000 | per-write size cap (objective and notes) |

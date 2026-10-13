@@ -56,6 +56,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behaviour, a live SSE fixture server for the cancel/disconnect proof, and
   functional coverage of partial-as-output on both the chat and run ledgers.
 
+- **Session endings — which declarations a session may make is constitution,
+  and silence has a policy (`docs/design/SESSION_ENDINGS.md`, phases 0 and 1;
+  the note is marked built).** The design note that started as "an endless
+  session that must never declare `done`" lands as three deployment knobs.
+  Every session's slice now freezes its **endings** — a subset of
+  `milestone` / `done` / `blocked` (`TASKLOOM_SESSION_ENDINGS`) — and what an
+  undeclared settlement means (`TASKLOOM_SESSION_UNDECLARED`: `stop`, the
+  forever-default, or `continue`), bounded by a counted streak
+  (`TASKLOOM_SESSION_MAX_UNDECLARED`, default 3; the circuit breaker's shape,
+  because a semantic progress detector would be a second source of truth).
+
+  **One derivation, three enforcement layers.** The five hand-written
+  restatements of the declaration vocabulary collapsed to one:
+  `SessionDeclarationOutcome::meaning()` / `bullet()` hold the meanings and
+  `SessionEndings` renders every surface from them. The wire carries a
+  filtered `session_declare` entry (`SessionDeclareTool`) whose schema and
+  description admit exactly the session's endings — frozen into the toolbox
+  snapshot, with the read path honouring the stored entry (the design note's
+  landmine: re-deriving would silently re-widen the vocabulary on the first
+  rehydrated turn; pinned by `ToolboxSnapshotTest`). The settle path refuses
+  a declaration the session cannot make **with the alternatives named**
+  ("done" is not available to this session — it has no completion;
+  declare `milestone`"), and the slice prompt teaches only the frozen set:
+  bullets for what exists, an explicit "this session has no completion"
+  when `done` does not. A `blocked` refusal tells the model how else to
+  reach the operator (alert tool or a note) — a session that cannot park
+  itself is told the alternatives, not just refused.
+
+  **`continue`, precisely.** A non-empty terminal message settles the slice
+  **succeeded** with the message as its Completion artifact, records a typed
+  `undeclared` marker (streak + bound) so the digest can count the pattern,
+  and launches the next slice in the settlement commit — the same
+  advancement contract a `milestone` rides. The derived state honours the
+  policy (`owed` after a continuation, so the requeue sweep repairs a lost
+  launch identically), and everything that actually went wrong — an
+  exhausted slice budget, a failed turn, a tripped breaker — is not
+  `succeeded` and still derives `stopped`: no-retry holds for everything
+  that broke. An empty message stops under either policy: a slice that ends
+  saying nothing is a stall, not a settlement. The policy is frozen in the
+  slice's checkpoint beside the budgets — a knob that moves mid-slice
+  cannot change what that slice's ending means.
+
+  **A guard cut is not a settlement under either policy.** When the
+  streaming client's guards stop a generation (looping, silent, past the
+  duration cap, a failed stream), the partial output can reach the terminal
+  path — but the harness stopped a generation that misbehaved; the model
+  did not choose to end its slice. It stops the session for a human with
+  the stop's own class and detail visible on the failure, because continuing
+  past the cut would defeat the very guard that fired. (A cut that captured
+  nothing never reaches the settle path: the client throws, and the slice
+  settles failed with the named reason.)
+
+  **The motivating shape, now a configuration:** `endings=milestone,blocked`
+  + `undeclared=continue` — a session that can never complete itself and
+  whose silence never kills it; its existence is the operator's switch.
+  Per-session fields (phase 2) stay open, along with the note's replacement
+  landmine; settings changes ride the phase-1 knobs until memory carry on
+  replacement exists.
+
 - **Sessions in the SPEC — the design note folds into §9 and §5.6 (build
   order step 7, the last one).** SPEC §9 no longer says "v1 ships `run`
   only": it carries the two-kind table, the session contract (a *scheduler

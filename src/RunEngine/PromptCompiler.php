@@ -9,6 +9,7 @@ use App\Context\Grounding;
 use App\Entity\Step;
 use App\Entity\Task;
 use App\Entity\ToolDefinition;
+use App\Session\SessionEndings;
 use App\Toolbox\SchemaNormalizer;
 
 /**
@@ -101,19 +102,27 @@ final readonly class PromptCompiler
      * transcript; if the aim has changed, the model writes it with
      * `session_objective` before declaring.
      *
+     * Both prose renderings come from the session's frozen endings
+     * (docs/design/SESSION_ENDINGS.md §3): bullets only for the outcomes
+     * this session may declare, an explicit line when it has no
+     * completion, and the settlement policy's sentence — the same
+     * derivation the toolbox's `session_declare` entry renders from, so
+     * the prompt cannot teach an ending the wire refuses.
+     *
      * @param list<ToolDefinition> $tools the slice's frozen toolbox
      *
      * @return array{system: string, user: string}
      */
-    public function compileForSlice(Task $task, array $tools): array
+    public function compileForSlice(Task $task, array $tools, ?SessionEndings $endings = null): array
     {
-        $note = 'This run is ONE SLICE of a longer session: the session keeps working across slices, and what carries to the next slice is your memory store (the ## Memories block) — not this transcript. When this slice\'s work reaches a stopping point, end it by calling session_declare with its outcome (milestone / done / blocked) and a summary of what you did — and call it ALONE, with no other tool calls in that round. A slice that ends without a declaration stops the session for a human.';
+        $endings ??= new SessionEndings();
+
         $system = $this->compileSystem(
             $task->getTitle(),
             $task->getBrief(),
             $tools,
-            $note,
-            completionOverride: PromptTemplate::SLICE_COMPLETION,
+            $endings->sliceNote(),
+            completionOverride: $endings->completionText(),
         );
         $user = $this->compileUser($task->getBrief());
 

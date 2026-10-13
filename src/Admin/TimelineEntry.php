@@ -44,6 +44,11 @@ final readonly class TimelineEntry
             RunEventType::ContextTrim => self::contextTrimSummary($payload),
             RunEventType::Checkpoint => \sprintf('step %s committed', self::value($payload, 'step', '?')),
             RunEventType::Completion => self::truncate(self::value($payload, 'result', '(empty artifact)')),
+            RunEventType::Undeclared => \sprintf(
+                'settled without a declaration (streak %s of %s) — the next slice launches',
+                self::value($payload, 'streak', '?'),
+                self::value($payload, 'max', '?'),
+            ),
             RunEventType::Failure => self::value($payload, 'reason', 'failed'),
         };
 

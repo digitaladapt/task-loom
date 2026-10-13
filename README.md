@@ -416,6 +416,9 @@ inline. Key knobs:
 | `TASKLOOM_SESSION_WRITE_MAX_CHARS` | Session memory: per-write size cap for a note or the objective (default `2000`) |
 | `TASKLOOM_SESSION_MAX_MEMORY_PCT` | Session memory: cap on the rendered `## Memories` block, as % of the context limit (default `10`) |
 | `TASKLOOM_SESSION_SLICE_BUDGET` | Exchanges per session slice before it settles without declaring — "stop and ask a human" (default `25`; build order step 4) |
+| `TASKLOOM_SESSION_ENDINGS` | Session endings: which declarations its slices may make — a comma-separated subset of `milestone,done,blocked` (default all three). A session without `done` can never complete itself (`docs/design/SESSION_ENDINGS.md`) |
+| `TASKLOOM_SESSION_UNDECLARED` | Session endings: what a settlement **without** a declaration means — `stop` (default; the session stops for a human) or `continue` (the slice settles succeeded and the next slice launches) |
+| `TASKLOOM_SESSION_MAX_UNDECLARED` | Session endings: consecutive undeclared settlements before a `continue` session stops for a human (default `3`) |
 | `MESSENGER_TRANSPORT_DSN` | Doctrine-backed lane table; `auto_setup=0` — create it with `doctrine:migrations:migrate` |
 
 ## Development

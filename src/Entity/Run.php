@@ -145,12 +145,16 @@ class Run
      *
      * Null on a run-kind task, and null on a slice that settled WITHOUT a
      * declaration — an exhausted slice budget, a failed turn, a tripped
-     * breaker, a plain terminal message — which is exactly the case the
-     * design treats as "the session stops and needs a human" (§8). The
-     * session's derived state and the requeue sweep's session pass read
-     * this one column beside the row; the human-readable record of every
-     * declaration stays in the attempt ledger (the tool call, its
-     * settlement, and the Completion event).
+     * breaker, a plain terminal message. What that means for the session
+     * is the slice's frozen `undeclared` policy (§8.1, docs/design/
+     * SESSION_ENDINGS.md): under `stop` it is "the session stops and needs
+     * a human"; under `continue` a non-empty message is a legitimate
+     * settlement (the slice succeeds, and the null declaration — read
+     * beside the succeeded status — is exactly how the derived state
+     * knows it was a continuation). The session's derived state and the
+     * requeue sweep's session pass read this one column beside the row;
+     * the human-readable record of every declaration stays in the attempt
+     * ledger (the tool call, its settlement, and the Completion event).
      *
      * @var array{outcome: string, summary: string}|null
      */

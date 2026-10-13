@@ -20,5 +20,14 @@ enum RunEventType: string
     case ContextTrim = 'context_trim';
     case Checkpoint = 'checkpoint';
     case Completion = 'completion';
+
+    /**
+     * A slice settled undeclared and was judged a continuation
+     * (docs/design/SESSION_ENDINGS.md §4): the typed marker that lets the
+     * digest (and any surface) count the silent-settlement pattern apart
+     * from ordinary completions. Carries the streak and its bound.
+     */
+    case Undeclared = 'undeclared';
+
     case Failure = 'failure';
 }

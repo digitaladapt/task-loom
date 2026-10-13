@@ -17,14 +17,19 @@ namespace App\Session;
  *                 Enable + Run now until the session UI folds them into one
  *                 control, step 6).
  *  - `working`  — enabled, a slice is in flight;
- *  - `owed`     — enabled, nothing in flight, and the last slice declared a
- *                 `milestone`: the next slice is due. Launched at settlement;
- *                 the requeue sweep re-derives it after a lost dispatch.
+ *  - `owed`     — enabled, nothing in flight, and the last slice settled
+ *                 owing more work: a declared `milestone`, or — under the
+ *                 `continue` policy (docs/design/SESSION_ENDINGS.md §4) — a
+ *                 succeeded slice with no declaration. The next slice is due;
+ *                 launched at settlement, and the requeue sweep re-derives it
+ *                 after a lost dispatch.
  *  - `complete` — the last declaration was `done` (terminal);
  *  - `blocked`  — the last declaration was `blocked`; needs the operator;
- *  - `stopped`  — the last slice settled without a declaration (an
- *                 exhausted slice budget, a failed turn, a tripped breaker,
- *                 a plain message) — loud, and it waits for a human;
+ *  - `stopped`  — the last slice settled without a declaration in a way the
+ *                 policy does NOT continue (an exhausted slice budget, a
+ *                 failed turn, a tripped breaker, an empty message, or an
+ *                 undeclared streak that hit its bound) — loud, and it waits
+ *                 for a human;
  *  - `paused`   — the task is disabled; the operator's switch. Derived
  *                 first: nothing launches while it is off.
  *

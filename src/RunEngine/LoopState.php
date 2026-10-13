@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace App\RunEngine;
 
+use App\Session\SessionEndings;
+use App\Session\SessionUndeclared;
+
 /**
  * Mutable loop state for one run: budgets, the accumulating exchange
  * window, circuit-breaker failure streaks, the compiled prompt head, and
@@ -41,6 +44,8 @@ final class LoopState
         public array $failureCounts = [],
         public ?array $promptHead = null,
         public ?PendingToolTurn $pendingToolTurn = null,
+        public SessionUndeclared $undeclared = SessionUndeclared::Stop,
+        public int $maxUndeclared = SessionEndings::DEFAULT_MAX_UNDECLARED,
     ) {
     }
 
@@ -104,6 +109,13 @@ final class LoopState
             failureCounts: $failureCounts,
             promptHead: $promptHead,
             pendingToolTurn: $pending,
+            // The undeclared policy is constitution, frozen per slice like
+            // the budgets. A checkpoint that predates the policy (or an
+            // ordinary run) falls back to the conservative built-in: stop.
+            undeclared: \is_string($checkpoint['undeclared'] ?? null)
+                ? (SessionUndeclared::tryFrom($checkpoint['undeclared']) ?? SessionUndeclared::Stop)
+                : SessionUndeclared::Stop,
+            maxUndeclared: (int) ($checkpoint['maxUndeclared'] ?? SessionEndings::DEFAULT_MAX_UNDECLARED),
         );
     }
 
@@ -124,6 +136,8 @@ final class LoopState
             'failureCounts' => $this->failureCounts,
             'promptHead' => $this->promptHead,
             'pendingToolTurn' => $this->pendingToolTurn?->toArray(),
+            'undeclared' => $this->undeclared->value,
+            'maxUndeclared' => $this->maxUndeclared,
         ];
     }
 }

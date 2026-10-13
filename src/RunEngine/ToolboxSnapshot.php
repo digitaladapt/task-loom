@@ -8,6 +8,7 @@ use App\Entity\McpServer;
 use App\Entity\ServerProtocol;
 use App\Entity\Tool;
 use App\Entity\ToolDefinition;
+use App\Session\SessionDeclareTool;
 use App\Session\SessionTool;
 
 /**
@@ -76,6 +77,22 @@ final readonly class ToolboxSnapshot
                 continue;
             }
 
+            if ($definition instanceof SessionDeclareTool) {
+                // The FILTERED declaration (docs/design/SESSION_ENDINGS.md
+                // §3): its schema and description are the session's ending
+                // policy as the wire carried it, so they are stored
+                // verbatim — the rebuild below reads them back rather than
+                // re-deriving from the enum case.
+                $entries[] = [
+                    'origin' => self::ORIGIN_HARNESS,
+                    'tool' => $definition->getName(),
+                    'description' => $definition->getDescription(),
+                    'schema' => $definition->getSchema(),
+                ];
+
+                continue;
+            }
+
             throw new \LogicException(\sprintf('Unknown toolbox definition "%s" — the toolbox is catalog tools plus the harness\'s own session tools, nothing else.', $definition::class));
         }
 
@@ -85,7 +102,12 @@ final readonly class ToolboxSnapshot
     /**
      * Rebuild the toolbox from a stored snapshot: MCP tools as transient
      * {@see Tool} entities (constructed for this turn, never persisted,
-     * never merged with the catalog), harness tools as their enum cases.
+     * never merged with the catalog), harness tools as their enum cases —
+     * EXCEPT `session_declare`, which rebuilds from the stored entry itself
+     * ({@see SessionDeclareTool::fromSnapshot()}): a session's endings are
+     * frozen in the snapshot, and re-deriving them from the enum case here
+     * would silently re-widen the vocabulary on the first rehydrated turn
+     * — exactly the turn a fresh worker runs.
      *
      * A harness entry whose name no longer names an enum case — a harness
      * tool retired after this snapshot was frozen — is skipped: the model's
@@ -102,7 +124,18 @@ final readonly class ToolboxSnapshot
 
         foreach ($snapshot as $entry) {
             if (self::ORIGIN_HARNESS === ($entry['origin'] ?? self::ORIGIN_MCP)) {
-                $tool = SessionTool::tryFrom((string) ($entry['tool'] ?? ''));
+                $name = (string) ($entry['tool'] ?? '');
+
+                if (SessionDeclareTool::NAME === $name) {
+                    $definitions[] = SessionDeclareTool::fromSnapshot(
+                        isset($entry['description']) ? (string) $entry['description'] : '',
+                        \is_array($entry['schema'] ?? null) ? $entry['schema'] : [],
+                    );
+
+                    continue;
+                }
+
+                $tool = SessionTool::tryFrom($name);
                 if (null !== $tool) {
                     $definitions[] = $tool;
                 }
