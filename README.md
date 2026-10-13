@@ -93,13 +93,14 @@ process, for a host that is only there for the model.
 A clean stop (`docker stop`) is safe: workers finish the message they are
 processing and release their claims. The one thing to know is the arithmetic —
 a worker's SIGTERM handler only sets a flag, so "finish the message" means up to
-one whole turn, bounded by `TASKLOOM_LLM_TIMEOUT` (default 300s) rather than by
-the shutdown window. Stop during a model call with the defaults and the
-container escalates to SIGKILL; the run is recorded as failed and shows up in
-the attention queue, but nothing is corrupted and it is recoverable from its
-page. Keep `TASKLOOM_SHUTDOWN_TIMEOUT` and compose's `stop_grace_period` above
-the turns you expect, and prefer stopping when the queue is quiet. (Aborting
-the turn instead of killing it is designed in
+one whole turn, bounded by the streaming client's hard cap
+(`TASKLOOM_LLM_MAX_DURATION`, default 900s) rather than by the shutdown window.
+Stop during a model call with the defaults and the container escalates to
+SIGKILL; the run is recorded as failed and shows up in the attention queue, but
+nothing is corrupted and it is recoverable from its page. Keep
+`TASKLOOM_SHUTDOWN_TIMEOUT` and compose's `stop_grace_period` above the turns
+you expect, and prefer stopping when the queue is quiet. (Aborting the turn
+instead of killing it is designed in
 [docs/design/GRACEFUL_RESTART.md](docs/design/GRACEFUL_RESTART.md).)
 
 Starting up is where recovery is automatic. A fleet that was *killed* rather
@@ -119,7 +120,8 @@ request, or one set of tool calls), so nothing legitimately holds one for long.
 - **`(any age)`** — the default, and correct for the single container this file
 describes: at boot, every claim in the table is the previous run's.
 - **`(older than Ns)`** — `TASKLOOM_FLEET_GRAB_AFTER` has been raised. Set it to
-  `TASKLOOM_LLM_TIMEOUT + 60` if **more than one fleet uses this database** (a
+  `TASKLOOM_LLM_MAX_DURATION + 60` (the streaming client's hard cap — the
+  longest a turn can run) if **more than one fleet uses this database** (a
   workers-only host beside a UI, or two replicas), where a claim found at boot
   may belong to a peer that is working right now. Slower, always safe.
 - **left to the lease** — a claim fresher than the bound, handed to the engine's

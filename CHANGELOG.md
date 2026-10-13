@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The LLM client streams, and a generation that "spins forever" now says
+  why.** The client sent one blocking request and read the body at the end,
+  so a model that never finished was a black box: at timeout there was
+  nothing to look at, no way to tell a loop from a heavy prompt from a wedged
+  server, and no partial output to show a person who asked a question. Now
+  every delta is observed as it arrives, and:
+
+  **Four guard windows replace the one blunt timeout**
+  (`TASKLOOM_LLM_FIRST_TOKEN_TIMEOUT` 90s, `TASKLOOM_LLM_SILENCE_TIMEOUT`
+  120s, `TASKLOOM_LLM_SOFT_DEADLINE` 300s with bounded extensions of
+  `_SOFT_EXTENSION` × `_MAX_EXTENSIONS` while output is still flowing, and
+  the `TASKLOOM_LLM_MAX_DURATION` 900s hard cap) — each with its own error
+  class (`llm_first_token_timeout`, `llm_silence_timeout`,
+  `llm_duration_exceeded`), so "why did it take forever" is answerable from
+  the ledger: prefill/queue, wedged mid-stream, or a turn that asked for
+  more output than the deployment allows. `TASKLOOM_LLM_TIMEOUT` keeps its
+  meaning for the non-streamed fallback (an endpoint that ignores
+  `stream: true` still parses with the old code path), and the deployment
+  arithmetic (`TASKLOOM_FLEET_GRAB_AFTER`, the shutdown window) now binds
+  itself by `MAX_DURATION + 60`, which is the true longest turn.
+
+  **A loop detector stops a generation that is provably repeating itself**
+  (`TASKLOOM_LLM_LOOP_MIN_SPAN` 160, `TASKLOOM_LLM_LOOP_MIN_REPEATS` 6),
+  with `llm_loop_detected` as its class. The thresholds are conservative on
+  purpose — a 27+ character block must repeat 6 times, an 8-character block
+  20 times — because a false positive discards real output, and the stop is
+  recorded with its evidence (what repeated, how often, over how many
+  characters) so the judgement is reviewable.
+
+  **Partial output is output.** A guard cut returns the captured content as
+  the chat reply / run completion — the person sees what was said, and the
+  stop (reason, detail, dropped half-written tool calls) rides the response
+  event with its error class, so the truncation is visible rather than
+  silent. A cut that captured *nothing* stays a failure carrying its named
+  reason, because an empty answer is indistinguishable from silence.
+
+  **Stopping means stopping the endpoint too.** Every cut cancels the
+  response, which closes the connection — the signal a local server needs to
+  abort instead of burning GPU on output nobody will read (verified against
+  a real socket: the established TCP connection drops on cancel). The
+  client also records timing metrics per generation (`firstDeltaMs`
+  separates prefill from generation — the number that answers "have I given
+  too much context?"). Tests: SSE parser / delta reassembly / loop detector
+  / guard arithmetic as units, a scripted-socket fake for wall-clock guard
+  behaviour, a live SSE fixture server for the cancel/disconnect proof, and
+  functional coverage of partial-as-output on both the chat and run ledgers.
+
 - **Sessions in the SPEC — the design note folds into §9 and §5.6 (build
   order step 7, the last one).** SPEC §9 no longer says "v1 ships `run`
   only": it carries the two-kind table, the session contract (a *scheduler

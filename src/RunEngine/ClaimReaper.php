@@ -67,10 +67,11 @@ use App\Claims\ClaimTarget;
  * host beside a UI, or two replicas — then a claim you find at boot may belong
  * to a peer that is working right now, and the default would hand that run to a
  * second worker. Set `TASKLOOM_FLEET_GRAB_AFTER` above the longest a turn can
- * run (safely `TASKLOOM_LLM_TIMEOUT + 60`) and the sweep will only take what is
- * provably dead. That is slower and always safe, and it is opt-in because it is
- * the rarer topology. The boot line always reports the bound in force, so which
- * rule you are running is never a mystery.
+ * run (safely `TASKLOOM_LLM_MAX_DURATION + 60` — the streaming client's hard
+ * cap) and the sweep will only take what is provably dead. That is slower and
+ * always safe, and it is opt-in because it is the rarer topology. The boot line
+ * always reports the bound in force, so which rule you are running is never a
+ * mystery.
  *
  * The honest general fix for that case is still a worker heartbeat, which can
  * distinguish a live peer from a dead one directly rather than by inference.
@@ -93,8 +94,8 @@ final readonly class ClaimReaper
      *
      * 0 is correct for the documented single-container deployment, where any
      * claim present at boot belongs to a process that no longer exists. Raise
-     * it (to `TASKLOOM_LLM_TIMEOUT + 60`) only when more than one fleet shares
-     * the database — see the class docblock.
+     * it (to `TASKLOOM_LLM_MAX_DURATION + 60`) only when more than one fleet
+     * shares the database — see the class docblock.
      */
     public const string GRAB_AFTER_ENV = 'TASKLOOM_FLEET_GRAB_AFTER';
 

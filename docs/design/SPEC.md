@@ -262,9 +262,15 @@ RunEvent: id, run_id, task_id, seq, type, created_at
 
 - **Error taxonomy is a fixed enum**, not free text: `invalid_arguments`,
   `tool_not_found`, `server_error`, `server_timeout`, `llm_error`, `llm_malformed_response`,
-  `context_exhausted`, `budget_exceeded`, `unknown`. Run reports aggregate by class, so
+  `context_exhausted`, `budget_exceeded`, `unknown`, plus the stream-cut classes
+  `llm_loop_detected`, `llm_first_token_timeout`, `llm_silence_timeout`,
+  `llm_duration_exceeded`. Run reports aggregate by class, so
   "malformed tool calls" vs "server 500s" vs "context overflow" are distinguishable at a
-  glance — the thing task-weaver never gave us.
+  glance — the thing task-weaver never gave us. The stream-cut classes name *why* a
+  generation ended early, one story each: the model was repeating itself, nothing
+  was produced before the first-token window, output stalled mid-stream, or the
+  generation outlasted its deadlines — a single `server_timeout` could not tell
+  those apart, which is why they replaced it.
 - Run reports are per-run and per-task rollups, exposed in the admin UI.
 
 ### 5.4 Justified completion
@@ -416,8 +422,9 @@ topology where that is wrong is **more than one fleet against the same
 database** (a workers-only host beside a UI, or two replicas): then a claim
 found at boot may belong to a peer working right now, and only age can prove
 otherwise. Setting the bound above the longest a turn can run (safely
-`TASKLOOM_LLM_TIMEOUT + 60`) restores the proof. It is opt-in because it is the
-rarer shape, and the boot line always prints the bound in force:
+`TASKLOOM_LLM_MAX_DURATION + 60` — the streaming client's hard cap) restores
+the proof. It is opt-in because it is the rarer shape, and the boot line always
+prints the bound in force:
 
 ```
 Claims: cleared 2 (any age), 0 left to the lease, 0 of those without an owner label.
@@ -940,8 +947,10 @@ in the zone, instants are what is stored.
 ## 15. Chat (v1.x) — a conversation, not a task
 
 **Status:** the conversational loop, the attribution invariant, the chat lane
-as priority head, and the phone-first web surface are built. Alerts (§5 of
-`CHAT_AND_CAPACITY.md`), streaming, and the assistant initiating are not.
+as priority head, and the phone-first web surface are built. Streaming (the
+capture, the guards, the loop detector, and partial-as-output) is built — see
+§5.3's stream-cut classes. Alerts (§5 of `CHAT_AND_CAPACITY.md`) and the
+assistant initiating are not.
 
 ### 15.1 Three nouns, and no fourth
 
@@ -1001,9 +1010,10 @@ next available worker drains first**.
   chat > task > session.)
 - **It does not create capacity.** At the default `N=1` a chat goes *next*,
   never *now*: the worst case is one in-flight generation, and for a reasoning
-  model that is tens of seconds. Sub-second preemption needs a streaming
-  client that can abort mid-generation; the seam for it is not built, and the
-  client is deliberately non-streaming today.
+  model that is tens of seconds. The streaming client now captures and can
+  abort mid-generation (guards, loop detection, cancel-closes-the-socket —
+  §5.3), so the build order for sub-second preemption has its seam; what is
+  still missing is the preemption policy itself, not the transport.
 - **Halt is scoped to each LLM call**, not to the chat's whole duration. A
   conversation that goes quiet while a human thinks must not leave tasks
   halted. Waiting for a human occupies nothing.

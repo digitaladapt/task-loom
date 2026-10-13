@@ -473,6 +473,13 @@ final readonly class ChatEngine
 
         $content = $response->content;
         if (null === $content || '' === trim($content)) {
+            // A cut that captured nothing is a failure with a name — the
+            // guard's class says whether it was prefill, silence, or the
+            // hard cap, which is the answer the operator asked for.
+            if (null !== $response->stop) {
+                return $this->failExchange($exchange, $response->stop->errorClass(), $response->stop->detail);
+            }
+
             // A run treats a contentless terminal message as malformed rather
             // than a completion (SPEC §5.4); the same reasoning holds here and
             // matters more, because the alternative is a blank bubble the
@@ -485,10 +492,18 @@ final readonly class ChatEngine
         }
 
         $this->em->wrapInTransaction(function () use ($exchange, $chat, $response, $content): void {
-            $exchange->appendMachinery(ChatEventType::LlmResponse, [
-                'finishReason' => $response->finishReason,
-                'usage' => $response->usage,
-            ], durationMs: $response->durationMs);
+            // The ledger records the whole story: the finish reason, the
+            // usage, and — for a generation a guard cut short — why it ended
+            // and what the timing was. A partial reply IS the reply (the
+            // decision this change records): the person sees what was said,
+            // and the stop's error class rides the event so "why does this
+            // answer end mid-sentence?" is answerable from the record.
+            $exchange->appendMachinery(
+                ChatEventType::LlmResponse,
+                ['finishReason' => $response->finishReason, 'usage' => $response->usage] + $response->ledgerAdditions(),
+                errorClass: $response->stop?->errorClass(),
+                durationMs: $response->durationMs,
+            );
 
             $exchange->appendEvent(ChatExchangeEvent::turn(
                 ChatEventType::Reply,
@@ -550,11 +565,12 @@ final readonly class ChatEngine
         }
 
         $this->em->wrapInTransaction(function () use ($exchange, $state, $response, $calls, $dropped): void {
-            $exchange->appendMachinery(ChatEventType::LlmResponse, [
-                'finishReason' => $response->finishReason,
-                'usage' => $response->usage,
-                'droppedDuplicates' => $dropped,
-            ], durationMs: $response->durationMs);
+            $exchange->appendMachinery(
+                ChatEventType::LlmResponse,
+                ['finishReason' => $response->finishReason, 'usage' => $response->usage, 'droppedDuplicates' => $dropped] + $response->ledgerAdditions(),
+                errorClass: $response->stop?->errorClass(),
+                durationMs: $response->durationMs,
+            );
 
             // The round's invocation row: every call the model made, with the
             // assistant text that accompanied them. This is both the ledger's

@@ -636,8 +636,9 @@ if [ "$command" = "serve" ]; then
     #
     # The operator who genuinely wants the sweep here can say so explicitly:
     # set TASKLOOM_FLEET_GRAB_AFTER above the longest a turn can run (safely
-    # TASKLOOM_LLM_TIMEOUT + 60), which is the same knobs-and-judgement answer
-    # the multi-replica topology already gets (App\RunEngine\ClaimReaper).
+    # TASKLOOM_LLM_MAX_DURATION + 60 — the streaming client's hard cap), which
+    # is the same knobs-and-judgement answer the multi-replica topology already
+    # gets (App\RunEngine\ClaimReaper).
     #
     # A fleet with no llm worker at all is *not* stranded by this: the single
     # container's stop-time trouble is a turn that outlived its shutdown window,
@@ -672,7 +673,7 @@ if [ "$command" = "serve" ]; then
             MISSING_LANES="${MISSING_LANES:+$MISSING_LANES and }tools"
         fi
         log "warning: boot sweep skipped — this fleet consumes no local ${MISSING_LANES} worker, so claims on that lane may belong to a peer that is working right now."
-        log "warning:   abandoned claims will wait out CLAIM_STALE_SECONDS instead. If this host is the only consumer, set TASKLOOM_FLEET_GRAB_AFTER above the longest turn (TASKLOOM_LLM_TIMEOUT + 60) to sweep safely."
+        log "warning:   abandoned claims will wait out CLAIM_STALE_SECONDS instead. If this host is the only consumer, set TASKLOOM_FLEET_GRAB_AFTER above the longest turn (TASKLOOM_LLM_MAX_DURATION + 60) to sweep safely."
     fi
     bail_if_stopping
 
