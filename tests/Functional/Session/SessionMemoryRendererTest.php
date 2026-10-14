@@ -169,6 +169,50 @@ final class SessionMemoryRendererTest extends KernelTestCase
         self::assertLessThanOrEqual((int) floor(700 * 3.5 * 10 / 100) + self::FIXED_SKELETON_ALLOWANCE, \strlen($rendered), 'the backstop keeps even a pins-overflow block near its budget (whole notes, so the last kept note can overshoot by one note)');
     }
 
+    /**
+     * The block is a pure function of the stored state, so re-rendering it on
+     * **every** request cannot change a byte (§6.3).
+     *
+     * This is the premise B3 rests on. The block is rebuilt from the store on
+     * every request (the §4.1 seam: an operator edit lands on the next
+     * request, not at a slice boundary). That is only free of cache
+     * consequence because an unchanged store yields an unchanged block —
+     * otherwise the seam would silently break the prefix on every turn,
+     * whether or not anyone wrote anything. Measured, a *constant* block at
+     * this position costs nothing to cache (`KV_CACHE_POSITION_FINDINGS.md`,
+     * 93.2% — identical to folding it into the head), so the block is a
+     * cache-break exactly when the store changed, and at no other time.
+     */
+    public function testTheBlockIsPureSoAnUnchangedStoreRerendersItByteIdentically(): void
+    {
+        $store = $this->store();
+        $task = $this->sessionTask();
+        $store->setObjective($task, 'Get the importer feature-complete.', SessionMemorySource::Operator);
+        $store->addNote($task, 'Migration 0007 adds the store.', SessionMemorySource::Session);
+        $store->addNote($task, 'The importer is called from the CLI.', SessionMemorySource::Session);
+
+        $renderer = $this->renderer();
+
+        // Nothing written in between: byte-identical, so a request that
+        // changed nothing cannot have broken the prefix.
+        $first = $renderer->render($task);
+        self::assertNotNull($first);
+        self::assertSame($first, $renderer->render($task), 'an unchanged store re-renders the block byte-for-byte');
+        self::assertSame($first, $renderer->render($task));
+
+        // A write is the only thing that changes it — and it appends, so what
+        // is disturbed is the notes behind it, never the objective before it.
+        $store->addNote($task, 'The parser drops comments.', SessionMemorySource::Session);
+        $after = $renderer->render($task);
+        self::assertNotNull($after);
+        self::assertNotSame($first, $after);
+        self::assertSame(
+            \substr($first, 0, \strpos($first, '- [you] Migration 0007')),
+            \substr($after, 0, \strpos($after, '- [you] Migration 0007')),
+            'a write does not disturb anything before the notes it appends behind',
+        );
+    }
+
     private function renderer(int $budgetTokens = 100_000, float $pct = 10.0): SessionMemoryRenderer
     {
         return new SessionMemoryRenderer(
