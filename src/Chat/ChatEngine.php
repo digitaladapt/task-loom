@@ -220,6 +220,11 @@ final readonly class ChatEngine
         ChatToolbox $toolbox = new ChatToolbox(),
     ): Chat {
         $chat = new Chat(self::titleFrom($content));
+        // Anchor the conversation's grounding at its first message. The block is
+        // rendered as of this instant and then held byte-stable, so the replies
+        // that follow reuse the whole prefix rather than re-prefilling it on
+        // every minute boundary (docs/design/KV_CACHE_POSITION_FINDINGS.md).
+        $chat->regroundAt($chat->getCreatedAt());
         $this->em->persist($chat);
         $this->em->flush();
 
@@ -709,11 +714,16 @@ final readonly class ChatEngine
      *   cannot be misread from context. The human never types a name;
      *   attribution is rendered at the render layer, exactly as §2.5
      *   requires.
-     * - **The grounding block**, compiled *per request* rather than frozen
-     *   into the exchange — a deliberate difference from a run. An exchange
-     *   is short-lived, and a conversation resumed after a day of silence
-     *   should be grounded in the day it is resumed on, not the day the
-     *   previous exchange happened.
+     * - **The grounding block**. Once compiled *per request* rather than
+     *   frozen, so that a conversation resumed after a day of silence is
+     *   grounded in the day it is resumed on. That intent is kept, but the
+     *   *mechanism* is not: a block that re-renders the moving clock sits at
+     *   position 0 of the system message, so every reply re-prefills the whole
+     *   conversation (measured: 28% prefix reuse against 94%
+     *   — `docs/design/KV_CACHE_POSITION_FINDINGS.md`). The block is now
+     *   rendered as of a per-conversation *anchor* and held byte-stable, and
+     *   the anchor is moved only when the deployment day turns — which is
+     *   exactly when "grounded in the day it is resumed on" can change.
      *
      * The turns are compiled beside this by the context window
      * ({@see ChatContextWindow::fit()}), which is where the fitting happens:
@@ -727,11 +737,45 @@ final readonly class ChatEngine
         $current = $this->exchanges->findLatestForChat($chat);
         $hasTools = null !== $current && !$this->toolboxFor($current)->isEmpty();
 
+        // Grounding is *frozen*, not live.
+        //
+        // The block is rendered as of the conversation's anchor, so it is
+        // byte-identical on every request while the deployment day holds —
+        // which is what lets a prefix-caching server reuse the whole
+        // conversation instead of re-prefilling it from position 0 on every
+        // reply (measured: a clock that moves costs ~70 points of reuse and 5×
+        // the prefill; `docs/design/KV_CACHE_POSITION_FINDINGS.md`).
+        //
+        // The freshness this lane deliberately wanted (a conversation is
+        // grounded in the day it is resumed on) is preserved where it actually
+        // matters: a reply that lands on a new deployment day moves the anchor,
+        // once, so the model is never told yesterday's date — and every reply
+        // after that is stable again until the next day turns.
+        $now = $this->now();
+        $anchor = $chat->groundingInstant();
+
+        if ($this->grounding->calendarDay($anchor) !== $this->grounding->calendarDay($now)) {
+            $chat->regroundAt($now);
+            $anchor = $now;
+        }
+
         return implode("\n\n", [
             $hasTools ? self::SYSTEM_PREAMBLE_WITH_TOOLS : self::SYSTEM_PREAMBLE,
             $this->roster->render(),
-            "## Grounding\n\n".$this->grounding->render(),
+            "## Grounding\n\n".$this->grounding->forNow($anchor)->render(),
         ]);
+    }
+
+    /**
+     * The wall-clock instant this reply is compiled at.
+     *
+     * A seam rather than an inline `new \DateTimeImmutable('now')` so the
+     * grounding anchor has one place to read the clock, and so a test can pin
+     * it (see `ChatEngineTest`'s grounding-freeze coverage).
+     */
+    private function now(): \DateTimeImmutable
+    {
+        return new \DateTimeImmutable('now');
     }
 
     /**

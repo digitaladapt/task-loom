@@ -89,6 +89,36 @@ final class ChatExchangeTest extends TestCase
         new Chat('   ');
     }
 
+    /**
+     * A conversation with no grounding anchor resolves to its own creation
+     * time, never to the live clock.
+     *
+     * A stored conversation must render the same grounding block on every
+     * request; answering "no anchor yet" with "now" would put the moving value
+     * back on the wire for exactly the rows a migration did not touch.
+     */
+    public function testAFreshConversationGroundsAtItsCreationTime(): void
+    {
+        $chat = new Chat('Hello');
+
+        self::assertSame($chat->getCreatedAt(), $chat->groundingInstant());
+    }
+
+    /**
+     * Moving the anchor is what a day rollover (or an explicit re-ground) does;
+     * until then the anchor is stable, which is the property the cache reuse
+     * rests on.
+     */
+    public function testRegroundingMovesTheAnchor(): void
+    {
+        $chat = new Chat('Hello');
+        $instant = new \DateTimeImmutable('2026-07-05 03:30:00', new \DateTimeZone('UTC'));
+
+        $chat->regroundAt($instant);
+
+        self::assertSame($instant, $chat->groundingInstant());
+    }
+
     public function testTouchingAConversationMovesItsActivityTimestamp(): void
     {
         $chat = new Chat('Hello');
