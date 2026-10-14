@@ -173,9 +173,17 @@ their head. Cheap, if it becomes worth it.
 
 ## Caveats
 
-- One model, one hardware profile, one llama.cpp build, one slot. The
-  *qualitative* law (cache length = distance to the first changed byte) is
-  server-independent; the exact percentages are not.
+- One model, one hardware profile, one llama.cpp build, **one slot** in this
+  note. The *qualitative* law (cache length = distance to the first changed
+  byte) is server-independent; the exact percentages are not. **Re-run on two
+  slots 2026-10-14** (`KV_CACHE.md` §9.3): the law holds, and this note's two
+  load-bearing results survive — a mid-slice memory *change* costs ~66 points in
+  both the middle and the tail (so re-locating it buys nothing, as §"B3" says),
+  and appending past a *trailing* block costs ~65 points (so "never add a
+  trailing message to a growing conversation" is confirmed, now against the exact
+  block the note is about). What the second slot *removes* is the one-slot
+  overwrite: a divergence no longer destroys the warm prefix (A → divergent B →
+  A returns to 99.6%). See `KV_CACHE.md` §9.3 for the table.
 - The trailing-`system` figure is the least stable measurement here (see Part 1);
   the trailing-`user` and the leading-position figures were reproducible across
   runs.
