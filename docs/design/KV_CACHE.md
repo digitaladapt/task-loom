@@ -1,11 +1,22 @@
 # KV cache reuse — design note
 
-**Status:** DRAFT for discussion — no code changes made. **Verified live** against a real
-llama.cpp server (2026-10-14): the mechanism is a ~95× latency difference; see §9.
+**Status:** living design note. **Verified live** against a real llama.cpp server
+(2026-10-14): the mechanism is a ~95× latency difference; see §9. Section A has
+landed (`stream_options.include_usage`, #72) and Section B1 shipped as chat grounding
+**frozen** (§6.1); the rest of Section B and all of Section C are still to do.
 **Scope:** the request-construction path only (`PromptCompiler`, `ContextWindow`,
 `ChatContextWindow`, `ChatEngine`, `SessionMemoryRenderer`, `SessionSliceEngine`,
 `LlmClient`). Proposes invariants, phased changes, and the instrumentation to prove
 them; touches SPEC §5.6, §9, §15.9 and `SESSION_TASKS.md` §4.
+
+> **⚠ §6.1 and §6.3 are SUPERSEDED (2026-10-14).** The measured follow-up
+> (`KV_CACHE_POSITION_FINDINGS.md`) shows a *trailing* message is not free — it
+> truncates the reusable prefix at the question for the rest of a conversation's
+> life — and that a per-request-varying byte costs the same at the head and at the
+> tail. So §6.1's "move grounding to the tail" does **not** rescue the clock, and
+> §6.3's "move session memory to the tail" points the wrong way. Both are corrected
+> in place below. The one fix that shipped is chat grounding **frozen** to a
+> per-conversation anchor. §6.2 (Section C) and §7 (Section A) are unaffected.
 
 > **One sentence.** The harness rebuilds a *changing* token prefix on almost every
 > request — the chat system message carries a fresh clock, the run/chat window slides
@@ -235,25 +246,40 @@ the frozen stretch is long.
 turn slide; the budget still fails closed, but the cache is broken O(1) times, not
 O(turns) times.
 
-### 6.1 Chat grounding → end of request (fixes B1)
+### 6.1 Chat grounding → **freeze it** (fixes B1) — *corrected 2026-10-14*
 
-Move the per-request grounding out of the leading system message and append it as the
-**last** message of the request (a `system`/`user` message after the kept turns, or the
-final `user` turn re-grounded). The conversation's *constitution* — preamble + roster —
-stays at position 0 and becomes byte-stable across a conversation's whole life; only
-the grounding tail changes, and only when the minute/date actually changes.
+**What shipped.** Freeze the grounding block to a per-conversation anchor, render it
+as of that instant, and hold it byte-stable; move the anchor only when the deployment
+day turns. The block **stays at position 0** of the system message — where it already
+was — because *position was never the problem*: the block's first varying byte is at
+the block, so a block that varies breaks the cache wherever it sits, and a block that
+does not vary is free wherever it sits. Shipped in `feat/chat-grounding-freeze`:
+`Chat::groundingInstant()` / `regroundAt()`, `Grounding::forNow()` / `calendarDay()`,
+and `chat.grounding_at`.
 
-- **Shape left untouched:** the roster, attribution, and the with/without-tools
-  preamble swap are unchanged. Only the grounding's *position* moves.
-- **Cost:** the model now reads the clock *last* rather than first — which is
-  arguably better (it is the freshest fact, nearest the reply), and matches the run
-  compiler's own stated reasoning for putting grounding last
-  (`PromptCompiler`: "Grounding last: the freshest terms in the head, nearest the
-  model's first reply").
-- **Open sub-question:** whether the *newest turn* must remain the last message for
-  the endpoint. If some endpoint requires a trailing user turn, the grounding can be
-  merged into the newest user turn's, or emitted as an assistant message before it;
-  that is a wire-shape detail to pin with the fixture server (§7).
+**Why not "end of request", as first proposed.** Measured, 10-turn conversation
+(`KV_CACHE_POSITION_FINDINGS.md`):
+
+| grounding | clock | prefix reuse | prefill |
+|---|---|---:|---:|
+| in the head | advances (today's bug) | 28% | 167 s |
+| in the head | **frozen** | **94%** | 30 s |
+| trailing message | advances | 43% | 140 s |
+| trailing message | frozen | 65% | 85 s |
+| trailing, time-line only | advances | 67% | 74 s |
+
+A trailing message *truncates the reusable prefix at the question* for the rest of the
+conversation's life, so it costs ~30 points of reuse even when constant. Moving the
+clock to the tail therefore recovers **none** of the B1 loss (28% → 43%), while
+freezing recovers all of it (→ 94%). The tail trade is only worth considering if
+continuous minute-freshness ever becomes a hard requirement, and then only as an
+opt-in time-line-only tail (67%).
+
+- **Freshness preserved.** A conversation is still grounded in the day it is resumed
+  on: the engine moves the anchor when the deployment day (`Grounding::calendarDay()`,
+  in the deployment's zone) turns. One cache break a day instead of one a minute.
+- **Nothing about content, the head rule, or the budget changes.** Only the clock's
+  *source* becomes an anchor rather than `now`.
 
 ### 6.2 Run/chat windows → batched shedding with a sticky base (fixes B2)
 
@@ -277,26 +303,29 @@ per-turn trim, not less — it will simply fire far less often.
 the knob that trades prompt size against re-prefill frequency; it wants a measured
 default, which is why Phase 0 instrumentation comes first.
 
-### 6.3 Session memory → end of request, cross-slice reuse (fixes B3, B4)
+### 6.3 Session memory → **leave it where it is; rebuild it only when it changes** (fixes B3, B4) — *corrected 2026-10-14*
 
-Two moves, in order of payoff:
+**Do not move the block to the tail.** Its position — a fixed-cost tenant between the
+head and the kept exchanges, `[system][user brief][assistant memoryBlock][exchanges]`
+— is *inside* the reusable prefix and measured **free**: a constant block there reused
+93.2% of the prior turn's prefix, identical to folding it into the head. Moving it to
+the tail would **cost** ~40–50%, for the same reason §6.1's tail move did: a trailing
+message truncates the prefix at the question (`KV_CACHE_POSITION_FINDINGS.md`).
 
-- **B3 (within a slice):** like chat's grounding, the `## Memories` block is
-  per-request and mutable, so it must not sit *before* the exchanges. Options, to be
-  chosen in review:
-  - **(a) Move it to the end**, after the kept exchanges. A write then invalidates
-    nothing behind it. Simplest; the block reads as the model's latest state, which
-    is coherent.
-  - **(b) Keep it in the head but freeze it per slice**, accepting that a
-    mid-slice write does not land until the next slice. This *reverses* a deliberate
-    `SESSION_TASKS.md` §4.1 decision (operator edits land on the next request), so it
-    is likely wrong — recorded for completeness.
-  - Recommendation: **(a)**, contingent on the wire-shape check in §6.1.
-- **B4 (across slices):** make the slice head **reusable** by removing the volatile
-  parts — chiefly the grounding timestamp (freeze it to the *session's* clock, not the
-  slice's) and the memory block (move to the tail per (a)). With a stable head and a
-  stable memory prefix, slice *n+1* can reuse slice *n*'s prefill for everything the
-  two share. This is the largest single win for the session lane.
+**The real lever is *when* the block is rebuilt, not *where* it sits.** It is
+re-rendered on every request (`RunEngine::sessionMemoryBlockFor`), and each
+`session_note`/`session_objective` write changes it — which invalidates the prefix
+behind it. Rebuild it **when the store has changed**, not per request (the store
+already knows — a revision or an updated-at is enough), and a mid-slice write becomes
+a rare, deliberate break instead of a per-request one. This *preserves* the
+`SESSION_TASKS.md` §4.1 seam (an operator edit still lands on the next request) and is
+strictly cheaper than relocating the block. **Still to do.**
+
+- **B4 (across slices):** unchanged, and still the largest win for the session lane —
+  but note it no longer involves moving memory. The slice head's volatile part is the
+  **grounding timestamp**: freeze it at the *session's* granularity (say, the day), not
+  the slice's, and slice *n+1* reuses slice *n*'s head plus whatever memory prefix the
+  two share. **Still to do.**
 
 ### 6.4 What we will *not* do
 
@@ -350,10 +379,12 @@ prefix-stability test; the digest's reuse figure. Ships alone and is what justif
 live test at a llama.cpp endpoint (§9.2's rig) and watch `cached_tokens` appear in the
 ledger where today it is invisible.
 
-**Section B — de-volatilise the front.**
-B1 (chat grounding to the tail) and B3/B4 (session memory to the tail; reusable slice
-head). These are the highest-payoff, lowest-risk moves: they change *position*, not
-*content* or *policy*, and the wire shape is pinned by the fixture server.
+**Section B — de-volatilise the front.** *(revised 2026-10-14 — see §6.1/§6.3)*
+**Landed:** B1, chat grounding **frozen** to a per-conversation anchor
+(`feat/chat-grounding-freeze`) — the biggest measured win, and it changed the clock's
+*source*, not its position. **Remaining:** B3, rebuild session memory only when it
+changes (it stays where it is); B4, freeze the slice grounding at the session/day
+granularity so slices share a head. Neither involves moving a block to the tail.
 
 **Section C — batched shedding.**
 B2, run and chat: frozen tail base, batched trims, rarely-biting count bound. This one
@@ -416,18 +447,20 @@ Two things the live run added that the byte-level work could not:
 
 ## 10. Open questions (need a decision before code)
 
-1. **Grounding placement.** Move it to the tail (§6.1) — and does any target endpoint
-   require the newest message to be the user turn? **Resolved on llama.cpp
-   (2026-10-14):** a trailing `system` message after the user turn is *accepted*,
-   as is appending grounding to the user turn or fronting it as a user turn — the
-   endpoint does not require the newest message to be user. A controlled test also
-   priced the move: with the clock advancing per turn, head grounding reuses 0% of
-   the prior prefix, trailing grounding reuses 82%, against a frozen-head ceiling of
-   89.8% (`KV_CACHE_BASELINE.md`). Still worth pinning against the vLLM/Ollama
-   dialects before relying on it in the fixtures.
-2. **Session memory placement.** §6.3(a) end-of-request vs §6.3(b) freeze-per-slice.
-   The recommendation reverses a documented §4.1 seam if (b) is chosen; (a) is
-   recommended precisely to avoid that.
+1. **Grounding placement — RESOLVED, and re-resolved.** Superseded 2026-10-14 by
+   `KV_CACHE_POSITION_FINDINGS.md`. The wire-shape half holds: on llama.cpp a trailing
+   `system` after the user turn is *accepted*, so no endpoint constraint forces the
+   question to be last. But the *pricing* was wrong: the earlier 82%-for-trailing
+   figure came from a probe whose conversation was held still, so the trailing
+   message was the only thing that changed. With a realistic growing conversation a
+   trailing message costs ~30 points of reuse *by itself* (it truncates the prefix at
+   the question), and moving the clock to the tail recovers none of B1 (28% → 43%).
+   **The decision is to freeze grounding instead** (§6.1); the block stays at
+   position 0. Still worth pinning the shape against vLLM/Ollama before relying on
+   it, but nothing depends on the trailing shape any more.
+2. **Session memory placement — RESOLVED.** Neither (a) nor (b): measured free where
+   it is (§6.3), so it stays between the head and the kept exchanges, and the lever
+   becomes rebuild-on-change rather than position.
 3. **Batch size / headroom target** for §6.2 — wants the Phase-0 numbers to choose.
    The baseline (`KV_CACHE_BASELINE.md`) found that neither of the *naive* positional
    moves (relocate the volatile section to the end of the same message) recovered
@@ -436,6 +469,9 @@ Two things the live run added that the byte-level work could not:
 4. **Cross-run reuse.** Should two consecutive runs of the same scheduled task share a
    cache? Today they cannot (fresh grounding timestamp each run). Out of scope for
    this note, but adjacent if scheduled tasks turn out to dominate prefill cost.
+   *(Now answerable: the timestamps differ every run because the clock moves, so
+   freezing a task's grounding to the day — as chat now does — would let consecutive
+   runs of a daily task share their head.)*
 5. **An opt-out knob.** Do we want a knob to *disable* any of this for an endpoint
    that punishes long shared prefixes (rare, but real for some cache-eviction
    policies)? Probably not for v1; recorded so the choice is deliberate.
