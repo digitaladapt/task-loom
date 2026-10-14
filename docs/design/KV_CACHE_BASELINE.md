@@ -93,6 +93,32 @@ run case, the real win needs the write to land behind the whole cacheable prefix
 which is what §6.3(a) plus the reusable slice head (B4) is for. Recorded as
 "not yet demonstrated," not as "done."
 
+## A controlled test of the fix direction
+
+The replay counterfactuals above are noisy on this single-slot server (they mutate
+one section inside a message whose *whole* byte position still matters, and the
+slot evicts aggressively). A minimal controlled test isolates the lever cleanly:
+a fixed conversation with identical turn text, varying only the grounding block's
+**position** and **value**, scoring request N+1 for how much of request N's prefix
+it reuses:
+
+| shape | reuse of the prior turn's prefix |
+|---|---:|
+| grounding in the head, clock **frozen** | 89.8% |
+| grounding in the head, clock **advances each turn** | **0.0%** |
+| grounding appended as a **trailing** message, clock advances | **82.0%** |
+| plain append, no grounding (control) | 89.1% |
+
+So on the endpoint as configured, moving the grounding block *behind* the
+conversation costs ~8 points against the frozen ceiling and recovers **the entire
+B1 loss**; leaving it in the head loses all reuse the moment the minute ticks.
+This is the measured basis for the §6.1 recommendation, and the change that should
+ship first.
+
+(One residual worth noting: even a frozen head only reached ~90% here, not the
+99.5% seen in the very first probe. That is the single-slot server's eviction, not
+the head — multi-slot endpoints and longer prompts both close the gap.)
+
 ## Cross-cutting findings
 
 - **Reuse is binary-ish and position-determined.** Baseline runs show 99.2–99.7%
