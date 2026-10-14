@@ -42,6 +42,56 @@ final class GroundingTest extends TestCase
     }
 
     /**
+     * `forNow()` renders the block as of a stated instant and leaves every
+     * deployment fact (zone, units, location) in place — it moves the clock,
+     * not the deployment.
+     */
+    public function testForNowPinsTheClockAndKeepsTheDeploymentFacts(): void
+    {
+        $instant = new \DateTimeImmutable('2026-07-05 03:30:00', new \DateTimeZone('UTC'));
+
+        $rendered = (new Grounding(timezone: 'America/Chicago', location: 'Chicago', units: 'imperial'))
+            ->forNow($instant)
+            ->render();
+
+        self::assertStringContainsString('Current date: Saturday, July 4, 2026', $rendered);
+        self::assertStringContainsString('Current time: 22:30 (America/Chicago)', $rendered);
+        self::assertStringContainsString('Units: imperial', $rendered);
+        self::assertStringContainsString('Location: Chicago', $rendered);
+    }
+
+    /**
+     * Two `forNow()` renders of the same instant are byte-identical — that is
+     * the whole point of pinning, and the property a chat's prefix reuse rests
+     * on.
+     */
+    public function testForNowIsStableAcrossRenders(): void
+    {
+        $instant = new \DateTimeImmutable('now');
+        $grounding = new Grounding(timezone: 'UTC');
+
+        self::assertSame(
+            $grounding->forNow($instant)->render(),
+            $grounding->forNow($instant)->render(),
+        );
+    }
+
+    /**
+     * `calendarDay()` answers in the deployment's zone, so "has the day
+     * turned?" is asked of the operator's day, not the container's.
+     *
+     * The instant is 03:30 UTC on July 5 — still July 4 in Chicago — so a
+     * server-clock implementation would wrongly report the day as turned.
+     */
+    public function testCalendarDaySpeaksTheDeploymentZone(): void
+    {
+        $grounding = new Grounding(timezone: 'America/Chicago');
+        $instant = new \DateTimeImmutable('2026-07-05 03:30:00', new \DateTimeZone('UTC'));
+
+        self::assertSame('2026-07-04', $grounding->calendarDay($instant));
+    }
+
+    /**
      * @return iterable<string, array{string, string, string}>
      */
     public static function timezones(): iterable

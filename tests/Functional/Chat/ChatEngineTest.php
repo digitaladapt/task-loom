@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Functional\Chat;
 
 use App\Chat\ChatEngine;
+use App\Context\Grounding;
 use App\Entity\Chat;
 use App\Entity\ChatEventType;
 use App\Entity\ChatExchange;
@@ -148,6 +149,88 @@ final class ChatEngineTest extends KernelTestCase
         $turns = \array_slice($sent, 1);
         self::assertSame(['user'], array_column($turns, 'role'));
         self::assertSame(['I think the fence needs doing before the rain.'], array_column($turns, 'content'));
+    }
+
+    /**
+     * THE CACHE INVARIANT, as the model receives it: the system message is
+     * byte-identical from one reply to the next.
+     *
+     * The grounding block used to be re-rendered from the live clock on every
+     * reply, and it sits at position 0 of the system message — so a
+     * prefix-caching server, which reuses a request only up to the first byte
+     * that changed, re-prefilled the *whole conversation* on every minute
+     * boundary (measured: 28% reuse against 94% when the block does not move;
+     * `docs/design/KV_CACHE_POSITION_FINDINGS.md`). The block is now rendered
+     * as of a per-conversation anchor and held still, so this assertion is the
+     * regression guard for the entire optimisation.
+     */
+    public function testTheSystemMessageIsByteIdenticalBetweenReplies(): void
+    {
+        $systems = [];
+
+        $this->llm->expects(self::exactly(2))
+            ->method('chat')
+            ->willReturnCallback(function (array $messages) use (&$systems): LlmResponse {
+                $systems[] = $messages[0]['content'];
+
+                return new LlmResponse('ok', 'stop', [], [], null, 5);
+            });
+
+        $chat = $this->newChat();
+
+        $first = $this->engine->ask($chat, 'first thing');
+        $this->engine->reply((int) $first->getId());
+
+        $second = $this->engine->ask($chat, 'second thing');
+        $this->engine->reply((int) $second->getId());
+
+        self::assertCount(2, $systems);
+        self::assertStringContainsString('## Grounding', $systems[0], 'the block still travels');
+        self::assertSame($systems[0], $systems[1], 'a moved byte here would cost the whole conversation its prefix');
+    }
+
+    /**
+     * The freshness the lane wanted is kept where it can actually differ: a
+     * conversation whose grounding is anchored to an earlier deployment day is
+     * re-grounded to today, once, and then held stable again.
+     *
+     * This is the property that made chat deliberately render the block per
+     * request ("a conversation resumed after a day of silence should be
+     * grounded in the day it is resumed on") — preserved, but moved from
+     * every-minute to once-a-day.
+     */
+    public function testAResumedConversationIsRegroundedWhenTheDayTurns(): void
+    {
+        $grounding = static::getContainer()->get(Grounding::class);
+        $yesterday = (new \DateTimeImmutable('now'))->modify('-1 day');
+
+        $chat = $this->newChat();
+        $chat->regroundAt($yesterday);
+        $this->em->flush();
+
+        $sent = [];
+
+        $this->llm->expects(self::once())
+            ->method('chat')
+            ->willReturnCallback(function (array $messages) use (&$sent): LlmResponse {
+                $sent = $messages;
+
+                return new LlmResponse('still here', 'stop', [], [], null, 5);
+            });
+
+        $exchange = $this->engine->ask($chat, 'Are you still there?');
+        $this->engine->reply((int) $exchange->getId());
+
+        $today = new \DateTimeImmutable('now');
+        self::assertSame(
+            $grounding->calendarDay($today),
+            $grounding->calendarDay($chat->groundingInstant()),
+            'the anchor moves forward to the day it was resumed on',
+        );
+
+        // And the wire block actually carries today, not yesterday.
+        self::assertStringContainsString($grounding->forNow($chat->groundingInstant())->render(), $sent[0]['content']);
+        self::assertStringNotContainsString($grounding->forNow($yesterday)->render(), $sent[0]['content']);
     }
 
     /**
