@@ -53,6 +53,29 @@ class Chat
     private \DateTimeImmutable $updatedAt;
 
     /**
+     * The instant this conversation's grounding is fixed to, or null when the
+     * conversation has never been re-grounded — in which case its creation
+     * time is the anchor ({@see groundingInstant()}).
+     *
+     * A conversation is grounded in the day it is resumed on, so chat
+     * deliberately re-renders the clock (`ChatEngine::compileSystemMessage`).
+     * But a clock that moves sits at position 0 of the system message, and a
+     * prefix-caching server reuses a request only up to the first byte that
+     * changed — so a live clock makes every reply re-prefill the entire
+     * conversation (measured: 28% reuse against 94% when it does not move; see
+     * `docs/design/KV_CACHE_POSITION_FINDINGS.md`).
+     *
+     * Recording an instant *freezes* the block instead: the engine renders
+     * grounding as of this moment, so it is byte-identical on every request
+     * while the deployment day holds, and the conversation keeps its whole
+     * prefix. When the day turns, the anchor is moved (see
+     * `App\Chat\ChatEngine`), which costs one cache break a day rather than
+     * one a minute.
+     */
+    #[ORM\Column(type: 'datetimetz_immutable', nullable: true)]
+    private ?\DateTimeImmutable $groundingAt = null;
+
+    /**
      * The exchanges, in creation order.
      *
      * No `#[ORM\OrderBy]` here, deliberately: the attribute takes a *string*
@@ -98,6 +121,35 @@ class Chat
     public function getUpdatedAt(): \DateTimeImmutable
     {
         return $this->updatedAt;
+    }
+
+    /**
+     * The clock this conversation's grounding is fixed to, resolving for a row
+     * written before the anchor existed.
+     *
+     * A conversation is never ungrounded, so "no anchor yet" answers with the
+     * conversation's own creation time rather than `null`-means-now: a stored
+     * conversation must render the same block on every request, and reading the
+     * live clock here would put the moving value back on the wire for exactly
+     * the rows that cannot yet be migrated. The first reply to an old
+     * conversation therefore grounds it once, in its own past — grounded, and
+     * then frozen.
+     */
+    public function groundingInstant(): \DateTimeImmutable
+    {
+        return $this->groundingAt ?? $this->createdAt;
+    }
+
+    /**
+     * Move the grounding anchor to a new instant.
+     *
+     * Called when the deployment day has turned (or on an explicit re-ground):
+     * the next request renders the new block, and every request after it is
+     * byte-stable again until the day turns once more.
+     */
+    public function regroundAt(\DateTimeImmutable $instant): void
+    {
+        $this->groundingAt = $instant;
     }
 
     /** @return Collection<int, ChatExchange> */

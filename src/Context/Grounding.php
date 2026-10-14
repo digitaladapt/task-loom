@@ -50,6 +50,46 @@ final readonly class Grounding
         $this->location = self::resolveLocation($location);
     }
 
+    /**
+     * This deployment's grounding, fixed to a stated instant.
+     *
+     * The block is normally rendered from the live clock, which is right for a
+     * run (short, and its head is frozen anyway) but wrong for a conversation:
+     * a chat re-renders the block on every reply, and a prefix-caching server
+     * reuses a request only up to the first byte that changed. A clock at
+     * position 0 of the system message therefore costs the *whole* request on
+     * every minute boundary — measured at 28% prefix reuse against 94% when
+     * the block does not move (`docs/design/KV_CACHE_POSITION_FINDINGS.md`).
+     *
+     * Freezing is how a caller gets the freshness the deployment *chose* (the
+     * block still states the deployment's zone, units and location) without
+     * paying a cache break per reply: the instant is captured once and the
+     * block is byte-identical on every request until the caller chooses to
+     * move it (see {@see \App\Entity\Chat::groundingInstant()}).
+     */
+    public function forNow(\DateTimeImmutable $now): self
+    {
+        return new self(
+            timezone: $this->timezone->getName(),
+            location: $this->location,
+            units: $this->units->value,
+            now: $now,
+        );
+    }
+
+    /**
+     * The deployment-local calendar day of an instant, as `Y-m-d`.
+     *
+     * A caller that freezes the block wants to know when the freeze has gone
+     * stale — and "stale" is the deployment's day changing, not the model's or
+     * the container's. Comparing this across two instants is how a frozen
+     * conversation decides to re-ground (`\App\Chat\ChatEngine`).
+     */
+    public function calendarDay(\DateTimeImmutable $at): string
+    {
+        return $at->setTimezone($this->timezone)->format('Y-m-d');
+    }
+
     public function render(): string
     {
         // Always normalize to the deployment's zone, whatever zone the clock
