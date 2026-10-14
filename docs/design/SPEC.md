@@ -950,7 +950,9 @@ in the zone, instants are what is stored.
 
 **Status:** the conversational loop, the attribution invariant, the chat lane
 as priority head, and the phone-first web surface are built. Streaming (the
-capture, the guards, the loop detector, and partial-as-output) is built — see
+capture, the guards, the loop detector (three rules: short block periodicity,
+long-range recurrence of a block larger than the period ceiling, and
+normalised line repetition), and partial-as-output) is built — see
 §5.3's stream-cut classes. Alerts (§5 of `CHAT_AND_CAPACITY.md`) and the
 assistant initiating are not.
 

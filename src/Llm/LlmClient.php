@@ -143,6 +143,7 @@ final class LlmClient implements LlmClientInterface
                 self::stringOrNull($config['max_duration'] ?? null),
                 self::stringOrNull($config['loop_min_span'] ?? null),
                 self::stringOrNull($config['loop_min_repeats'] ?? null),
+                self::stringOrNull($config['loop_min_recurrence_repeats'] ?? null),
             ),
             (float) ($config['guard_tick'] ?? 0.25),
         );
@@ -209,10 +210,12 @@ final class LlmClient implements LlmClientInterface
         $contentDetector = new LoopDetector(
             minSpanChars: $this->guards->loopMinSpanChars,
             minRepeats: $this->guards->loopMinRepeats,
+            minRecurrenceRepeats: $this->guards->loopMinRecurrenceRepeats,
         );
         $reasoningDetector = new LoopDetector(
             minSpanChars: $this->guards->loopMinSpanChars,
             minRepeats: $this->guards->loopMinRepeats,
+            minRecurrenceRepeats: $this->guards->loopMinRecurrenceRepeats,
         );
 
         $chunks = 0;

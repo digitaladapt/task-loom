@@ -38,6 +38,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded with its evidence (what repeated, how often, over how many
   characters) so the judgement is reviewable.
 
+  **A repeated block longer than the block rule can sweep is caught too**
+  (`TASKLOOM_LLM_LOOP_MIN_RECURRENCE_REPEATS` 3, `kind: "recurrence"`). The
+  block rule sweeps candidate periods character by character, which is why
+  its period ceiling exists — and the ceiling means it cannot see a loop
+  whose repeated block is longer than it, which is exactly the shape a model
+  produces when it reads its own context back. A session run did: it recited
+  a ~1.7 KB `[you]`/`[operator]` exchange verbatim, over and over, for two
+  hours, and the detector was silent because the block rule never tries a
+  period above 128 characters and the line rule needs byte-identical lines
+  where the recitation's carry-over sat ~27 lines back. The long-range rule
+  finds the period by asking whether the tail of the buffer has happened
+  before instead of by sweeping, so a 1.7 KB block costs as little to see as
+  a 27-character one; the candidate it proposes is still verified character
+  by character, so a coincidental window match is rejected rather than
+  reported. Three verbatim passes (several KB of evidence) earn the cut, and
+  the line rule now normalises line endings and interior spacing, so a
+  `\n`/`\r\n` mismatch cannot hide a repeated line.
+
   **Partial output is output.** A guard cut returns the captured content as
   the chat reply / run completion — the person sees what was said, and the
   stop (reason, detail, dropped half-written tool calls) rides the response
