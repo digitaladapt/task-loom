@@ -312,14 +312,17 @@ head and the kept exchanges, `[system][user brief][assistant memoryBlock][exchan
 the tail would **cost** ~40–50%, for the same reason §6.1's tail move did: a trailing
 message truncates the prefix at the question (`KV_CACHE_POSITION_FINDINGS.md`).
 
-**The real lever is *when* the block is rebuilt, not *where* it sits.** It is
-re-rendered on every request (`RunEngine::sessionMemoryBlockFor`), and each
-`session_note`/`session_objective` write changes it — which invalidates the prefix
-behind it. Rebuild it **when the store has changed**, not per request (the store
-already knows — a revision or an updated-at is enough), and a mid-slice write becomes
-a rare, deliberate break instead of a per-request one. This *preserves* the
-`SESSION_TASKS.md` §4.1 seam (an operator edit still lands on the next request) and is
-strictly cheaper than relocating the block. **Still to do.**
+**The block is already pure, so "rebuild it less often" is a no-op — corrected
+2026-10-14.** The premise was that re-rendering on every request (the §4.1 seam,
+`RunEngine::sessionMemoryBlockFor`) is itself a cost. It is not: the rendered block is
+a function only of the stored objective and notes — no clock, no counter, no ordering
+drift — so an unchanged store re-renders it byte-for-byte. Pinned by
+`SessionMemoryRendererTest::testTheBlockIsPureSoAnUnchangedStoreRerendersItByteIdentically()`.
+The block therefore breaks the prefix **exactly when a write changes it**, and at no
+other time; the every-request rebuild is free. So B3 needs neither a relocation nor a
+rebuild cadence. What it still needs is a measurement this single-slot rig cannot
+make — what a write's prefix invalidation actually costs, since the baseline's 54–67%
+conflates it with the slot eviction. Deferred, not settled. B4 (below) is unaffected.
 
 - **B4 (across slices):** unchanged, and still the largest win for the session lane —
   but note it no longer involves moving memory. The slice head's volatile part is the
@@ -382,9 +385,12 @@ ledger where today it is invisible.
 **Section B — de-volatilise the front.** *(revised 2026-10-14 — see §6.1/§6.3)*
 **Landed:** B1, chat grounding **frozen** to a per-conversation anchor
 (`feat/chat-grounding-freeze`) — the biggest measured win, and it changed the clock's
-*source*, not its position. **Remaining:** B3, rebuild session memory only when it
-changes (it stays where it is); B4, freeze the slice grounding at the session/day
-granularity so slices share a head. Neither involves moving a block to the tail.
+*source*, not its position. **B3 needs no code:** the block is pure, so the
+§4.1 every-request rebuild is already free and only a write breaks the prefix (§6.3)
+— pinned by a test; what a write's invalidation *costs* wants a two-slot measurement
+this rig cannot give. **Remaining:** B4, freeze the slice grounding at the
+session/day granularity so consecutive slices share a head. No move of any block to
+the tail remains in this section.
 
 **Section C — batched shedding.**
 B2, run and chat: frozen tail base, batched trims, rarely-biting count bound. This one

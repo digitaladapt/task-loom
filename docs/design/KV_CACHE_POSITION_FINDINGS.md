@@ -130,12 +130,17 @@ a ~30% tax on an otherwise-94% conversation, so it should be opt-in.
 **B3 — session memory.** Do **not** move the `## Memories` block to the tail.
 Its present position — a fixed-cost tenant between the head and the kept
 exchanges — is inside the cacheable prefix and measured free (93%). A **mid-slice
-write** still invalidates the prefix behind it (the block changes), so the real
-lever is *how often the block is rebuilt*, not where it sits: rebuild it **when
-it changes** (the store already knows) rather than on **every request**, and it
-becomes a write-rare event instead of a per-request break. This *preserves* the
-`SESSION_TASKS.md` §4.1 seam (an operator edit lands on the next request) and is
-strictly cheaper than relocating the block.
+write** still invalidates the prefix behind it (the block changes) — but the block
+is otherwise a **pure function of the store**, so the every-request rebuild that
+the §4.1 seam performs is byte-identical and costs nothing to cache.
+
+> **Corrected 2026-10-14.** An earlier draft of this section proposed "rebuild
+> only when it changes". That is a **no-op**: the rebuild already only changes the
+> bytes when the store changed, so there is nothing to make rarer. The
+> determinism it rested on is now pinned by
+> `SessionMemoryRendererTest::testTheBlockIsPureSoAnUnchangedStoreRerendersItByteIdentically()`.
+> The block breaks the prefix exactly when a write changes it; what that write
+> *costs* this rig cannot isolate from slot eviction, so it is deferred.
 
 **B4 — session slices.** The cross-slice win is real and unaffected: with the
 memory block (and, ideally, the grounding date) stable across slices, slice
