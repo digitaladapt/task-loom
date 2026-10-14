@@ -167,7 +167,7 @@ the request prefix from that point forward.
 (`SESSION_TASKS.md` §4.1: an operator edit lands on the next request, no restart).
 Its *position* is not. See §6.3.
 
-### B4 — Every session slice is a brand-new head — **high (compounding B3)**
+### B4 — Every session slice is a brand-new head — **fixed (compounding B3)**
 
 A slice is an ordinary `Run` (`SessionSliceEngine::createSlice`,
 `src/Session/SessionSliceEngine.php:334`) with its own `compileForSlice()` head and a
@@ -176,6 +176,12 @@ the declaration vocabulary or toolbox changed — more), so **nothing carries ov
 each slice re-prefills its head from scratch even when the memory block it carries is
 mostly the same text. A session that runs twenty slices pays twenty cold prefill
 costs for essentially one conversation. This is B1's disease in the session lane.
+
+**Fixed:** the slice engine anchors the session (`Task::groundingAt`, mirroring
+`Chat::groundingAt`) and compiles each slice's head from that anchor
+(`SessionSliceEngine::groundingInstantFor()` → `PromptCompiler::compileForSlice()`),
+so slices within one deployment day compile a byte-identical head; the anchor moves
+only when the day turns.
 
 ### B5 — Determinism of the parts that *do* repeat — **must-hold invariant, verify**
 
@@ -303,7 +309,7 @@ per-turn trim, not less — it will simply fire far less often.
 the knob that trades prompt size against re-prefill frequency; it wants a measured
 default, which is why Phase 0 instrumentation comes first.
 
-### 6.3 Session memory → **leave it where it is; rebuild it only when it changes** (fixes B3, B4) — *corrected 2026-10-14*
+### 6.3 Session memory → **leave it where it is; rebuild it only when it changes** (fixes B3) — *corrected 2026-10-14*
 
 **Do not move the block to the tail.** Its position — a fixed-cost tenant between the
 head and the kept exchanges, `[system][user brief][assistant memoryBlock][exchanges]`
@@ -324,11 +330,11 @@ rebuild cadence. What it still needs is a measurement this single-slot rig canno
 make — what a write's prefix invalidation actually costs, since the baseline's 54–67%
 conflates it with the slot eviction. Deferred, not settled. B4 (below) is unaffected.
 
-- **B4 (across slices):** unchanged, and still the largest win for the session lane —
-  but note it no longer involves moving memory. The slice head's volatile part is the
-  **grounding timestamp**: freeze it at the *session's* granularity (say, the day), not
-  the slice's, and slice *n+1* reuses slice *n*'s head plus whatever memory prefix the
-  two share. **Still to do.**
+- **B4 (across slices):** fixed by freezing the grounding at the *session's*
+  granularity (the day), not the slice's — see §6.5. Note it never involved moving
+  memory: the slice head's volatile part is the **grounding timestamp**, and with it
+  anchored, slice *n+1* reuses slice *n*'s head plus whatever memory prefix the two
+  share.
 
 ### 6.4 What we will *not* do
 
@@ -340,6 +346,26 @@ conflates it with the slot eviction. Deferred, not settled. B4 (below) is unaffe
   invariants in §5.6/§15.9 win over a latency win every time they conflict.
 - **No server-side coupling.** The harness stays endpoint-agnostic; it only stops
   *preventing* reuse.
+
+### 6.5 Session slices → **anchor the grounding to the session** (fixes B4) — *landed 2026-10-14*
+
+A slice's head is re-compiled per slice, and the only volatile part of it is the
+grounding timestamp — so a live clock made every slice a brand-new head, and the
+whole session re-prefilled once per slice. The fix is the same one §6.1 shipped for
+chat, applied one level up: **anchor the grounding** to an instant stored on the
+session (the `task` row, mirroring `chat.grounding_at`), render every slice's block
+as of that anchor, and move the anchor only when the deployment day turns.
+
+So `SessionSliceEngine::createSlice()` resolves the session's anchor
+(`groundingInstantFor()`: adopt the stored anchor; move it if the day changed; adopt
+`now` for a task with none) and hands it to `PromptCompiler::compileForSlice()`, which
+renders `## Grounding` with `Grounding::forNow($anchor)`. Within a day every slice's
+head is byte-identical, so slice *n+1* reuses slice *n*'s prefix; across a day
+boundary one slice pays the break and the rest are stable again. The freshness the
+lane wants is preserved exactly as §6.1 preserved chat's: a session resumed tomorrow
+is told tomorrow's date, at one cache break a day rather than one a slice. An
+ordinary run is untouched — its head is compiled once and never re-compiled, so its
+grounding stays the live clock.
 
 ## 7. Instrumentation — prove it before and after (Phase 0)
 
@@ -382,15 +408,16 @@ prefix-stability test; the digest's reuse figure. Ships alone and is what justif
 live test at a llama.cpp endpoint (§9.2's rig) and watch `cached_tokens` appear in the
 ledger where today it is invisible.
 
-**Section B — de-volatilise the front.** *(revised 2026-10-14 — see §6.1/§6.3)*
+**Section B — de-volatilise the front.** *(complete 2026-10-14 — see §6.1/§6.3/§6.5)*
 **Landed:** B1, chat grounding **frozen** to a per-conversation anchor
 (`feat/chat-grounding-freeze`) — the biggest measured win, and it changed the clock's
 *source*, not its position. **B3 needs no code:** the block is pure, so the
 §4.1 every-request rebuild is already free and only a write breaks the prefix (§6.3)
 — pinned by a test; what a write's invalidation *costs* wants a two-slot measurement
-this rig cannot give. **Remaining:** B4, freeze the slice grounding at the
-session/day granularity so consecutive slices share a head. No move of any block to
-the tail remains in this section.
+this rig cannot give. **B4 landed:** the slice grounding is frozen to a per-session
+anchor, so consecutive slices in a day share a byte-identical head (§6.5). No move of
+any block to the tail was made — and §6.1/§6.3/§6.5 all record why that direction is
+the wrong one.
 
 **Section C — batched shedding.**
 B2, run and chat: frozen tail base, batched trims, rarely-biting count bound. This one

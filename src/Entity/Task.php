@@ -133,6 +133,27 @@ class Task
     private ?\DateTimeImmutable $updatedAt = null;
 
     /**
+     * The instant this task's grounding block is fixed to, or null when it has
+     * never been anchored — in which case its creation time is the anchor
+     * ({@see groundingInstant()}). Only a session anchors; an ordinary run's
+     * head is compiled once and never re-compiled, so its grounding stays the
+     * live clock and this column stays null.
+     *
+     * A session slice is an ordinary `Run` with its own compiled head
+     * ({@see \App\Session\SessionSliceEngine::createSlice}), and the volatile
+     * part of that head is the grounding timestamp: re-rendered live, it makes
+     * every slice a brand-new head, so slice *n+1* re-prefills from scratch even
+     * when the memory it carries is mostly the same text. Anchoring renders the
+     * block as of this instant instead, so within one deployment day every slice
+     * of a session compiles a byte-identical head and reuses its predecessor's
+     * prefix. The anchor is moved when the day turns (one cache break a day, not
+     * one a slice), which keeps the freshness that matters: a session resumed
+     * tomorrow is told tomorrow's date (see `KV_CACHE.md` §6.3, B4).
+     */
+    #[ORM\Column(type: 'datetimetz_immutable', nullable: true)]
+    private ?\DateTimeImmutable $groundingAt = null;
+
+    /**
      * @param list<string> $toolbox
      */
     public function __construct(
@@ -374,6 +395,35 @@ class Task
     public function getUpdatedAt(): ?\DateTimeImmutable
     {
         return $this->updatedAt;
+    }
+
+    /**
+     * The instant this task's grounding is fixed to, or null when the task has
+     * neither an anchor nor a creation time yet (an entity not yet persisted).
+     *
+     * A session's first slice grounds the session in the day it is started on
+     * and then holds the block byte-stable, exactly as a chat does
+     * (`App\Entity\Chat::groundingInstant()`), so consecutive slices share a
+     * head instead of each re-prefilling one.
+     */
+    public function groundingInstant(): ?\DateTimeImmutable
+    {
+        return $this->groundingAt ?? $this->createdAt;
+    }
+
+    /**
+     * Move the grounding anchor to a new instant — called when the deployment
+     * day has turned, so the next slice renders the new day's block and every
+     * slice after that is byte-stable again until the day turns once more.
+     *
+     * Deliberately not gated by {@see assertMutable()}: the anchor is
+     * mechanical scheduling state, like {@see markHasRuns()}, not content a
+     * caller edits — and the slice engine writes it from inside a settlement
+     * commit, where throwing would roll the settlement back.
+     */
+    public function regroundAt(\DateTimeImmutable $instant): void
+    {
+        $this->groundingAt = $instant;
     }
 
     /**

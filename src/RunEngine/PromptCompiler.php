@@ -109,11 +109,19 @@ final readonly class PromptCompiler
      * derivation the toolbox's `session_declare` entry renders from, so
      * the prompt cannot teach an ending the wire refuses.
      *
+     * `$groundingAt` fixes the grounding block to an instant
+     * (docs/design/KV_CACHE.md §6.3, B4): a slice's head is re-compiled per
+     * slice, so a live clock would make every slice of a session a
+     * brand-new head. The slice engine resolves the session's anchor and
+     * passes it here, so within one deployment day every slice compiles a
+     * byte-identical head and reuses its predecessor's prefix. Null renders
+     * the live clock, exactly as a run's head does.
+     *
      * @param list<ToolDefinition> $tools the slice's frozen toolbox
      *
      * @return array{system: string, user: string}
      */
-    public function compileForSlice(Task $task, array $tools, ?SessionEndings $endings = null): array
+    public function compileForSlice(Task $task, array $tools, ?SessionEndings $endings = null, ?\DateTimeImmutable $groundingAt = null): array
     {
         $endings ??= new SessionEndings();
 
@@ -123,6 +131,7 @@ final readonly class PromptCompiler
             $tools,
             $endings->sliceNote(),
             completionOverride: $endings->completionText(),
+            groundingAt: $groundingAt,
         );
         $user = $this->compileUser($task->getBrief());
 
@@ -185,7 +194,7 @@ final readonly class PromptCompiler
      * @param list<ToolDefinition> $tools
      * @param list<StepOutput>     $inputs
      */
-    private function compileSystem(string $title, string $brief, array $tools, ?string $note = null, array $inputs = [], ?string $completionOverride = null): string
+    private function compileSystem(string $title, string $brief, array $tools, ?string $note = null, array $inputs = [], ?string $completionOverride = null, ?\DateTimeImmutable $groundingAt = null): string
     {
         $sections = [];
 
@@ -227,8 +236,10 @@ final readonly class PromptCompiler
         $sections[] = "## Completion\n\n".($completionOverride ?? $this->template->completion());
 
         // 6. Grounding last: the freshest terms in the head, nearest the
-        // model's first reply.
-        $sections[] = "## Grounding\n\n".$this->grounding->render();
+        // model's first reply. A slice fixes it to the session's anchor
+        // (docs/design/KV_CACHE.md §6.3, B4); a run renders the live clock.
+        $grounding = null !== $groundingAt ? $this->grounding->forNow($groundingAt) : $this->grounding;
+        $sections[] = "## Grounding\n\n".$grounding->render();
 
         return implode("\n\n", $sections);
     }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Functional\Session;
 
 use App\Command\RunRequeueCommand;
+use App\Context\Grounding;
 use App\Entity\Run;
 use App\Entity\RunEventType;
 use App\Entity\RunStatus;
@@ -165,6 +166,121 @@ final class SessionSliceFlowTest extends KernelTestCase
         // Done is terminal: nothing follows it.
         self::assertSame(SessionState::Complete, $slices->state($task));
         self::assertCount(0, $this->lane('session'), 'no carrier is left behind');
+    }
+
+    /**
+     * Consecutive slices of a session compile a byte-identical head, so slice
+     * *n+1* reuses slice *n*'s prefix instead of re-prefilling a fresh head
+     * (docs/design/KV_CACHE.md §6.3, B4).
+     *
+     * The head was volatile before: each slice is an ordinary `Run` whose head
+     * is re-compiled with a live grounding timestamp, so every slice differed
+     * at the block and nothing carried over. Here two real slices — the first,
+     * then the milestone's successor — are driven through the lanes and their
+     * frozen heads compared.
+     */
+    public function testConsecutiveSlicesCompileAByteIdenticalHead(): void
+    {
+        $grounding = static::getContainer()->get(Grounding::class);
+        $task = $this->sessionTask();
+
+        // An anchor on the *same deployment day* as the run, but at its first
+        // minute — the deployment is America/Chicago, and a UTC "today" is
+        // still yesterday there, so the zone matters. Same day, so the engine
+        // must not re-ground it; a different minute from the live clock, so a
+        // head that rendered the live clock instead of the anchor is caught
+        // here rather than passing by coincidence on a fast run.
+        $zone = new \DateTimeZone($_SERVER['TASKLOOM_TIMEZONE'] ?? 'UTC');
+        $anchor = (new \DateTimeImmutable('today', $zone))->setTime(0, 0, 1);
+        $task->regroundAt($anchor);
+        $this->em->flush();
+
+        $this->engine->start($this->taskRefetch($task));
+        $this->bus()->dispatch(new SessionTurnMessage((int) $this->runs()[0]->getId(), 1));
+
+        $chats = 0;
+        $this->llm->method('chat')->willReturnCallback(
+            function () use (&$chats): LlmResponse {
+                ++$chats;
+
+                return 1 === $chats
+                    ? $this->response(toolCalls: [
+                        ['id' => 'c1', 'name' => 'session_declare', 'arguments' => ['outcome' => 'milestone', 'summary' => 'Skeleton up.']],
+                    ])
+                    : $this->response(toolCalls: [
+                        ['id' => 'c2', 'name' => 'session_declare', 'arguments' => ['outcome' => 'done', 'summary' => 'Finish.']],
+                    ]);
+            },
+        );
+
+        $this->pump();
+
+        $this->em->clear();
+        $runs = $this->runs();
+        self::assertCount(2, $runs);
+
+        $firstHead = $runs[0]->getCheckpoint()['promptHead']['system'] ?? null;
+        $secondHead = $runs[1]->getCheckpoint()['promptHead']['system'] ?? null;
+
+        self::assertIsString($firstHead);
+        self::assertStringContainsString('## Grounding', $firstHead, 'the block still travels');
+        self::assertSame($firstHead, $secondHead, 'a moved byte here would cost every slice its predecessor\'s prefix');
+
+        // The engine left the same-day anchor in place, and the head carries
+        // it — at the anchor's minute, not the compile minute. Both halves
+        // matter: the first would pass on a live clock by coincidence (the
+        // run is fast), the second is what proves the block was pinned.
+        $stored = $this->taskRefetch($task)->groundingInstant();
+        self::assertNotNull($stored);
+        self::assertSame(
+            $anchor->format('Y-m-d H:i'),
+            $stored->format('Y-m-d H:i'),
+            'a same-day anchor is not moved',
+        );
+        self::assertStringContainsString(
+            $grounding->forNow($anchor)->render(),
+            $firstHead,
+            'the head renders the stored anchor, not the live clock',
+        );
+    }
+
+    /**
+     * The freshness the lane wants is kept where it can actually differ: a
+     * session whose anchor is an earlier deployment day is re-grounded to
+     * today, once, and then held stable again — one cache break a day rather
+     * than one a slice.
+     */
+    public function testASessionResumedOnANewDayIsRegrounded(): void
+    {
+        $grounding = static::getContainer()->get(Grounding::class);
+        $task = $this->sessionTask();
+        $staleAnchor = (new \DateTimeImmutable('now'))->modify('-1 day');
+        $task->regroundAt($staleAnchor);
+        $this->em->flush();
+
+        $slice = $this->engine->start($this->taskRefetch($task));
+
+        // The anchor moved forward to the day the slice was compiled on, so a
+        // session resumed today is told today's date rather than the day it
+        // was last idle — the freshness a live clock gave, kept at one cache
+        // break a day instead of one a slice.
+        $stored = $this->taskRefetch($task)->groundingInstant();
+        self::assertNotNull($stored);
+        self::assertSame(
+            $grounding->calendarDay(new \DateTimeImmutable('now')),
+            $grounding->calendarDay($stored),
+            'the anchor moves forward to the day the slice was compiled on',
+        );
+
+        // And the slice's head carries that new day, not the stale one.
+        $head = $slice->getCheckpoint()['promptHead']['system'] ?? null;
+        self::assertIsString($head);
+        self::assertStringContainsString($grounding->forNow($stored)->render(), $head);
+        self::assertStringNotContainsString(
+            $grounding->forNow($staleAnchor)->render(),
+            $head,
+            'a slice resumed on a new day is not told yesterday\'s date',
+        );
     }
 
     /**

@@ -28,6 +28,56 @@ final class TaskLifecycleTest extends TestCase
         );
     }
 
+    /**
+     * A task with no anchor grounds at its creation time — the null case a
+     * migration leaves behind, and an ordinary run never writes at all.
+     *
+     * Answering "no anchor yet" with "now" would put the moving value back on
+     * the wire for exactly the rows a migration did not touch, which is the
+     * cache break the anchor exists to remove (KV_CACHE.md §6.3, B4).
+     */
+    public function testAnUnanchoredTaskGroundsAtItsCreationTime(): void
+    {
+        $task = $this->makeTask();
+        $task->onPrePersist();
+
+        self::assertSame($task->getCreatedAt(), $task->groundingInstant());
+    }
+
+    /**
+     * Moving the anchor is what a day rollover does; until then it is stable,
+     * which is the property a session's slice-to-slice reuse rests on.
+     */
+    public function testRegroundingMovesTheAnchor(): void
+    {
+        $task = $this->makeTask();
+        $instant = new \DateTimeImmutable('2026-07-05 03:30:00', new \DateTimeZone('UTC'));
+
+        $task->regroundAt($instant);
+
+        self::assertSame($instant, $task->groundingInstant());
+    }
+
+    /**
+     * The anchor is mechanical scheduling state, not content: a session is
+     * enabled (and so content-locked) when the slice engine moves its anchor
+     * from inside a settlement commit, where a throw would roll the
+     * settlement back. Unlike setTitle(), regroundAt() must not assert
+     * mutability.
+     */
+    public function testRegroundingIsAllowedOnAnEnabledTask(): void
+    {
+        $task = $this->makeTask();
+        $task->enable();
+
+        self::assertTrue($task->isContentLocked());
+
+        $instant = new \DateTimeImmutable('2026-07-05 03:30:00', new \DateTimeZone('UTC'));
+        $task->regroundAt($instant);
+
+        self::assertSame($instant, $task->groundingInstant());
+    }
+
     public function testDraftTaskIsEditable(): void
     {
         $task = $this->makeTask();
