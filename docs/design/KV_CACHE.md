@@ -417,11 +417,22 @@ Two things the live run added that the byte-level work could not:
 ## 10. Open questions (need a decision before code)
 
 1. **Grounding placement.** Move it to the tail (§6.1) — and does any target endpoint
-   require the newest message to be the user turn? Pin against the fixture server.
+   require the newest message to be the user turn? **Resolved on llama.cpp
+   (2026-10-14):** a trailing `system` message after the user turn is *accepted*,
+   as is appending grounding to the user turn or fronting it as a user turn — the
+   endpoint does not require the newest message to be user. A controlled test also
+   priced the move: with the clock advancing per turn, head grounding reuses 0% of
+   the prior prefix, trailing grounding reuses 82%, against a frozen-head ceiling of
+   89.8% (`KV_CACHE_BASELINE.md`). Still worth pinning against the vLLM/Ollama
+   dialects before relying on it in the fixtures.
 2. **Session memory placement.** §6.3(a) end-of-request vs §6.3(b) freeze-per-slice.
    The recommendation reverses a documented §4.1 seam if (b) is chosen; (a) is
    recommended precisely to avoid that.
 3. **Batch size / headroom target** for §6.2 — wants the Phase-0 numbers to choose.
+   The baseline (`KV_CACHE_BASELINE.md`) found that neither of the *naive* positional
+   moves (relocate the volatile section to the end of the same message) recovered
+   reuse on the run or session shapes, while the controlled chat move did — so this
+   knob wants a measured `cached_tokens` bar before it is set, not a guess.
 4. **Cross-run reuse.** Should two consecutive runs of the same scheduled task share a
    cache? Today they cannot (fresh grounding timestamp each run). Out of scope for
    this note, but adjacent if scheduled tasks turn out to dominate prefill cost.
