@@ -204,7 +204,6 @@ final class SessionMemoryRendererTest extends KernelTestCase
         // is disturbed is the notes behind it, never the objective before it.
         $store->addNote($task, 'The parser drops comments.', SessionMemorySource::Session);
         $after = $renderer->render($task);
-        self::assertNotNull($after);
         self::assertNotSame($first, $after);
         self::assertSame(
             \substr($first, 0, \strpos($first, '- [you] Migration 0007')),

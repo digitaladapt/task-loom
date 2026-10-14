@@ -159,6 +159,56 @@ final class PromptCompilerTest extends TestCase
         );
     }
 
+    /**
+     * A session slice's grounding is fixed to the anchor the slice engine
+     * passes, so two slices compiled in the same deployment day are
+     * byte-identical in the head — the property that lets slice *n+1* reuse
+     * slice *n*'s prefix (KV_CACHE.md §6.3, B4).
+     */
+    public function testASliceGroundsAsOfItsAnchorSoSlicesShareAHead(): void
+    {
+        $task = new Task(
+            'Importer session',
+            'Keep working the importer.',
+            TaskKind::Session,
+            ToolboxMode::Explicit,
+            ['summary_tool'],
+            TaskAuthor::User,
+        );
+        // A day before the compiler's own pinned clock, so an anchored head
+        // is distinguishable from the live one.
+        $anchor = new \DateTimeImmutable('2026-09-20 09:00', new \DateTimeZone('UTC'));
+
+        // Two compilations of the same day, a compile apart in wall-clock
+        // time: the head must not move, or every slice breaks the prefix.
+        $first = $this->compiler()->compileForSlice($task, [$this->tool('summary_tool')], groundingAt: $anchor)['system'];
+        \usleep(1000);
+        $second = $this->compiler()->compileForSlice($task, [$this->tool('summary_tool')], groundingAt: $anchor)['system'];
+
+        self::assertSame($first, $second, 'an anchored slice head is byte-identical across slices');
+        self::assertStringContainsString('## Grounding', $first, 'the block still travels');
+        self::assertStringContainsString('Sunday, September 20, 2026', $first, 'the head speaks the anchor, not the live clock');
+
+        $live = $this->compiler()->compileForSlice($task, [$this->tool('summary_tool')])['system'];
+        self::assertStringContainsString('Saturday, September 26, 2026', $live, 'without an anchor the block is the live clock');
+        self::assertNotSame($first, $live, 'the anchor moves the block off the live clock');
+    }
+
+    /**
+     * An ordinary run is untouched by the anchor: its head is compiled once
+     * and never re-compiled, so its grounding stays the live clock and
+     * `compile()` takes no anchor at all.
+     */
+    public function testAnOrdinaryRunStillRendersTheLiveClock(): void
+    {
+        $system = $this->compiler()->compile($this->task(), [$this->tool('summary_tool')])['system'];
+
+        // The compiler's grounding is pinned to 2026-09-26 09:00 UTC for
+        // determinism; the point is that compile() rendered it at all.
+        self::assertStringContainsString('## Grounding', $system);
+        self::assertStringContainsString('Current time: 09:00 (UTC)', $system);
+    }
+
     private function task(): Task
     {
         return new Task(

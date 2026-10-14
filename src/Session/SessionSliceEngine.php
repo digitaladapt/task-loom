@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Session;
 
+use App\Context\Grounding;
 use App\Entity\ErrorClass;
 use App\Entity\Run;
 use App\Entity\RunEvent;
@@ -67,6 +68,7 @@ final readonly class SessionSliceEngine
         private RunRepository $runs,
         private ToolboxResolver $resolver,
         private PromptCompiler $prompts,
+        private Grounding $grounding,
         private EntityManagerInterface $em,
         private MessageBusInterface $bus,
         private array $budgets = [],
@@ -326,12 +328,20 @@ final readonly class SessionSliceEngine
         try {
             $tools = $this->resolver->resolve($task);
 
+            // Fix this slice's grounding to the session's anchor before the
+            // head is compiled, so slices within a deployment day compile a
+            // byte-identical head and reuse each other's prefix rather than
+            // each re-prefilling a fresh one (docs/design/KV_CACHE.md §6.3,
+            // B4). The anchor is written on the task, which the flush below
+            // persists with the slice row.
+            $groundingAt = $this->groundingInstantFor($task);
+
             $run->setToolboxSnapshot(ToolboxSnapshot::fromDefinitions($tools));
             $run->setCheckpoint((new LoopState(
                 stepBudget: $this->budgets['slice_budget'] ?? 25,
                 toolRetries: $this->budgets['tool_retries'] ?? 2,
                 circuitBreakerThreshold: $this->budgets['circuit_breaker'] ?? 3,
-                promptHead: $this->prompts->compileForSlice($task, $tools, $this->endings),
+                promptHead: $this->prompts->compileForSlice($task, $tools, $this->endings, $groundingAt),
                 // The endings policy is constitution, frozen per slice
                 // (docs/design/SESSION_ENDINGS.md §2): the settlement's
                 // judgment — and the streak it counts — read it from the
@@ -378,6 +388,39 @@ final readonly class SessionSliceEngine
         });
 
         return $run;
+    }
+
+    /**
+     * The instant this slice's grounding should be rendered as of, anchoring
+     * the session if it has no anchor yet and moving the anchor when the
+     * deployment day has turned (docs/design/KV_CACHE.md §6.3, B4).
+     *
+     * A session slice is re-compiled per slice; a live clock would make every
+     * slice a brand-new head, so slice *n+1* re-prefills from scratch even
+     * when the memory it carries is mostly the same text. Anchoring renders
+     * the block as of the session's own past instead, byte-stable within a
+     * day, and moves it once when the day turns — the freshness that matters
+     * (a session resumed tomorrow is told tomorrow's date), at one cache
+     * break a day rather than one a slice. A task with no anchor and no
+     * creation time (not yet persisted) renders the live clock — it cannot be
+     * anchored to a value it has nowhere to store.
+     */
+    private function groundingInstantFor(Task $task): \DateTimeImmutable
+    {
+        $now = new \DateTimeImmutable('now');
+        $anchor = $task->groundingInstant();
+
+        if (null === $anchor) {
+            return $now;
+        }
+
+        if ($this->grounding->calendarDay($anchor) !== $this->grounding->calendarDay($now)) {
+            $task->regroundAt($now);
+
+            return $now;
+        }
+
+        return $anchor;
     }
 
     private function appendFailure(Run $run, string $reason, ErrorClass $errorClass): void
