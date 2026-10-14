@@ -326,9 +326,13 @@ drift — so an unchanged store re-renders it byte-for-byte. Pinned by
 `SessionMemoryRendererTest::testTheBlockIsPureSoAnUnchangedStoreRerendersItByteIdentically()`.
 The block therefore breaks the prefix **exactly when a write changes it**, and at no
 other time; the every-request rebuild is free. So B3 needs neither a relocation nor a
-rebuild cadence. What it still needs is a measurement this single-slot rig cannot
-make — what a write's prefix invalidation actually costs, since the baseline's 54–67%
-conflates it with the slot eviction. Deferred, not settled. B4 (below) is unaffected.
+rebuild cadence. **Measured on two slots (§9.3):** a write costs ~66 points of reuse
+for the one slice that carries it — the block sits before the exchanges, so the change
+invalidates everything behind it — and the session recovers to ~98% on the very next
+slice. That is the cost the single-slot rig could not isolate from eviction; it is
+real, bounded to one slice per write, and not a reason to move the block (moving it
+to the tail measures the same ~66-point change *and* then costs ~65 points on the
+next append — §9.3). B4 (below) is unaffected.
 
 - **B4 (across slices):** fixed by freezing the grounding at the *session's*
   granularity (the day), not the slice's — see §6.5. Note it never involved moving
@@ -413,8 +417,8 @@ ledger where today it is invisible.
 (`feat/chat-grounding-freeze`) — the biggest measured win, and it changed the clock's
 *source*, not its position. **B3 needs no code:** the block is pure, so the
 §4.1 every-request rebuild is already free and only a write breaks the prefix (§6.3)
-— pinned by a test; what a write's invalidation *costs* wants a two-slot measurement
-this rig cannot give. **B4 landed:** the slice grounding is frozen to a per-session
+— pinned by a test, and its invalidation cost now measured on two slots (~66 points,
+one slice, full recovery — §9.3). **B4 landed:** the slice grounding is frozen to a per-session
 anchor, so consecutive slices in a day share a byte-identical head (§6.5). No move of
 any block to the tail was made — and §6.1/§6.3/§6.5 all record why that direction is
 the wrong one.
@@ -472,11 +476,97 @@ Two things the live run added that the byte-level work could not:
   a divergent request *overwrites* the cached prefix. A request that appends to a warm
   prefix reuses it (96.9%); a request that diverges midway discards the tail and the
   next append then only finds the shared head (measured: ~36% after a divergent call,
-  96.9% when nothing divergent sits in between). This is why §6.2 must *batch* sheds
-  rather than slide: an every-turn slide is an every-turn divergent branch, which both
-  breaks reuse and repeatedly overwrites the only slot. It also means "append is
+  96.9% when nothing divergent sits in between). It also means "append is
   cheap" holds **only** while the head is genuinely frozen — appending *after* a
   head change reuses nothing (measured: 37.2%).
+
+  **Corrected 2026-10-14 (two slots, §9.3).** This was measured on `--parallel 1`,
+  where the overwrite is real but is the *rig's* property, not the design's. With two
+  slots a divergent request reuses the *other* slot's prefix instead of destroying its
+  own: request A → divergent B → request A again recovers to **99.6%** (measured), and
+  B likewise. So the reuse cost of a divergence is the invalidation itself, not an
+  eviction — and §6.2's rule (batch, don't slide) now rests on the invalidation
+  argument, not on the one-slot overwrite. The batch rule survives; the *reason* is
+  tightened.
+
+  A caveat is now measured too: on a growing conversation an **append moves the last
+  message's bytes**, because a final message validates in "generate" position and the
+  same message mid-list does not. Appending past a trailing block costs ~65 points
+  (§9.3); in the head/middle an append is ~97%. This is exactly the POSITION_FINDINGS
+  rule "never add a trailing message to a growing conversation", and it is what makes
+  §6.1/§6.3/§6.5 the right direction rather than "move it to the tail".
+
+### 9.3 Two slots (`--parallel 2`): the numbers the single-slot rig could not give
+
+**This is the re-run the §6.3/§8 notes asked for.** The endpoint now runs
+`--parallel 2` (`total_slots: 2`, `n_ctx: 65536` each), so two prefixes can coexist
+and a divergent request no longer overwrites the one that was warm. Probes: replaying
+the real engines' captured requests (`/tmp/kv_measure.py`), a two-prefix coexistence
+test, and a direct MIDDLE-vs-TAIL comparison. Every figure is the server's own
+`cached_tokens / prompt_tokens`.
+
+**Slots coexist (the premise).** Short shared head + two wholly different 12-turn
+bodies; a unique flush first:
+
+| request | reuse |
+|---|---:|
+| A (cold) | 0.0% |
+| A | 99.6% |
+| B (divergent) | 0.0% |
+| **A (return, after B)** | **99.6%** |
+| **B (return, after A)** | **99.6%** |
+
+Under one slot the returns would have found only the shared head (~2%). So a
+divergence's cost is the invalidation, not an eviction — which is why §6.2's batch
+rule is now argued from invalidation alone (§9.2's correction).
+
+**B4, measured.** The real session probe (5 slices, no writes) now compiles a
+byte-identical head per slice — all five report the same `Current time: 13:50` — and
+the live server agrees: steady **99.7%** per slice after the first, overall **79.8%**
+(one cold slice out of five). Before B4 the same probe reused only the shared head
+across slices.
+
+**B3, measured — the deferred number.** A mid-slice memory write, session shape
+`[system][user][memory][exchanges]`:
+
+| turn | reuse | prefill |
+|---|---:|---:|
+| warm (v1) | 99.3% | 0.34 s |
+| **WRITE → v2** | **5.0%** | **21.5 s** |
+| append +1 | 97.8% | 1.4 s |
+| append +2 | 96.7% | 1.4 s |
+| **WRITE → v3** | **11.6%** | 19.5 s |
+| append +3 | 97.6% | 1.2 s |
+
+So a write costs **~88 points on the slice that carries it** (≈20 s of re-prefill on
+this CPU box) and the session **fully recovers on the next slice**. The baseline's
+54–67%, and the real engine's 67% overall, are that same cost averaged across the
+slices that follow a write — not eviction, and not a floor. This is B3's real bill:
+bounded to one slice per write, and unchanged whether or not anything is written in
+the slices that follow.
+
+**MIDDLE vs TAIL — the counterfactual, priced honestly.** Same-length block, one
+marker word changes between versions (an earlier probe grew the block, which made the
+shapes incomparable; corrected):
+
+| position | warm | CHANGE | append +1 | append +2 |
+|---|---:|---:|---:|---:|
+| block **MIDDLE** | 99.5% | 33.3% | **98.3%** | 97.5% |
+| block **TAIL** | 99.5% | 33.6% | **32.9%** | 97.5% |
+
+The *change* costs ~66 points in **both** positions — so moving the block to the tail
+buys nothing for the write. What the tail changes is the *append*: past a trailing
+block the next append drops to 32.9%, because a final message validates in "generate"
+position and the same message mid-list does not, so appending moves its bytes. Both
+shapes recover by append +2 (the new position is then warm). This is POSITION_FINDINGS'
+"never add a trailing message to a growing conversation", now measured against the
+exact block §6.3 was asked to relocate — and it confirms §6.3's decision to leave the
+block where it is.
+
+**Reproducibility:** the probes are not committed (they live under git-ignored
+`var/` and `/tmp`), but the requests they replay are the byte-for-byte prompts
+`ChatEngine`, `RunEngine`, and the slice engine build, and the figures are the
+server's own `usage` and `timings`.
 
 ## 10. Open questions (need a decision before code)
 
@@ -498,7 +588,10 @@ Two things the live run added that the byte-level work could not:
    The baseline (`KV_CACHE_BASELINE.md`) found that neither of the *naive* positional
    moves (relocate the volatile section to the end of the same message) recovered
    reuse on the run or session shapes, while the controlled chat move did — so this
-   knob wants a measured `cached_tokens` bar before it is set, not a guess.
+   knob wants a measured `cached_tokens` bar before it is set, not a guess. §9.3's
+   two-slot run supplies the bar for the session lane (a shed costs one invalidation,
+   recovered by the next slice); the run shape's multi-step case is still unmeasured
+   and is the one this question should be answered against.
 4. **Cross-run reuse.** Should two consecutive runs of the same scheduled task share a
    cache? Today they cannot (fresh grounding timestamp each run). Out of scope for
    this note, but adjacent if scheduled tasks turn out to dominate prefill cost.
