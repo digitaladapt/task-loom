@@ -7,16 +7,26 @@ namespace App\Llm;
 /**
  * One detected repetition in a stream of model output.
  *
- * `kind` is 'block' when a repeated substring of `periodChars` was found
- * (the common degenerate loop — the model re-emitting a phrase, a JSON
- * fragment, a whole line of tokens) or 'line' when whole newline-delimited
- * lines repeat identically (a loop whose period is longer than the block
- * detector's ceiling, or one that is only visible line-by-line).
+ * `kind` names the rule that found it, so the ledger entry says *which* shape
+ * of loop this was:
+ *
+ *  - 'block' — a repeated substring of `periodChars` at or below the block
+ *    detector's period ceiling (the classic degenerate loop: the model
+ *    re-emitting a phrase, a JSON fragment, a short line of tokens).
+ *  - 'recurrence' — a repeated substring *longer* than that ceiling, found by
+ *    the tail-window search rather than the period sweep. This is the shape a
+ *    model reading its own context produces — a whole exchange, a paragraph,
+ *    a pasted document recited again verbatim — and it is what the ceiling
+ *    used to make invisible.
+ *  - 'line' — whole newline-delimited lines repeat identically (normalised
+ *    for line endings and interior whitespace): a loop whose period is
+ *    longer than the recurrence window, or one that is only visible
+ *    line-by-line.
  *
  * `spanChars` is how many trailing characters the repetition covers — the
  * amount of output that was, conservatively, evidence of the loop. That is
- * the number an operator wants ("it was stuck re-emitting the same 12
- * characters for 300 chars before we stopped it").
+ * the number an operator wants ("it was stuck re-emitting the same 1.7 KB
+ * block for 11 KB before we stopped it").
  */
 final readonly class LoopHit
 {
@@ -41,6 +51,7 @@ final readonly class LoopHit
 
         return match ($this->kind) {
             'line' => sprintf('the same line %d times (%d chars, "%s")', $this->repeats, $this->spanChars, $preview),
+            'recurrence' => sprintf('a %d-character block repeated %d times at long range (%d chars, "%s")', $this->periodChars, $this->repeats, $this->spanChars, $preview),
             default => sprintf('a %d-character block %d times (%d chars, "%s")', $this->periodChars, $this->repeats, $this->spanChars, $preview),
         };
     }

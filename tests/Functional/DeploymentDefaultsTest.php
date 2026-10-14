@@ -65,6 +65,7 @@ final class DeploymentDefaultsTest extends WebTestCase
         'TASKLOOM_LLM_MAX_DURATION' => 900,
         'TASKLOOM_LLM_LOOP_MIN_SPAN' => 160,
         'TASKLOOM_LLM_LOOP_MIN_REPEATS' => 6,
+        'TASKLOOM_LLM_LOOP_MIN_RECURRENCE_REPEATS' => 3,
     ];
 
     public function testEveryTuningKnobHasADeploymentDefault(): void

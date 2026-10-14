@@ -53,6 +53,18 @@ final readonly class LlmGuards
 
     public const int DEFAULT_LOOP_MIN_REPEATS = 6;
 
+    /**
+     * How many times a *long* block (one above the block detector's period
+     * ceiling) must come back verbatim before that counts as a loop.
+     *
+     * Three, where the short-block rule asks for six, because the two rules
+     * buy different things. A six-time short block is 160+ characters of
+     * evidence; a three-time 1.7 KB block is 5 KB of it — far more proof, and
+     * demanding six would need a buffer of six times the block, which is how
+     * a recitation runs past ten minutes before anything notices.
+     */
+    public const int DEFAULT_LOOP_MIN_RECURRENCE_REPEATS = 3;
+
     public function __construct(
         public float $firstTokenSeconds = self::DEFAULT_FIRST_TOKEN,
         public float $silenceSeconds = self::DEFAULT_SILENCE,
@@ -62,6 +74,7 @@ final readonly class LlmGuards
         public float $maxDurationSeconds = self::DEFAULT_SOFT_DEADLINE + self::DEFAULT_MAX_EXTENSIONS * self::DEFAULT_SOFT_EXTENSION,
         public int $loopMinSpanChars = self::DEFAULT_LOOP_MIN_SPAN,
         public int $loopMinRepeats = self::DEFAULT_LOOP_MIN_REPEATS,
+        public int $loopMinRecurrenceRepeats = self::DEFAULT_LOOP_MIN_RECURRENCE_REPEATS,
     ) {
         if ($firstTokenSeconds <= 0) {
             throw new \InvalidArgumentException(sprintf('TASKLOOM_LLM_FIRST_TOKEN_TIMEOUT must be positive, got %s.', $firstTokenSeconds));
@@ -93,6 +106,9 @@ final readonly class LlmGuards
         }
         if ($loopMinRepeats < 3) {
             throw new \InvalidArgumentException(sprintf('TASKLOOM_LLM_LOOP_MIN_REPEATS must be at least 3, got %d.', $loopMinRepeats));
+        }
+        if ($loopMinRecurrenceRepeats < 2) {
+            throw new \InvalidArgumentException(sprintf('TASKLOOM_LLM_LOOP_MIN_RECURRENCE_REPEATS must be at least 2, got %d — one occurrence is not a repetition.', $loopMinRecurrenceRepeats));
         }
     }
 
@@ -138,6 +154,7 @@ final readonly class LlmGuards
         ?string $maxDurationSeconds = null,
         ?string $loopMinSpanChars = null,
         ?string $loopMinRepeats = null,
+        ?string $loopMinRecurrenceRepeats = null,
     ): self {
         $first = self::floatOrNull($firstTokenSeconds) ?? self::DEFAULT_FIRST_TOKEN;
         $silence = self::floatOrNull($silenceSeconds) ?? self::DEFAULT_SILENCE;
@@ -155,6 +172,7 @@ final readonly class LlmGuards
             maxDurationSeconds: $maxDuration,
             loopMinSpanChars: self::intOrNull($loopMinSpanChars) ?? self::DEFAULT_LOOP_MIN_SPAN,
             loopMinRepeats: self::intOrNull($loopMinRepeats) ?? self::DEFAULT_LOOP_MIN_REPEATS,
+            loopMinRecurrenceRepeats: self::intOrNull($loopMinRecurrenceRepeats) ?? self::DEFAULT_LOOP_MIN_RECURRENCE_REPEATS,
         );
     }
 

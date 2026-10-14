@@ -97,10 +97,14 @@ parameters:
     # The loop detector: stop a generation that is provably repeating itself
     # instead of letting it run to a time cap. MIN_SPAN is the repeated
     # region's minimum length in characters, MIN_REPEATS the minimum number
-    # of repetitions; the defaults need a 27+ character block 6 times, an
-    # 8-character block 20 times, or the single letter "a" 160 times —
-    # conservative on purpose, because a false positive discards real output.
-    # A cut is recorded with its evidence (what repeated, how often).
+    # of repetitions of a *short* block; the defaults need a 27+ character
+    # block 6 times, an 8-character block 20 times, or the single letter "a"
+    # 160 times — conservative on purpose, because a false positive discards
+    # real output. A cut is recorded with its evidence (what repeated, how
+    # often). MIN_RECURRENCE_REPEATS is the separate (lower) count for a
+    # repeated block *longer* than the block rule can sweep — the shape a
+    # model reading its own context produces, where three verbatim passes are
+    # already several KB of evidence.
     TASKLOOM_LLM_FIRST_TOKEN_TIMEOUT: 90
     TASKLOOM_LLM_SILENCE_TIMEOUT: 120
     TASKLOOM_LLM_SOFT_DEADLINE: 300
@@ -109,6 +113,7 @@ parameters:
     TASKLOOM_LLM_MAX_DURATION: 900
     TASKLOOM_LLM_LOOP_MIN_SPAN: 160
     TASKLOOM_LLM_LOOP_MIN_REPEATS: 6
+    TASKLOOM_LLM_LOOP_MIN_RECURRENCE_REPEATS: 3
 
 services:
     # default configuration for services in *this* file
@@ -237,6 +242,7 @@ services:
             $maxDurationSeconds: '%env(float:default:TASKLOOM_LLM_MAX_DURATION:TASKLOOM_LLM_MAX_DURATION)%'
             $loopMinSpanChars: '%env(int:default:TASKLOOM_LLM_LOOP_MIN_SPAN:TASKLOOM_LLM_LOOP_MIN_SPAN)%'
             $loopMinRepeats: '%env(int:default:TASKLOOM_LLM_LOOP_MIN_REPEATS:TASKLOOM_LLM_LOOP_MIN_REPEATS)%'
+            $loopMinRecurrenceRepeats: '%env(int:default:TASKLOOM_LLM_LOOP_MIN_RECURRENCE_REPEATS:TASKLOOM_LLM_LOOP_MIN_RECURRENCE_REPEATS)%'
 
     # Admin auth (SPEC §4.3): one env-provided password for the UI's session
     # login, one env-provided key for the MCP bearer endpoint, one admin

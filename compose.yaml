@@ -41,6 +41,7 @@ x-taskloom-env: &taskloom-env
   # The loop detector: stop a generation that is provably repeating itself.
   TASKLOOM_LLM_LOOP_MIN_SPAN: ${TASKLOOM_LLM_LOOP_MIN_SPAN:-160}
   TASKLOOM_LLM_LOOP_MIN_REPEATS: ${TASKLOOM_LLM_LOOP_MIN_REPEATS:-6}
+  TASKLOOM_LLM_LOOP_MIN_RECURRENCE_REPEATS: ${TASKLOOM_LLM_LOOP_MIN_RECURRENCE_REPEATS:-3}
   # Debug: dump the raw LLM response body to the log (off by default).
   TASKLOOM_DEBUG_RAW_LLM: ${TASKLOOM_DEBUG_RAW_LLM:-0}
   # Concurrency: llm workers to run (each holds one request on the wire).
