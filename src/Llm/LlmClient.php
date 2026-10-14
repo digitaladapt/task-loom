@@ -155,6 +155,15 @@ final class LlmClient implements LlmClientInterface
             'model' => $this->model,
             'messages' => $messages,
             'stream' => true,
+            // Ask for the usage block on a streamed response. OpenAI-compatible
+            // endpoints (llama.cpp, vLLM, Ollama) only emit the final
+            // usage-only chunk when this is set; without it `usage` comes back
+            // empty and the ledger loses the token counts — including
+            // `prompt_tokens_details.cached_tokens`, which is how a KV-cache
+            // hit is seen at all (see docs/design/KV_CACHE.md §7.1). The flag
+            // adds nothing but the final chunk, so it is safe for every
+            // endpoint in the dialect.
+            'stream_options' => ['include_usage' => true],
         ];
 
         if ([] !== $tools) {

@@ -106,6 +106,41 @@ final class LlmClientStreamingTest extends TestCase
         self::assertNotNull($response->metrics->firstContentMs);
     }
 
+    /**
+     * The payload asks the endpoint for its usage block, and a usage-only
+     * final chunk — the shape OpenAI-compatible servers send only when
+     * `stream_options.include_usage` is set — is captured, including the
+     * `cached_tokens` that makes a KV-cache hit visible. Without the flag no
+     * usage chunk arrives and the ledger records no token counts at all
+     * (docs/design/KV_CACHE.md §7.1).
+     */
+    public function testStreamedRequestsAskForUsageAndCaptureCachedTokens(): void
+    {
+        $captured = null;
+        $body = (static function (): \Generator {
+            yield 'data: {"choices":[{"delta":{"content":"pong"}}]}'."\n\n";
+            yield 'data: {"choices":[],"usage":{"prompt_tokens":1444,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":1440}}}'."\n\n";
+            yield "data: [DONE]\n\n";
+        })();
+
+        $http = new MockHttpClient(function (string $method, string $url, array $options) use (&$captured, $body): MockResponse {
+            $captured = $options;
+
+            return new MockResponse($body, ['http_code' => 200]);
+        });
+
+        $response = $this->makeClient($http)->chat([['role' => 'user', 'content' => 'ping']]);
+
+        // The request carries the flag that makes the endpoint emit usage.
+        $sent = json_decode((string) $captured['body'], true, 512, \JSON_THROW_ON_ERROR);
+        self::assertSame(['include_usage' => true], $sent['stream_options']);
+
+        // And the usage-only chunk it provokes is captured, not dropped.
+        self::assertSame(1444, $response->usage['prompt_tokens']);
+        self::assertSame(1440, $response->usage['prompt_tokens_details']['cached_tokens']);
+        self::assertSame('pong', $response->content);
+    }
+
     public function testToolCallArgumentsSplitAcrossDeltasAreReassembled(): void
     {
         $body = (static function (): \Generator {
