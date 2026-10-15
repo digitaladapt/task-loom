@@ -229,11 +229,13 @@ conflict whenever shedding is *incremental* (drop one unit per turn) rather than
 The design lever is therefore *when* to shed and *how much at once*, not whether to
 shed. This is the single most important idea in this note.
 
-A live detail sharpens it (§9.2): with the single slot a local server runs
-(`--parallel 1`), one divergent request *overwrites* the one cached prefix. So
-incremental shedding is worse than "no reuse this turn" — it repeatedly destroys the
-prefix the next turn would otherwise reuse. Batched shedding is what keeps the slot
-warm between trims.
+The mechanism, measured (§9.2, re-measured §9.4/§9.5): **changing bytes invalidate
+from the change onward.** Incremental shedding rewrites a region of the prefix every
+turn, so every turn re-pays prefill from the trim point; batched shedding rewrites it
+O(1) times, so the prefix stays warm between trims. (An earlier reading blamed this on
+a divergent request *overwriting the one cached prefix* — the eviction story is false
+on this build, §9.4, but the conclusion is the same and now rests on the invalidation
+itself.)
 
 ## 6. The design
 
@@ -472,24 +474,25 @@ Two things the live run added that the byte-level work could not:
 - **The harness is blind to all of it.** The real `LlmClient` returned `usage: []`
   (`stream: true`, no `stream_options`) while the server was caching at 99.5%. Fixing
   §7.1 is a prerequisite for measuring anything.
-- **A single slot keeps one cached prefix, not many.** `--parallel 1` is one KV slot:
-  a divergent request *overwrites* the cached prefix. A request that appends to a warm
-  prefix reuses it (96.9%); a request that diverges midway discards the tail and the
-  next append then only finds the shared head (measured: ~36% after a divergent call,
-  96.9% when nothing divergent sits in between). It also means "append is
-  cheap" holds **only** while the head is genuinely frozen — appending *after* a
-  head change reuses nothing (measured: 37.2%).
+- **"One slot" does not mean "one cached prefix".** The note first read a ~36%
+  after-divergence figure as: `--parallel 1` is one KV slot, and a divergent request
+  *overwrites* the cached prefix. **Re-measured directly 2026-10-14 (§9.4): that is not
+  what this build does.** A wholly different request between a prefix and its re-send
+  costs nothing (control 97.4% vs test 97.1%, reproduced ×3), and six distinct
+  ~1200-token prefixes all survive a 6168-token flush at `--parallel 1` (99.6% each).
+  The server retains many prefixes; the bound is the byte/token budget, not a slot
+  count. The ~36% figure is not reproduced on this endpoint — treat it as superseded
+  until it can be re-shown.
 
-  **Corrected 2026-10-14 (two slots, §9.3).** This was measured on `--parallel 1`,
-  where the overwrite is real but is the *rig's* property, not the design's. With two
-  slots a divergent request reuses the *other* slot's prefix instead of destroying its
-  own: request A → divergent B → request A again recovers to **99.6%** (measured), and
-  B likewise. So the reuse cost of a divergence is the invalidation itself, not an
-  eviction — and §6.2's rule (batch, don't slide) now rests on the invalidation
-  argument, not on the one-slot overwrite. The batch rule survives; the *reason* is
-  tightened.
+  What survives, and is all §6.2 needs: **changing bytes invalidate from the change
+  onward.** A request that appends to a warm prefix reuses it (a real step's round 2:
+  ~91%, §9.5); a request that rewrites a prefix region re-pays from that point (a
+  memory write: ~88 points, one slice, §9.3). "Append is cheap" therefore holds while
+  the head is genuinely frozen, and fails at a *rewrite*, not at a divergence. §6.2's
+  batch-don't-slide rule stands on that invalidation argument alone — which it now
+  does, without the eviction story it was first given.
 
-  A caveat is now measured too: on a growing conversation an **append moves the last
+  A caveat is measured too: on a growing conversation an **append moves the last
   message's bytes**, because a final message validates in "generate" position and the
   same message mid-list does not. Appending past a trailing block costs ~65 points
   (§9.3); in the head/middle an append is ~97%. This is exactly the POSITION_FINDINGS
@@ -498,12 +501,19 @@ Two things the live run added that the byte-level work could not:
 
 ### 9.3 Two slots (`--parallel 2`): the numbers the single-slot rig could not give
 
-**This is the re-run the §6.3/§8 notes asked for.** The endpoint now runs
-`--parallel 2` (`total_slots: 2`, `n_ctx: 65536` each), so two prefixes can coexist
-and a divergent request no longer overwrites the one that was warm. Probes: replaying
-the real engines' captured requests (`/tmp/kv_measure.py`), a two-prefix coexistence
-test, and a direct MIDDLE-vs-TAIL comparison. Every figure is the server's own
+**This is the re-run the §6.3/§8 notes asked for.** It ran while the endpoint was set
+to `--parallel 2` (`total_slots: 2`, `n_ctx: 65536` each). Probes: replaying the real
+engines' captured requests (`/tmp/kv_measure.py`), a two-prefix coexistence test, and
+a direct MIDDLE-vs-TAIL comparison. Every figure is the server's own
 `cached_tokens / prompt_tokens`.
+
+> **Premise corrected (see §9.4).** This section explains the coexistence result by
+two slots, and earlier explained the ~36% figure by one slot overwriting. The second
+slot was real, but the *necessity* was not: re-measured at `--parallel 1`, this build
+retains many prefixes on one slot too, and a divergent request does not evict. The
+**B3 write cost** and the **MIDDLE-vs-TAIL table** below are unaffected — they are
+about changed bytes, not slot count — and they reproduce. Only the coexistence framing
+is superseded.
 
 **Slots coexist (the premise).** Short shared head + two wholly different 12-turn
 bodies; a unique flush first:
@@ -516,9 +526,10 @@ bodies; a unique flush first:
 | **A (return, after B)** | **99.6%** |
 | **B (return, after A)** | **99.6%** |
 
-Under one slot the returns would have found only the shared head (~2%). So a
-divergence's cost is the invalidation, not an eviction — which is why §6.2's batch
-rule is now argued from invalidation alone (§9.2's correction).
+The second slot made both prefixes resident simultaneously. (Re-measured at
+`--parallel 1`, §9.4: they are resident there too — this build retains many prefixes
+on one slot — so the coexistence is not *why* §6.2 survives; the invalidation rule is
+(§9.2).) Either way, a divergence's cost is the invalidation, not an eviction.
 
 **B4, measured.** The real session probe (5 slices, no writes) now compiles a
 byte-identical head per slice — all five report the same `Current time: 13:50` — and
@@ -568,6 +579,73 @@ block where it is.
 `ChatEngine`, `RunEngine`, and the slice engine build, and the figures are the
 server's own `usage` and `timings`.
 
+### 9.4 One slot, many prefixes — the §9.2 claim, refuted on the same build
+
+Run with `--parallel 1` (`total_slots: 1`, `n_ctx: 131072`). Three independent probes,
+each reproduced ×3 with byte-identical figures:
+
+| probe | result |
+|---|---|
+| control: `PX1` cold → `PX1 + tool result` | 97.4% |
+| test: `PX2` cold → **different prefix `PY2`** → `PX2 + tool result` | **97.1%** |
+| retention: 6 distinct ~1200-token prefixes → 6168-token flush → re-send each | **6/6 hit (99.6%)** |
+
+So on one slot a divergent request does **not** evict a warm prefix, and retention is
+not one prefix but a token budget. (Prefixes also survive across probe processes.)
+This is why §9.2's "one slot keeps one cached prefix" and §9.3's two-slot framing are
+both superseded: the second slot was real but not load-bearing.
+
+**Bound, stated honestly.** Retention is finite — some function of `--ctx-size` — so a
+very wide multi-step task could still evict by sheer volume. A task with the handful of
+steps in view here does not come near it, and no scheduling change can help the case
+that does (the bytes would be over budget however they were ordered).
+
+**One caveat not fully characterised.** On a hand-built prompt pair, the first send
+after a divergence occasionally returned 0% and the *identical* re-send returned 99%
+(`send2 0% → send3 99%`). The real compiled step heads never showed this (99.3% on
+both sends, §9.5). So there is an occasional first-attempt flake on this endpoint that
+is not a retention limit; it is noted, not relied on.
+
+### 9.5 The real engine, two same-level steps — end to end
+
+Multi-step reuse, measured through the **actual** `RunEngine` (not a replay): a task
+with two steps at one level, toolboxes `echo` and `count`, run against the real MCP
+server. The LLM client was pointed at a logging proxy in front of the endpoint, so the
+figures are the server's own. Two orders were captured, both reproduced exactly:
+
+*async path (production — `app:run:now --queue`, separate `llm` and `tools` workers):*
+
+| # | request | prompt | cached | reuse |
+|---|---|---:|---:|---:|
+| 1 | `echo` round 1 | 636 | 120 | 18.9% |
+| 2 | `count` round 1 | 742 | 226 | 30.5% |
+| 3 | `echo` round 2 (after `count` R1) | 695 | 632 | **90.9%** |
+| 4 | `count` round 2 | 808 | 738 | **91.3%** |
+| 5 | final consumer round 1 | 705 | 120 | 17.0% |
+| 6 | final consumer round 2 | 794 | 701 | 88.3% |
+
+*sync path (`app:run:now`): the same numbers, ordered `step A R1 → A R2 → step B R1 →
+B R2 → final R1 → final R2` — each child driven to completion.*
+
+Three things this settles:
+
+- **Each step's own rounds reuse (~91%).** `echo` round 2 is 90.9% *even though
+  `count` round 1 ran in between* — so a sibling interposing in the single `llm` lane
+  does not damage a step's cache. **The hypothesis that the current order "mucks up"
+  the cache is refuted on the real engine.**
+- **Cross-step reuse is cold.** `count` round 1 (226 cached) and the final consumer
+  round 1 (120) reuse only a small shared head, because each step's head carries its
+  own `## Task`/`## Toolbox` and its own tool descriptors (§9.3's B2). That is the
+  multi-step cost, and it is a *head* problem, not an ordering problem.
+- **A no-yield order would not help, and would cost wall time.** At
+  `TASKLOOM_LLM_MAX_CONCURRENCY=1` the one `llm` worker takes the sibling's round 1
+  while the first step's tool turn is on the `tools` lane, so the model is never idle.
+  Finishing a step's rounds before starting the sibling leaves the model idle during
+  each tool call and recovers no cache — strictly worse throughput for the same bytes.
+
+**Reproducibility:** probes under `/tmp` (`tl_proxy.py` logs each request/response; the
+seed and DB are throwaway). Not committed.
+
 ## 10. Open questions (need a decision before code)
 
 1. **Grounding placement — RESOLVED, and re-resolved.** Superseded 2026-10-14 by
@@ -589,9 +667,11 @@ server's own `usage` and `timings`.
    moves (relocate the volatile section to the end of the same message) recovered
    reuse on the run or session shapes, while the controlled chat move did — so this
    knob wants a measured `cached_tokens` bar before it is set, not a guess. §9.3's
-   two-slot run supplies the bar for the session lane (a shed costs one invalidation,
-   recovered by the next slice); the run shape's multi-step case is still unmeasured
-   and is the one this question should be answered against.
+   run supplies the bar for the session lane (a shed costs one invalidation, recovered
+   by the next slice). The multi-step run shape is now measured too (§9.5): each step's
+   rounds reuse ~91%, and the cross-step cost is **head divergence** (~19–30% on a step's
+   first round), not scheduling. So the batch/headroom knob is *not* the lever for the
+   multi-step case — the per-step head is (B2, §6.2).
 4. **Cross-run reuse.** Should two consecutive runs of the same scheduled task share a
    cache? Today they cannot (fresh grounding timestamp each run). Out of scope for
    this note, but adjacent if scheduled tasks turn out to dominate prefill cost.
