@@ -215,6 +215,23 @@ We will add a test that asserts the property rather than trusting it (§7, Phase
 - `TASKLOOM_PROMPT_BRIEF_IN_SYSTEM` / `_TOOLBOX_LIST` — deployment-wide, frozen per
   run; not per-request volatility.
 
+### B7 — The run's steps do not share a head; each compiles its own — **medium-high**
+
+Measured 2026-10-14 (§9.5). Every step of a run compiles its system message from
+scratch, and the head opens with the *step's* title and brief (`compileSystem()`:
+`## Task` → `Title: <step title>`), then the step's `## Toolbox`, then the deployment's
+`## Completion`, then the run's `## Grounding`. For a same-level run the head is
+byte-identical up to the preamble; from the step's own `## Task` onward it diverges.
+
+The cost is only on the **first** round of each step, and it is real: a two-step run
+measured 18.9% and 30.5% on the two steps' first rounds, against ~91% on their second
+(§9.5). *This is not B2.* B2 is the growing-window slide (§6.2), which a short
+multi-step run never reaches; B7 is head construction, in `PromptCompiler`. The two
+want the same shape of fix — a frozen, shared prefix — but live in different code
+paths. See §6.6.
+
+*Load-bearing?* No — every step still runs correctly. It is cost, not correctness.
+
 ## 5. The tension, stated plainly
 
 Cache reuse wants a prefix that **never changes**. The context budget wants a window
@@ -373,6 +390,33 @@ is told tomorrow's date, at one cache break a day rather than one a slice. An
 ordinary run is untouched — its head is compiled once and never re-compiled, so its
 grounding stays the live clock.
 
+### 6.6 Multi-step runs → a shared run prefix ahead of the per-step head — *next; needs design*
+
+Measured (§9.5, B7). Each step's head opens with the *step's* own title and brief
+(`## Task` → `Title: <step title>`), then the step's `## Toolbox`, then the run's
+`## Completion` and `## Grounding`. Between steps only the preamble is shared, so each
+step's first round re-prefills (measured 18.9% / 30.5%) even though each step's own
+later rounds reuse ~91%.
+
+The move is **B2-shaped but a different path**: hoist the run-invariant part of the
+head above the per-step part, so step *n+1*'s head *extends* step *n*'s prefix instead
+of restarting it. `PromptCompiler::compileSystem()` compiles one string from
+`title`+`brief`+`tools`; the change is to split it into a run-owned part and a
+step-owned part and concatenate them — invariant part first.
+
+*Decision needed:* how far to hoist. The constraint is the cache itself — everything
+shared by all steps must precede everything step-specific. The task title and brief
+are run-invariant and are the natural shared prefix; the step's own title and brief
+sit below it under a distinct header. Whether the run's `## Grounding` can also be
+hoisted (it is already frozen for a run, §6.5) is part of the design, since §6.1 put
+it last for a reason that may not bind here.
+
+*Constraint:* the head rule and the budget path are untouched — this reorders head
+sections, it does not change what the head says (§6.4).
+
+*Depends on:* §6.2's sticky tail base (Section C). A run long enough to shed loses the
+shared prefix regardless of where the step sections sit.
+
 ## 7. Instrumentation — prove it before and after (Phase 0)
 
 We cannot manage what we cannot see, and today the ledger shows a prompt token count
@@ -431,6 +475,13 @@ touches the budget path, so it goes last, behind the measurement from A and the
 stability test from A as its safety net. New knob(s) documented in `.env.example` and
 `config/services.yaml` alongside `TASKLOOM_WINDOW_TAIL_EXCHANGES` /
 `TASKLOOM_CHAT_WINDOW_TURNS`.
+
+**Section D — multi-step head sharing (§6.6, B7).** *Next after Section C.* The
+run-invariant part of the head hoisted above the per-step `## Task`/`## Toolbox`, so
+step *n+1* extends step *n*'s prefix instead of restarting it. Measured need: each
+step's first round reuses 19–30% today (§9.5). It sits after C because a shedding run
+loses the shared prefix regardless. Design not written yet — §6.6 has the shape and the
+open question (how far to hoist).
 
 Surfaces touched (for sizing, not as a plan): `ChatEngine`, `ChatContextWindow`,
 `ChatWireWindow`, `ContextWindow`, `RunEngine`, `SessionMemoryRenderer`,
@@ -635,8 +686,9 @@ Three things this settles:
   the cache is refuted on the real engine.**
 - **Cross-step reuse is cold.** `count` round 1 (226 cached) and the final consumer
   round 1 (120) reuse only a small shared head, because each step's head carries its
-  own `## Task`/`## Toolbox` and its own tool descriptors (§9.3's B2). That is the
-  multi-step cost, and it is a *head* problem, not an ordering problem.
+  own `## Task`/`## Toolbox` and its own tool descriptors. That is the multi-step cost,
+  and it is a *head* problem, not an ordering problem — **B7 (§6.6)**, which is a
+  different code path from B2 (the growing-window slide, §6.2).
 - **A no-yield order would not help, and would cost wall time.** At
   `TASKLOOM_LLM_MAX_CONCURRENCY=1` the one `llm` worker takes the sibling's round 1
   while the first step's tool turn is on the `tools` lane, so the model is never idle.
@@ -671,7 +723,8 @@ seed and DB are throwaway). Not committed.
    by the next slice). The multi-step run shape is now measured too (§9.5): each step's
    rounds reuse ~91%, and the cross-step cost is **head divergence** (~19–30% on a step's
    first round), not scheduling. So the batch/headroom knob is *not* the lever for the
-   multi-step case — the per-step head is (B2, §6.2).
+   multi-step case — the per-step head is (B7, §6.6), a *different path* from B2 and
+   not fixed by the batch size.
 4. **Cross-run reuse.** Should two consecutive runs of the same scheduled task share a
    cache? Today they cannot (fresh grounding timestamp each run). Out of scope for
    this note, but adjacent if scheduled tasks turn out to dominate prefill cost.
@@ -681,6 +734,15 @@ seed and DB are throwaway). Not committed.
 5. **An opt-out knob.** Do we want a knob to *disable* any of this for an endpoint
    that punishes long shared prefixes (rare, but real for some cache-eviction
    policies)? Probably not for v1; recorded so the choice is deliberate.
+6. **Multi-step head sharing (§6.6, B7) — open; needs a design note.** §9.5 measured
+   the cost (~19–30% on each step's first round) and identified it as head
+   construction, not scheduling: each step compiles its own `## Task`/`## Toolbox`
+   ahead of everything shared. Hoisting the run-invariant head above the per-step head
+   is the candidate move. The sequencing question is the one to settle first: §6.6
+   *depends on* §6.2's sticky tail base, because a run long enough to shed loses the
+   shared prefix wherever the step sections sit — so Section C (B2) still goes first,
+   and §6.6 follows it. (An earlier drafting of §9.5 attributed this to B2; corrected
+   2026-10-14 — B2 is the window slide, this is the head.)
 
 ---
 
