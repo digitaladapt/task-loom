@@ -8,6 +8,7 @@ use App\Claims\ClaimStore;
 use App\Claims\ClaimTarget;
 use App\Context\ContextExhaustedException;
 use App\Context\Grounding;
+use App\Context\ShedPlan;
 use App\Entity\Chat;
 use App\Entity\ChatEventType;
 use App\Entity\ChatExchange;
@@ -449,7 +450,7 @@ final readonly class ChatEngine
         $toolDescriptors = $this->prompts->toolsToOpenAi($tools);
 
         try {
-            $fit = $this->context->fit($this->events->findWireWindow($chat, $this->context->maxTurns()), $this->compileSystemMessage($chat), $toolDescriptors);
+            $fit = $this->context->fit($this->events->findWireWindow($chat, $this->context->maxTurns()), $this->compileSystemMessage($chat), $toolDescriptors, new ShedPlan($state->contextBase, $state->contextBatch));
         } catch (ContextExhaustedException $e) {
             // The same fail-closed shape a run has (SPEC §5.6): a conversation
             // whose head and turn being answered cannot fit is told so, with a
@@ -457,6 +458,21 @@ final readonly class ChatEngine
             // transport error in front of a person.
             return $this->failExchange($exchange, $e->errorClass, $e->getMessage());
         }
+
+        // Sticky shed base (docs/design/KV_CACHE.md §6.2): the front the
+        // retained window now stands at becomes the next turn's anchor, so an
+        // unforced fit keeps the same front and reuses the server's prefix
+        // cache — the fix for B2, where the front used to slide every turn. A
+        // forced shed latches batched shedding on for the rest of the
+        // exchange, so a long conversation re-prefills its front once per shed
+        // rather than once per turn.
+        if (null !== $fit->contextBaseId) {
+            $state->contextBase = $fit->contextBaseId;
+        }
+        if ($fit->trimmed()) {
+            $state->contextBatch = true;
+        }
+        $exchange->setCheckpoint($state->toArray());
 
         $exchange->appendMachinery(ChatEventType::LlmRequest, [
             'turns' => \count($fit->messages) - 1, // minus the system message

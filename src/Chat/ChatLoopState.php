@@ -19,6 +19,13 @@ use App\RunEngine\PendingToolTurn;
  * where the last one left off (SPEC §6: the next worker is a stranger, so
  * nothing here may require live objects).
  *
+ * `contextBase` and `contextBatch` are this exchange's sticky shedding state
+ * (docs/design/KV_CACHE.md §6.2): the wire event id the retained window's
+ * front stands at until a trim forces it forward, and whether that trim sheds
+ * a whole batch to the headroom target. They live here for the same reason the
+ * run's do — "did the front move?" is a fact about the previous request — and
+ * they are per-exchange because the exchange's turns are what grow together.
+ *
  * @internal
  */
 final class ChatLoopState
@@ -39,6 +46,11 @@ final class ChatLoopState
             rounds: (int) ($data['rounds'] ?? 0),
             roundLimit: max(0, (int) ($data['roundLimit'] ?? self::defaultRoundLimit())),
             pendingToolTurn: \is_array($pending) ? PendingToolTurn::fromArray($pending) : null,
+            // Null when unset, not 0: an exchange whose checkpoint predates
+            // the sticky base keeps the window's own stateless shape until its
+            // first forced trim, which is the old behavior exactly.
+            contextBase: \is_int($data['contextBase'] ?? null) ? $data['contextBase'] : null,
+            contextBatch: (bool) ($data['contextBatch'] ?? false),
         );
     }
 
@@ -48,6 +60,10 @@ final class ChatLoopState
         /** The ceiling on those, `TASKLOOM_CHAT_TOOL_ROUNDS` at exchange start. */
         public int $roundLimit = 6,
         public ?PendingToolTurn $pendingToolTurn = null,
+        /** The wire event id the retained window's front stands at, or null before a first fit. */
+        public ?int $contextBase = null,
+        /** Whether a forced trim has latched batched shedding on for this exchange. */
+        public bool $contextBatch = false,
     ) {
     }
 
@@ -91,6 +107,8 @@ final class ChatLoopState
             'rounds' => $this->rounds,
             'roundLimit' => $this->roundLimit,
             'pendingToolTurn' => $this->pendingToolTurn?->toArray(),
+            'contextBase' => $this->contextBase,
+            'contextBatch' => $this->contextBatch,
         ];
     }
 }

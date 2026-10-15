@@ -78,6 +78,7 @@ final readonly class ContextWindow
         private int $windowTailExchanges = 10,
         private float $maxInputArtifactPct = 50.0,
         private float $maxSessionMemoryPct = 10.0,
+        private float $contextTrimTargetPct = 50.0,
     ) {
     }
 
@@ -151,16 +152,36 @@ final readonly class ContextWindow
      * message with no preceding `tool_calls` is a malformed request, so the
      * conversation has to stay whole.
      *
+     * **The front is sticky when a plan is supplied** ({@see ShedPlan}). The
+     * plan's `base` fixes the oldest exchange that may travel; the candidates
+     * are `exchanges[base ..]`, so between sheds the front stands still and
+     * the prefix the server already prefilled is reused (docs/design/
+     * KV_CACHE.md §6.2, fixing B2). Without a plan the window keeps its own
+     * stateless bound — the newest `window_tail_exchanges`, whose front
+     * advances every turn once full. The plan's `batch` flag sheds a whole
+     * batch to the headroom target when the budget forces anything out,
+     * rather than stopping at the newest exchange that fits: one re-prefill,
+     * then a long stable stretch, instead of a trim every turn.
+     *
+     * **The batch target is a fraction of the whole request budget** — head,
+     * tool definitions, session memory, and the retained tail together — not
+     * a fraction of the tail. A trim costs the *retained* tail, so a
+     * budget-relative target lands under the limit whatever a single large
+     * result did to the window, where "half the tail" could still land near
+     * full and trim again next turn.
+     *
      * @param array{system: string, user: string} $promptHead
      * @param list<array<string, mixed>>          $exchanges     completed exchanges, oldest first
      * @param list<array<string, mixed>>          $tools         OpenAI tool descriptors sent on the same request
      * @param ?string                             $sessionMemory the rendered `## Memories` block for a
      *                                                           session run, or null for an ordinary run — it rides
      *                                                           after the head, before the kept exchanges
+     * @param ?ShedPlan                           $plan          the caller-owned sticky base and batch flag, or
+     *                                                           null to keep the window's own stateless count bound
      *
      * @throws ContextExhaustedException when the head + tool definitions + session memory alone exceed the budget
      */
-    public function buildMessages(array $promptHead, array $exchanges, array $tools = [], ?string $sessionMemory = null): ContextWindowResult
+    public function buildMessages(array $promptHead, array $exchanges, array $tools = [], ?string $sessionMemory = null, ?ShedPlan $plan = null): ContextWindowResult
     {
         $memoryBlock = null !== $sessionMemory && '' !== trim($sessionMemory) ? $sessionMemory : null;
 
@@ -188,33 +209,92 @@ final readonly class ContextWindow
             throw new ContextExhaustedException(\sprintf('context exhausted: %s alone are an estimated %d tokens > limit %d (the head is never truncated)', $fixed, $this->tokensFor($fixedChars), $this->contextLimitTokens));
         }
 
-        // The candidate tail, newest-first, oldest dropped until it fits.
-        $candidates = \array_slice($exchanges, -$this->windowTailExchanges);
+        // The front: a plan's sticky base when one is supplied, else the
+        // stateless newest-N bound. `base` is clamped into the list, and the
+        // newest-N slice rides on top of it so an oversized base (a
+        // checkpoint from before a knob change) still yields a bounded,
+        // well-formed window rather than every exchange ever seen.
+        // Without a plan: the stateless newest-N bound, whose front advances
+        // every turn once full (B2 — preserved for callers that pass no plan).
+        // With a plan: every exchange from the sticky base forward, kept whole
+        // until the budget forces a batch shed, so the front stands still and
+        // the retained set grows append-only (docs/design/KV_CACHE.md §6.2).
+        $candidates = null === $plan
+            ? \array_slice($exchanges, -$this->windowTailExchanges)
+            : \array_slice($exchanges, max(0, min($plan->base ?? 0, \count($exchanges))));
 
-        $keptMessages = [];
-        $tokens = $this->tokensFor($fixedChars);
+        // Price each candidate once, oldest first, so the shed loop below is
+        // arithmetic rather than repeated encoding.
+        $costs = [];
+        $messages = [];
+        foreach ($candidates as $candidate) {
+            $rendered = $this->exchangeToMessages($candidate);
+            $messages[] = $rendered;
+            $costs[] = $this->tokensFor($this->messagesChars($rendered));
+        }
+
+        $count = \count($candidates);
+        $fixedTokens = $this->tokensFor($fixedChars);
+
+        // How many newest whole exchanges fit, oldest dropped. The drop is a
+        // whole exchange (see the method note), taken one at a time so the
+        // non-batch path keeps its exact "stop at the newest exchange that
+        // fits" behavior for every pre-existing caller.
         $keptExchanges = 0;
-
-        for ($index = \count($candidates) - 1; $index >= 0; --$index) {
-            $exchangeMessages = $this->exchangeToMessages($candidates[$index]);
-            $cost = $this->tokensFor($this->messagesChars($exchangeMessages));
-
-            if ($tokens + $cost > $this->contextLimitTokens) {
+        $tokens = $fixedTokens;
+        for ($index = $count - 1; $index >= 0; --$index) {
+            if ($tokens + $costs[$index] > $this->contextLimitTokens) {
                 break;
             }
 
-            $tokens += $cost;
-            $keptMessages = array_merge($exchangeMessages, $keptMessages);
+            $tokens += $costs[$index];
             ++$keptExchanges;
+        }
+
+        // Batched shedding: once this fit has been forced to shed anything,
+        // keep shedding down to the headroom target — one re-prefill now, a
+        // long stable stretch after, instead of a trim every turn. Never
+        // sheds everything: the newest exchange is the loop's resume point
+        // and stays, exactly as the count bound keeps it.
+        if (null !== $plan && $plan->batch && $keptExchanges < $count) {
+            $target = $this->trimTargetTokens();
+
+            while ($keptExchanges > 1 && $tokens > $target) {
+                --$keptExchanges;
+                $tokens -= $costs[$count - $keptExchanges - 1];
+            }
+        }
+
+        $keptMessages = [];
+        for ($offset = $count - $keptExchanges; $offset < $count; ++$offset) {
+            foreach ($messages[$offset] as $message) {
+                $keptMessages[] = $message;
+            }
         }
 
         return new ContextWindowResult(
             messages: [...$headMessages, ...$keptMessages],
             keptExchanges: $keptExchanges,
-            droppedExchanges: \count($candidates) - $keptExchanges,
+            droppedExchanges: $count - $keptExchanges,
             estimatedTokens: $tokens,
             limitTokens: $this->contextLimitTokens,
         );
+    }
+
+    /**
+     * The token target a batch trim sheds down to: `context_trim_target_pct`
+     * of the whole request budget (docs/design/KV_CACHE.md §6.2).
+     *
+     * Never the entire limit: a target that reaches it would shed to a window
+     * that already fails to fit on the next turn, which is no headroom at
+     * all. Clamped just below the limit so the knob can be set aggressively
+     * without inverting its meaning.
+     */
+    private function trimTargetTokens(): int
+    {
+        $pct = max(1.0, min($this->contextTrimTargetPct, 99.0));
+
+        return (int) floor($this->contextLimitTokens * $pct / 100);
     }
 
     /**

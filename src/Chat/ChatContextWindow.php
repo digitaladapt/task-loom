@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Chat;
 
 use App\Context\ContextExhaustedException;
+use App\Context\ShedPlan;
 use App\Context\TokenEstimate;
 use App\Entity\ChatEventType;
 use App\Entity\ChatExchangeEvent;
@@ -89,6 +90,7 @@ final readonly class ChatContextWindow
         private int $contextLimitTokens,
         private float $maxToolOutputPct = 15.0,
         private int $windowTurns = 100,
+        private float $contextTrimTargetPct = 50.0,
     ) {
     }
 
@@ -142,12 +144,31 @@ final readonly class ChatContextWindow
      * Fails closed with a named reason if even the head — or the head plus
      * the question and the newest turn — cannot fit.
      *
+     * **The front is sticky when a plan is supplied** ({@see ShedPlan}, docs/
+     * design/KV_CACHE.md §6.2, fixing B2). The plan's `base` is the **wire
+     * event id** that begins the retained window's front — an id, not an
+     * index, because the read window slides as the transcript grows and an
+     * index would name a different turn next time. Units older than that id
+     * are out of view by this conversation's own choice, not the budget's, so
+     * an unchanged base across turns holds the front still and the server's
+     * prefix cache hits. A `base` that is null, or names a unit the read no
+     * longer carries, means "from the head" — the window's stateless shape.
+     *
+     * The plan's `batch` sheds a whole batch down to the headroom target when
+     * the budget forces anything out (one re-prefill, then a long stable
+     * stretch), and the caller records where the front landed so the next
+     * turn re-anchors to it. The front never passes the question: a retained
+     * stretch that would exclude it is not produced — the question is where
+     * the reply resumes, and the endpoint refuses a request without one.
+     *
      * @param ChatWireWindow             $window          the wire read: the newest whole turns, plus what it left behind
      * @param list<array<string, mixed>> $toolDescriptors the OpenAI tool descriptors sent on the same request
+     * @param ?ShedPlan                  $plan            the caller-owned sticky front id and batch flag, or null
+     *                                                    to keep the window's own stateless behavior
      *
      * @throws ContextExhaustedException when the head, or the head plus the question and the newest turn, exceeds the budget
      */
-    public function fit(ChatWireWindow $window, string $systemMessage, array $toolDescriptors = []): ChatContextWindowResult
+    public function fit(ChatWireWindow $window, string $systemMessage, array $toolDescriptors = [], ?ShedPlan $plan = null): ChatContextWindowResult
     {
         [$units, $droppedFragment] = self::groupIntoUnits($window->rows);
 
@@ -167,7 +188,7 @@ final readonly class ChatContextWindow
             throw new ContextExhaustedException('context exhausted: no turn of this conversation could be sent.');
         }
 
-        // Render and price each candidate once, newest last.
+        // Render and price each unit once, oldest..newest.
         $costs = [];
         $rendered = [];
         foreach ($units as $index => $unit) {
@@ -208,20 +229,28 @@ final readonly class ChatContextWindow
             throw new ContextExhaustedException(\sprintf('context exhausted: the question and the newest turn, with the prompt head and tool definitions, are an estimated %d tokens > limit %d — the question is never shed, and the newest turn is where the loop resumes', $fixedTokens + $costs[$newest] + $costs[$question], $this->contextLimitTokens));
         }
 
-        // Newest-first, oldest dropped until the window fits — with the
-        // question reserved: a drop may take only turns that are neither the
-        // question nor the newest, so the kept set is the newest stretch of
-        // the conversation plus the question, whatever the budget does to
-        // the turns between them.
+        // The sticky floor: the first unit at or after the plan's anchor id.
+        // A missing anchor (null, or evicted by the read bound) is the head.
+        // The question is reserved separately, so it rides even when it sits
+        // *before* the floor — the turns between them are out of view by this
+        // conversation's own choice, which is what makes the front still.
+        $front = null === $plan || null === $plan->base
+            ? 0
+            : self::unitIndexAtOrAfterId($units, $plan->base);
+        $front = max(0, min($front, $newest));
+
+        // Newest-first, oldest dropped until the window fits, within the
+        // floor — with the question reserved: a drop may take only turns that
+        // are neither the question nor the newest.
         $tokens = $fixedTokens;
-        $keptIndexes = [];
+        $kept = [];
         if ($question !== $newest) {
             $tokens += $costs[$question];
-            $keptIndexes[$question] = true;
+            $kept[$question] = true;
         }
 
-        for ($index = $newest; $index >= 0; --$index) {
-            if (isset($keptIndexes[$index])) {
+        for ($index = $newest; $index >= $front; --$index) {
+            if (isset($kept[$index])) {
                 continue;
             }
 
@@ -230,7 +259,24 @@ final readonly class ChatContextWindow
             }
 
             $tokens += $costs[$index];
-            $keptIndexes[$index] = true;
+            $kept[$index] = true;
+        }
+
+        // Batched shedding: once this fit has been forced to shed anything,
+        // keep shedding down to the headroom target — one re-prefill now, a
+        // long stable stretch after (docs/design/KV_CACHE.md §6.2). The
+        // question and the newest turn are never shed by it, exactly as the
+        // oldest-first pass keeps them.
+        $candidateTotal = $newest - $front + 1 + ($question < $front ? 1 : 0);
+        if (null !== $plan && $plan->batch && \count($kept) < $candidateTotal) {
+            $target = $this->trimTargetTokens();
+
+            for ($index = $front; $index <= $newest && $tokens > $target; ++$index) {
+                if (isset($kept[$index]) && $index !== $question && $index !== $newest) {
+                    unset($kept[$index]);
+                    $tokens -= $costs[$index];
+                }
+            }
         }
 
         $keptMessages = [];
@@ -240,17 +286,24 @@ final readonly class ChatContextWindow
         $droppedRounds = $window->olderRounds;
 
         foreach ($units as $index => $unit) {
-            if (isset($keptIndexes[$index])) {
+            if (isset($kept[$index])) {
                 $keptMessages = array_merge($keptMessages, $rendered[$index]);
                 if (self::isRound($unit)) {
                     ++$keptRounds;
                 } else {
                     ++$keptTurns;
                 }
-            } elseif (self::isRound($unit)) {
-                ++$droppedRounds;
-            } else {
-                ++$droppedTurns;
+            } elseif ($index >= $front) {
+                // Dropped by THIS fit — a candidate the budget (or a batch)
+                // shed. A unit before the front is out of view by an earlier
+                // shed and was counted then; re-counting it here would make
+                // `trimmed()` true every turn and log a trim for a shed that
+                // already happened.
+                if (self::isRound($unit)) {
+                    ++$droppedRounds;
+                } else {
+                    ++$droppedTurns;
+                }
             }
         }
 
@@ -263,6 +316,25 @@ final readonly class ChatContextWindow
             ++$droppedRounds;
         }
 
+        // Where the retained window's front now stands, as a wire id: the
+        // oldest unit of the CONTIGUOUS newest stretch that was kept. The
+        // caller stores this as the next turn's anchor, so an unforced fit
+        // keeps the same front and only a shed moves it.
+        //
+        // The stretch, not "the oldest kept unit", is what matters: the
+        // question is reserved and often sits far behind the retained turns,
+        // so anchoring on it would drag the front back to the head every turn
+        // and defeat the whole point. Walking down from the newest while the
+        // units are still kept lands on the front of the block that actually
+        // travels, which is the thing a prefix cache keys on.
+        $frontId = null;
+        for ($index = $newest; $index >= 0; --$index) {
+            if (!isset($kept[$index])) {
+                break;
+            }
+            $frontId = $units[$index][0]->getId();
+        }
+
         return new ChatContextWindowResult(
             messages: [['role' => 'system', 'content' => $systemMessage], ...$keptMessages],
             keptTurns: $keptTurns,
@@ -271,7 +343,51 @@ final readonly class ChatContextWindow
             droppedRounds: $droppedRounds,
             estimatedTokens: $tokens,
             limitTokens: $this->contextLimitTokens,
+            contextBaseId: $frontId,
         );
+    }
+
+    /**
+     * The index of the first unit whose starting wire row is at or after the
+     * given event id, or 0 when no unit qualifies — the head, which is what a
+     * null or evicted sticky anchor means ({@see fit()}).
+     *
+     * Wire row ids increase with reading order, so "at or after the anchor"
+     * is a single forward scan; a unit boundary is always a turn-starting
+     * row, so the match lands exactly on a whole turn.
+     *
+     * @param list<list<ChatExchangeEvent>> $units
+     */
+    private static function unitIndexAtOrAfterId(array $units, int $baseId): int
+    {
+        foreach ($units as $index => $unit) {
+            $id = $unit[0]->getId();
+
+            // A unit whose starting row has no id yet (an unpersisted row a
+            // test handed us) cannot be the anchor, so the scan skips it; a
+            // real read always persists its rows first.
+            if (null !== $id && $id >= $baseId) {
+                return $index;
+            }
+        }
+
+        return 0;
+    }
+
+    /**
+     * The token target a batch trim sheds down to: `context_trim_target_pct`
+     * of the whole request budget (docs/design/KV_CACHE.md §6.2).
+     *
+     * Never the entire limit: a target that reaches it would shed to a window
+     * that already fails to fit on the next turn, which is no headroom at
+     * all. Clamped just below the limit so the knob can be set aggressively
+     * without inverting its meaning.
+     */
+    private function trimTargetTokens(): int
+    {
+        $pct = max(1.0, min($this->contextTrimTargetPct, 99.0));
+
+        return (int) floor($this->contextLimitTokens * $pct / 100);
     }
 
     /**

@@ -41,6 +41,11 @@ parameters:
     TASKLOOM_MAX_TOOL_OUTPUT_PCT: 15
     TASKLOOM_MAX_INPUT_ARTIFACT_PCT: 50
     TASKLOOM_WINDOW_TAIL_EXCHANGES: 10
+    # The batched-shed headroom target (docs/design/KV_CACHE.md §6.2): when the
+    # budget forces a shed, drop a whole batch down to this percentage of the
+    # whole request budget, so one re-prefill buys a long stable stretch
+    # instead of a trim every turn. Shared by the run and chat windows.
+    TASKLOOM_CONTEXT_TRIM_TARGET_PCT: 50
     # The chat window (SPEC §15.9): how many turns a chat request may carry
     # before the candidate cap bites. Deliberately its own name and its own
     # scale — the run window counts exchanges against a budget, and chat is a
@@ -215,6 +220,7 @@ services:
             $contextLimitTokens: '%env(int:default:TASKLOOM_CONTEXT_LIMIT:TASKLOOM_CONTEXT_LIMIT)%'
             $maxToolOutputPct: '%env(float:default:TASKLOOM_MAX_TOOL_OUTPUT_PCT:TASKLOOM_MAX_TOOL_OUTPUT_PCT)%'
             $windowTurns: '%env(int:default:TASKLOOM_CHAT_WINDOW_TURNS:TASKLOOM_CHAT_WINDOW_TURNS)%'
+            $contextTrimTargetPct: '%env(float:default:TASKLOOM_CONTEXT_TRIM_TARGET_PCT:TASKLOOM_CONTEXT_TRIM_TARGET_PCT)%'
 
     # Run engine (SPEC §3, §5): loop, prompt compiler, budgets.
     App\Llm\LlmClient:
@@ -278,6 +284,7 @@ services:
             $contextLimitTokens: '%env(int:default:TASKLOOM_CONTEXT_LIMIT:TASKLOOM_CONTEXT_LIMIT)%'
             $maxToolOutputPct: '%env(float:default:TASKLOOM_MAX_TOOL_OUTPUT_PCT:TASKLOOM_MAX_TOOL_OUTPUT_PCT)%'
             $windowTailExchanges: '%env(int:default:TASKLOOM_WINDOW_TAIL_EXCHANGES:TASKLOOM_WINDOW_TAIL_EXCHANGES)%'
+            $contextTrimTargetPct: '%env(float:default:TASKLOOM_CONTEXT_TRIM_TARGET_PCT:TASKLOOM_CONTEXT_TRIM_TARGET_PCT)%'
             $maxInputArtifactPct: '%env(float:default:TASKLOOM_MAX_INPUT_ARTIFACT_PCT:TASKLOOM_MAX_INPUT_ARTIFACT_PCT)%'
             # The rendered `## Memories` block's own percentage
             # (docs/design/SESSION_TASKS.md §3.3) — the backstop behind the

@@ -306,6 +306,16 @@ the full, honest record — only what's sent to the model is trimmed.
   remains fits, and records a `context_trim` event saying how many were kept and
   dropped. The whole-exchange drop is deterministic static trimming, not the
   LLM-driven compaction of DESIGN_CONSIDERATIONS §2.3.
+- **The front is sticky, and a shed drops a batch.** The retained set is append-only
+  between sheds: the oldest exchange (a run's front is an index; a conversation's is a
+  wire event id) does not move until the budget forces a shed, so a prefix-caching
+  server keeps hitting on everything that did not change — where the old behavior
+  re-sliced to the newest N every turn and re-prefilled the whole tail
+  (`docs/design/KV_CACHE.md` §6.2, breaker B2). When the budget does force a shed, it
+  drops a whole batch down to `context_trim_target_pct` of the budget rather than
+  stopping at the newest exchange that fits, so one re-prefill buys a run of stable
+  turns. The base rides the checkpoint, and a caller with no base gets the stateless
+  newest-N bound.
 - Cap every tool result to `max_tool_output_percentage` of the context limit.
 - **Cap the Inputs block too, because the head is never pruned** (§13.4): a stepped
   run's dependency outputs are each limited to an equal share of

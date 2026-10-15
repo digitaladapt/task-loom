@@ -341,8 +341,9 @@ amortized re-prefill is `g · f / (1 − f)` for a retained fraction `f`: `1.0 �
 `f = 0.5`, `3 · g` at `f = 0.75`, `9 · g` at `f = 0.9`. The floor is modest and the
 barrier is steep, so the lever is **trim rarely** — which is 50% (or less). Below ~50%
 the curve flattens while the context given up keeps rising, so 50% is the knee. The
-number is an arithmetic prior, not a measurement; §7's instrumentation is what turns it
-into one, and the knob is what lets a deployment move it without a code change.
+number is an arithmetic prior turned into a measurement at §9.6: on a 15-turn run the
+50% target moves the front 2 times against the greedy path's 6 — three times fewer
+re-prefills — and the knob is what lets a deployment move it without a code change.
 
 ### 6.3 Session memory → **leave it where it is; rebuild it only when it changes** (fixes B3) — *corrected 2026-10-14*
 
@@ -485,12 +486,17 @@ anchor, so consecutive slices in a day share a byte-identical head (§6.5). No m
 any block to the tail was made — and §6.1/§6.3/§6.5 all record why that direction is
 the wrong one.
 
-**Section C — batched shedding.**
-B2, run and chat: frozen tail base, batched trims, rarely-biting count bound. This one
-touches the budget path, so it goes last, behind the measurement from A and the
-stability test from A as its safety net. New knob(s) documented in `.env.example` and
-`config/services.yaml` alongside `TASKLOOM_WINDOW_TAIL_EXCHANGES` /
-`TASKLOOM_CHAT_WINDOW_TURNS`.
+**Section C — batched shedding.** *(landed — see §9.6)*
+B2, run and chat: a sticky front (a frozen tail base carried in the checkpoint), batched
+trims to the headroom target, and the count bound demoted to a stateless fallback for a
+caller with no base. The front is an index into a run's exchange list and a wire event id
+in chat, kept where the turn-to-turn progress already lives (`LoopState`,
+`ChatLoopState`), so no schema changed. One new knob, `TASKLOOM_CONTEXT_TRIM_TARGET_PCT`
+(default 50), documented in `.env.example`, `config/services.yaml` and both compose files
+alongside `TASKLOOM_WINDOW_TAIL_EXCHANGES` / `TASKLOOM_CHAT_WINDOW_TURNS`. The §7
+prefix-stability guard landed with it, at message granularity, as two unit suites
+(`tests/Unit/Context/ContextWindowShedPlanTest`, `tests/Unit/Chat/ChatContextWindowShedPlanTest`)
+and an end-to-end benchmark (`tests/Functional/RunEngine/RunEngineSheddingSmokeTest`).
 
 **Section D — multi-step head sharing (§6.6, B7).** *Next after Section C.* The
 run-invariant part of the head hoisted above the per-step `## Task`/`## Toolbox`, so
@@ -714,6 +720,42 @@ Three things this settles:
 **Reproducibility:** probes under `/tmp` (`tl_proxy.py` logs each request/response; the
 seed and DB are throwaway). Not committed.
 
+### 9.6 Batched shedding, measured without a model — the §6.2 knob
+
+A third line of evidence, and the one that needs no server: a **deterministic**
+benchmark of the real run engine against the real ledger, with the LLM and tool dispatch
+stubbed at their interfaces. It is reproducible in CI, where llama.cpp is not.
+
+The rig drives a 15-turn run (14 tool rounds, each returning ~600 chars) against a budget
+the prompt head fits with ~1500 tokens of tail room, so the window is forced to shed.
+The same run is played twice — headroom target 50% (what we ship) and 100%, where the
+target is the limit so the batch can shed nothing extra and the behavior is the old
+greedy "stop at the newest exchange that fits". The measured quantity is §7's: how often
+the retained **front** moves, which is how often a prefix-caching server must re-prefill.
+
+```
+turns=15
+  batched(50%):  trims=2  front-moves=2  reuse(median)=100.0%  reuse(min)=15.8%
+  greedy(100%):  trims=6  front-moves=6  reuse(median)=100.0%  reuse(min)=15.8%
+```
+
+Three facts, and they are the design's claims:
+
+- **The front moves only at a shed** (`front-moves == trims` in both columns). Nothing
+  slides on a plain turn — that is B2, fixed.
+- **Batching re-prefills three times less often** (2 vs 6). The 50% target sheds a whole
+  batch per forced trim, so one re-prefill buys a run of stable turns; the greedy path
+  sheds one exchange per trim and pays again almost every turn.
+- **Most turns reuse the entire previous prompt** (median 100%). The dips to ~16% are the
+  two trim turns, where the front legitimately moves.
+
+*Scope, stated honestly.* `reuse` here is the longest common **message prefix** between
+consecutive requests — the wire-shape quantity a prefix cache keys on — not the server's
+`prompt_tokens_details.cached_tokens`. §9.2's token-level rig is still the live
+confirmation, and the two agree by construction: the messages are the bytes the server
+hashes. What this buys is a guard that runs everywhere, including CI, and fails loudly if
+the front ever starts sliding again.
+
 ## 10. Open questions (need a decision before code)
 
 1. **Grounding placement — RESOLVED, and re-resolved.** Superseded 2026-10-14 by
@@ -730,17 +772,18 @@ seed and DB are throwaway). Not committed.
 2. **Session memory placement — RESOLVED.** Neither (a) nor (b): measured free where
    it is (§6.3), so it stays between the head and the kept exchanges, and the lever
    becomes rebuild-on-change rather than position.
-3. **Batch size / headroom target** for §6.2 — wants the Phase-0 numbers to choose.
-   The baseline (`KV_CACHE_BASELINE.md`) found that neither of the *naive* positional
-   moves (relocate the volatile section to the end of the same message) recovered
-   reuse on the run or session shapes, while the controlled chat move did — so this
-   knob wants a measured `cached_tokens` bar before it is set, not a guess. §9.3's
-   run supplies the bar for the session lane (a shed costs one invalidation, recovered
-   by the next slice). The multi-step run shape is now measured too (§9.5): each step's
-   rounds reuse ~91%, and the cross-step cost is **head divergence** (~19–30% on a step's
-   first round), not scheduling. So the batch/headroom knob is *not* the lever for the
-   multi-step case — the per-step head is (B7, §6.6), a *different path* from B2 and
-   not fixed by the batch size.
+3. **Batch size / headroom target** for §6.2 — **RESOLVED.** Trim to 50% of the
+   budget; one knob, `TASKLOOM_CONTEXT_TRIM_TARGET_PCT`, run and chat (§6.2). The
+   decision rests on the arithmetic in §6.2 (the amortized re-prefill `g·f/(1−f)` is
+   ~1·g at 50%, ~9·g at 90%, so the lever is "trim rarely") and is confirmed
+   deterministically at §9.6: on a 15-turn run the 50% target moves the front twice
+   against the greedy path's six. The baseline (`KV_CACHE_BASELINE.md`) had found that
+   the *naive* positional moves recovered nothing on the run or session shapes, and
+   §9.5 had already shown the multi-step case is bounded by head divergence rather
+   than scheduling — so the knob is set from the arithmetic plus the deterministic run,
+   not from a live `cached_tokens` bar. The knob is *not* the lever for the multi-step
+   case, which is a *different path*: the per-step head is (B7, §6.6), and no batch
+   size fixes it.
 4. **Cross-run reuse.** Should two consecutive runs of the same scheduled task share a
    cache? Today they cannot (fresh grounding timestamp each run). Out of scope for
    this note, but adjacent if scheduled tasks turn out to dominate prefill cost.
