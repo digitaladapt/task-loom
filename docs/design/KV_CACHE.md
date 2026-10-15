@@ -307,9 +307,25 @@ The `context_trim` ledger row already records kept/dropped counts
 (`ContextWindowResult`), so batched shedding is *more* visible than the current
 per-turn trim, not less — it will simply fire far less often.
 
-*Decision needed:* how much to drop per batch (half? to a headroom target?). This is
-the knob that trades prompt size against re-prefill frequency; it wants a measured
-default, which is why Phase 0 instrumentation comes first.
+*Decided 2026-10-14:* **trim to 50% of the budget.** One knob,
+`context_trim_target_pct` (default 50), applied to both run and chat.
+
+*Why a fraction of the budget, not "drop half the tail".* The front-drop re-prefills
+the **retained** tail, not the dropped part: once the oldest exchanges go, the kept
+ones shift and only the head survives as a cached prefix. So the cost of a trim is the
+retained tail, and everything dropped above it is nearly free on that turn. If a single
+large result trips the budget mid-run the tail can overshoot into a multiple of it, and
+"half the tail" still lands at ~90% of budget — still full, so it trims *again* next
+turn and pays a second re-prefill. A budget-relative target lands under the limit
+whatever the overshoot. Since the trigger is the budget, so is the recovery.
+
+*Why 50% and not more or less.* Averaged over a run growing `g` per turn, the
+amortized re-prefill is `g · f / (1 − f)` for a retained fraction `f`: `1.0 · g` at
+`f = 0.5`, `3 · g` at `f = 0.75`, `9 · g` at `f = 0.9`. The floor is modest and the
+barrier is steep, so the lever is **trim rarely** — which is 50% (or less). Below ~50%
+the curve flattens while the context given up keeps rising, so 50% is the knee. The
+number is an arithmetic prior, not a measurement; §7's instrumentation is what turns it
+into one, and the knob is what lets a deployment move it without a code change.
 
 ### 6.3 Session memory → **leave it where it is; rebuild it only when it changes** (fixes B3) — *corrected 2026-10-14*
 
