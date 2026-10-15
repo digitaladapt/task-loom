@@ -123,6 +123,10 @@ x-taskloom-env: &taskloom-env
   # artifact gets an equal share, so a wide task cannot pin its runs' floor.
   TASKLOOM_MAX_INPUT_ARTIFACT_PCT: ${TASKLOOM_MAX_INPUT_ARTIFACT_PCT:-50}
   TASKLOOM_WINDOW_TAIL_EXCHANGES: ${TASKLOOM_WINDOW_TAIL_EXCHANGES:-10}
+  # Batched-shed headroom target (% of the request budget, docs/design/KV_CACHE.md
+  # §6.2): a forced shed drops to this share, so one re-prefill buys a stable
+  # stretch. Shared by the run and chat windows.
+  TASKLOOM_CONTEXT_TRIM_TARGET_PCT: ${TASKLOOM_CONTEXT_TRIM_TARGET_PCT:-50}
   # Session memory (docs/design/SESSION_TASKS.md §3.3): the store's hot/cold
   # count caps, the per-write size cap, and the rendered block's own
   # percentage (independent of the Inputs cap on purpose).

@@ -26,6 +26,14 @@ use App\Session\SessionUndeclared;
  * `exchanges` entries are the ContextWindow exchange shape:
  * {assistant: {content, toolCalls}, toolResults: list<{toolCallId, content}>}.
  *
+ * `contextBase` and `contextBatch` are the run's sticky shedding state
+ * (docs/design/KV_CACHE.md §6.2): the index the retained window's front stands
+ * at until a trim forces it forward, and whether that trim sheds a whole batch
+ * to the headroom target. They live here, not in the window, because "did the
+ * front move?" is a fact about the previous request — the window sees only
+ * this one — so the state has to travel with the run's progress in the
+ * checkpoint.
+ *
  * @internal
  */
 final class LoopState
@@ -46,6 +54,8 @@ final class LoopState
         public ?PendingToolTurn $pendingToolTurn = null,
         public SessionUndeclared $undeclared = SessionUndeclared::Stop,
         public int $maxUndeclared = SessionEndings::DEFAULT_MAX_UNDECLARED,
+        public ?int $contextBase = null,
+        public bool $contextBatch = false,
     ) {
     }
 
@@ -116,6 +126,11 @@ final class LoopState
                 ? (SessionUndeclared::tryFrom($checkpoint['undeclared']) ?? SessionUndeclared::Stop)
                 : SessionUndeclared::Stop,
             maxUndeclared: (int) ($checkpoint['maxUndeclared'] ?? SessionEndings::DEFAULT_MAX_UNDECLARED),
+            // Null when unset, not 0: a run whose checkpoint predates the
+            // sticky base keeps the window's own stateless bound until its
+            // first forced trim, which is the old behavior exactly.
+            contextBase: \is_int($checkpoint['contextBase'] ?? null) ? $checkpoint['contextBase'] : null,
+            contextBatch: (bool) ($checkpoint['contextBatch'] ?? false),
         );
     }
 
@@ -138,6 +153,8 @@ final class LoopState
             'pendingToolTurn' => $this->pendingToolTurn?->toArray(),
             'undeclared' => $this->undeclared->value,
             'maxUndeclared' => $this->maxUndeclared,
+            'contextBase' => $this->contextBase,
+            'contextBatch' => $this->contextBatch,
         ];
     }
 }

@@ -21,10 +21,13 @@ final readonly class ChatContextWindowResult
      * @param list<array{role: string, content: ?string, tool_calls?: list<array<string, mixed>>, tool_call_id?: string}> $messages
      * @param int                                                                                                         $keptTurns       conversational turns that fit
      * @param int                                                                                                         $keptRounds      tool rounds that fit
-     * @param int                                                                                                         $droppedTurns    conversational turns out of the model's view
-     * @param int                                                                                                         $droppedRounds   tool rounds out of the model's view
+     * @param int                                                                                                         $droppedTurns    conversational turns this fit shed (plus those the read left behind)
+     * @param int                                                                                                         $droppedRounds   tool rounds this fit shed (plus those the read left behind)
      * @param int                                                                                                         $estimatedTokens estimated cost of the head + kept turns + tool definitions
      * @param int                                                                                                         $limitTokens     the budget this was fitted to
+     * @param ?int                                                                                                        $contextBaseId   the wire id the retained window's front now
+     *                                                                                                                                     stands at, for the caller to store as the next
+     *                                                                                                                                     turn's sticky anchor, or null when there is none
      */
     public function __construct(
         public array $messages,
@@ -34,6 +37,7 @@ final readonly class ChatContextWindowResult
         public int $droppedRounds,
         public int $estimatedTokens,
         public int $limitTokens,
+        public ?int $contextBaseId = null,
     ) {
     }
 

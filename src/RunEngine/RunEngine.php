@@ -7,6 +7,7 @@ namespace App\RunEngine;
 use App\Context\ContextExhaustedException;
 use App\Context\ContextWindow;
 use App\Context\ContextWindowResult;
+use App\Context\ShedPlan;
 use App\Entity\ErrorClass;
 use App\Entity\Run;
 use App\Entity\RunEvent;
@@ -642,8 +643,9 @@ final class RunEngine
         $toolDescriptors = $this->prompts->toolsToOpenAi($tools);
 
         try {
-            $fit = $this->context->buildMessages($state->promptHead, $state->exchanges, $toolDescriptors, $this->sessionMemoryBlockFor($run));
-            $this->recordTrim($run, $fit);
+            $fit = $this->context->buildMessages($state->promptHead, $state->exchanges, $toolDescriptors, $this->sessionMemoryBlockFor($run), new ShedPlan($state->contextBase, $state->contextBatch));
+            $this->advanceContextBase($state, $fit);
+            $this->recordTrim($run, $state, $fit);
             $response = $this->llm->chat($fit->messages, $toolDescriptors);
         } catch (ContextExhaustedException $e) {
             return $this->failRun($run, $e->errorClass, $e->getMessage(), $async);
@@ -1629,7 +1631,7 @@ final class RunEngine
      * work as the LLM response): a trim that is not persisted because the
      * process died mid-request is a diagnostic that was never owed.
      */
-    private function recordTrim(Run $run, ContextWindowResult $fit): void
+    private function recordTrim(Run $run, LoopState $state, ContextWindowResult $fit): void
     {
         if (!$fit->trimmed()) {
             return;
@@ -1640,7 +1642,36 @@ final class RunEngine
             'droppedExchanges' => $fit->droppedExchanges,
             'estimatedTokens' => $fit->estimatedTokens,
             'limitTokens' => $fit->limitTokens,
+            'contextBase' => $state->contextBase,
         ]);
+    }
+
+    /**
+     * Advance the run's sticky shed base from a fit (docs/design/KV_CACHE.md
+     * §6.2).
+     *
+     * The base is the index the retained window's front stands at. It moves
+     * ONLY when the budget forced a shed: the retained tail is now the newest
+     * `keptExchanges`, so the front is wherever that window begins. Between
+     * sheds it does not move at all — that stillness is the whole point, and
+     * the reason this is done here rather than by re-slicing to the newest N
+     * every turn (which is B2).
+     *
+     * Batched mode latches on for the run's remaining turns the first time a
+     * trim fires: a run that has once proved it can overflow the budget is the
+     * one that benefits from shedding to the headroom target on every later
+     * forced trim, and latching keeps the choice a property of the run rather
+     * than of a live environment read. A run that never trims keeps the empty
+     * base (null) and the window's own stateless bound, which is the old shape.
+     */
+    private function advanceContextBase(LoopState $state, ContextWindowResult $fit): void
+    {
+        if (!$fit->trimmed()) {
+            return;
+        }
+
+        $state->contextBase = \count($state->exchanges) - $fit->keptExchanges;
+        $state->contextBatch = true;
     }
 
     /**
