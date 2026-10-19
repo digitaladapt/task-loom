@@ -7,6 +7,7 @@ namespace App\Tests\Unit\Chat;
 use App\Chat\ChatContextWindow;
 use App\Chat\ChatWireWindow;
 use App\Context\ContextExhaustedException;
+use App\Context\Utf8;
 use App\Entity\ChatEventType;
 use App\Entity\ChatExchangeEvent;
 use App\Entity\ChatOrigin;
@@ -34,6 +35,33 @@ final class ChatContextWindowTest extends TestCase
 
         self::assertLessThanOrEqual((int) floor(1000 * 3.5 * 0.15) + 40, \strlen($capped));
         self::assertStringContainsString('[truncated — tool result capped]', $capped);
+    }
+
+    /**
+     * The exact production failure, end to end at the cap: a tool result thick
+     * with multi-byte punctuation, capped at the window default, must remain
+     * valid UTF-8 — because it is written to chat_exchange_event.payload (a
+     * `json` column) before it is sent anywhere.
+     *
+     * 1000 tokens × 3.5 chars × 15% = 525 bytes of budget.
+     */
+    public function testCappedMultiByteToolResultStaysValidUtf8AtEveryBoundary(): void
+    {
+        $window = new ChatContextWindow(contextLimitTokens: 1000, maxToolOutputPct: 15.0);
+
+        foreach (range(520, 530) as $pad) {
+            $result = str_repeat('a', $pad).'—·…漢😀'.str_repeat('b', 500);
+            $capped = $window->capToolResult($result);
+
+            self::assertTrue(
+                Utf8::isValid($capped),
+                sprintf('capToolResult produced invalid UTF-8 with pad %d', $pad),
+            );
+            self::assertNotFalse(
+                json_encode(['tool' => 'weather', 'content' => $capped]),
+                sprintf('json_encode refused the capped result with pad %d', $pad),
+            );
+        }
     }
 
     public function testShortToolResultUntouched(): void

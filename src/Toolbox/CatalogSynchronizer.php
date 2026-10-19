@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Toolbox;
 
+use App\Context\Utf8;
 use App\Entity\McpServer;
 use App\Entity\Tool;
 use App\Repository\McpServerRepository;
@@ -176,6 +177,10 @@ final class CatalogSynchronizer
         // readers must not embed them in exceptions.
         $message = \get_class($e).': '.$e->getMessage();
 
-        return \strlen($message) > 255 ? substr($message, 0, 255) : $message;
+        // Character-safe: this lands in McpServer::$lastSyncStatus, a 255-char
+        // column written on the *failure* path. A byte cut mid-character would
+        // make the flush that records the failure throw in turn — turning one
+        // unreachable MCP server into a failed sync transaction.
+        return Utf8::cut($message, 255);
     }
 }
