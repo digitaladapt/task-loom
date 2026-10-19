@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Admin;
 
+use App\Context\Utf8;
 use App\Entity\Run;
 use App\Entity\RunEvent;
 use App\Entity\RunEventType;
@@ -935,7 +936,7 @@ final readonly class RunDigest
     {
         $truncated = \strlen($text) > $entryChars;
         if ($truncated) {
-            $text = substr($text, 0, $entryChars).'…[truncated]';
+            $text = Utf8::cut($text, $entryChars).'…[truncated]';
         }
 
         return [
@@ -1130,7 +1131,7 @@ final readonly class RunDigest
     {
         $flat = trim((string) preg_replace('/\s+/', ' ', $text));
 
-        return \strlen($flat) <= $chars ? $flat : substr($flat, 0, $chars).'…';
+        return \strlen($flat) <= $chars ? $flat : Utf8::cut($flat, $chars).'…';
     }
 
     private function string(mixed $value, string $fallback): string

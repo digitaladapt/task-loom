@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Tests\Unit\Llm;
 
+use App\Context\Utf8;
 use App\Llm\LoopDetector;
 use PHPUnit\Framework\TestCase;
 
@@ -166,6 +167,40 @@ final class LoopDetectorTest extends TestCase
         self::assertStringContainsString('tick tock', $hit->describe());
         self::assertStringContainsString('block', $hit->describe());
         self::assertStringContainsString('chars', $hit->describe());
+    }
+
+    /**
+     * describe() is written into a run event payload and, when the loop is
+     * caught mid-reply, quoted back to the person. A multi-byte excerpt must
+     * therefore be capped character-safely: substr() here split the anchored
+     * excerpt and made the payload unencodable as JSON.
+     */
+    public function testTheEvidenceDescriptionSurvivesACapInsideAMultiByteExcerpt(): void
+    {
+        // The line rule is the one that reaches describe()'s cap: its preview is
+        // a whole normalised line, with no window of its own. 41 characters of
+        // 3-byte text is 123 bytes, so the 40-byte cap lands mid-character.
+        //
+        // The lines differ in trailing whitespace only. That keeps them equal
+        // after the line rule's normalisation but *not* byte-identical, which
+        // matters: identical lines would also be a periodic block, and block
+        // periodicity is checked first.
+        $detector = new LoopDetector(minSpanChars: 20, minRepeats: 3);
+
+        $hit = null;
+        for ($i = 1; $i <= 4 && null === $hit; ++$i) {
+            $hit = $detector->observe(str_repeat('…', 41).str_repeat(' ', $i)."\n");
+        }
+
+        self::assertNotNull($hit);
+        self::assertSame('line', $hit->kind, 'the fixture must exercise the line rule');
+
+        $description = $hit->describe();
+        self::assertTrue(
+            Utf8::isValid($description),
+            'describe() emitted invalid UTF-8, which makes the run event unencodable',
+        );
+        self::assertNotFalse(json_encode(['detail' => $description]));
     }
 
     // ---------------------------------------------------------------- long period

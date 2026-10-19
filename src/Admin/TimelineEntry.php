@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Admin;
 
+use App\Context\Utf8;
 use App\Entity\RunEvent;
 use App\Entity\RunEventType;
 
@@ -138,7 +139,7 @@ final readonly class TimelineEntry
             return $text;
         }
 
-        return substr($text, 0, $max - 1).'…';
+        return Utf8::cut($text, $max - 1).'…';
     }
 
     private static function duration(?int $durationMs): ?string

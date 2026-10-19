@@ -7,6 +7,7 @@ namespace App\Tests\Unit\Context;
 use App\Context\ContextExhaustedException;
 use App\Context\ContextWindow;
 use App\Context\Grounding;
+use App\Context\Utf8;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -16,6 +17,10 @@ use PHPUnit\Framework\TestCase;
  */
 final class ContextWindowTest extends TestCase
 {
+    /**
+     * Every cap in this class is a byte budget spent on text that may be
+     * multi-byte; see {@see Utf8Test} for the helper's own boundary suite.
+     */
     public function testCapsToolResultToBudget(): void
     {
         $window = new ContextWindow(contextLimitTokens: 1000, maxToolOutputPct: 15.0, windowTailExchanges: 10);
@@ -24,6 +29,48 @@ final class ContextWindowTest extends TestCase
 
         self::assertLessThanOrEqual((int) floor(1000 * 3.5 * 0.15) + 20, \strlen($capped));
         self::assertStringContainsString('[truncated]', $capped);
+    }
+
+    /**
+     * The regression this suite was missing: a multi-byte payload capped at
+     * the budget must stay valid UTF-8 at every boundary offset. The ASCII
+     * fixture above cannot catch it — there the byte and character offsets
+     * agree.
+     *
+     * 1000 tokens × 3.5 chars × 15% = 525 bytes of budget.
+     */
+    public function testCappedMultiByteToolResultStaysValidUtf8AtEveryBoundary(): void
+    {
+        $window = new ContextWindow(contextLimitTokens: 1000, maxToolOutputPct: 15.0, windowTailExchanges: 10);
+
+        foreach (range(520, 530) as $pad) {
+            $result = str_repeat('a', $pad).'—·…漢😀'.str_repeat('b', 500);
+            $capped = $window->capToolResult($result);
+
+            self::assertTrue(
+                Utf8::isValid($capped),
+                sprintf('capToolResult produced invalid UTF-8 with pad %d', $pad),
+            );
+            self::assertNotFalse(
+                json_encode(['content' => $capped]),
+                sprintf('json_encode refused the capped result with pad %d', $pad),
+            );
+        }
+    }
+
+    public function testCappedInputArtifactStaysValidUtf8(): void
+    {
+        $window = new ContextWindow(contextLimitTokens: 1000, maxToolOutputPct: 15.0, windowTailExchanges: 10);
+
+        foreach (range(1746, 1754) as $pad) {
+            $artifact = str_repeat('a', $pad).'—·…漢😀'.str_repeat('b', 400);
+            $capped = $window->capInputArtifact($artifact, 1);
+
+            self::assertTrue(
+                Utf8::isValid($capped),
+                sprintf('capInputArtifact produced invalid UTF-8 with pad %d', $pad),
+            );
+        }
     }
 
     public function testShortToolResultUntouched(): void

@@ -2,6 +2,15 @@ doctrine:
     dbal:
         url: '%env(resolve:DATABASE_URL)%'
 
+        # `json` is scrubbed on write. A capped tool result is character-safe
+        # now, so this should never fire; it is the backstop for a malformed
+        # byte arriving from anywhere else (an upstream stream, an MCP server)
+        # so that it degrades to one replacement character instead of failing
+        # a live reply with an opaque SerializationFailed. See
+        # docs/design/UTF8_CONVERSION.md.
+        types:
+            json: App\Doctrine\Type\Utf8JsonType
+
         # IMPORTANT: You MUST configure your server version,
         # either here or in the DATABASE_URL env var (see .env file)
         #server_version: '16'

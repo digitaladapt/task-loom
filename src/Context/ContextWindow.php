@@ -112,7 +112,10 @@ final readonly class ContextWindow
             return $result;
         }
 
-        return substr($result, 0, $maxChars)."\n".self::TRUNCATED_MARKER;
+        // Byte budget, character-safe cut: a byte offset landing mid-character
+        // would leave a partial UTF-8 sequence, and json_encode (and so every
+        // `json` column this result is later written to) refuses those.
+        return Utf8::cut($result, $maxChars)."\n".self::TRUNCATED_MARKER;
     }
 
     /**
@@ -138,7 +141,7 @@ final readonly class ContextWindow
             return $artifact;
         }
 
-        return substr($artifact, 0, $perInputChars)."\n".self::INPUT_TRUNCATED_MARKER;
+        return Utf8::cut($artifact, $perInputChars)."\n".self::INPUT_TRUNCATED_MARKER;
     }
 
     /**

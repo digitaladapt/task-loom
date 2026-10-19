@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Llm;
 
+use App\Context\Utf8;
+
 /**
  * One detected repetition in a stream of model output.
  *
@@ -45,8 +47,11 @@ final readonly class LoopHit
     public function describe(): string
     {
         $preview = str_replace(["\n", "\r", "\t"], ' ', $this->preview);
-        if (strlen($preview) > 40) {
-            $preview = substr($preview, 0, 40).'…';
+        // 40 bytes, cut on a character boundary: this string is spliced into
+        // LlmStop::detail, which is persisted in the llm_response event
+        // payload, so a split character fails the write.
+        if (\strlen($preview) > 40) {
+            $preview = Utf8::cut($preview, 40).'…';
         }
 
         return match ($this->kind) {

@@ -431,6 +431,11 @@ composer test    # PHPUnit
 .ci/conformance.sh --profile=web-app   # conformance checks (37 checks)
 ```
 
+Text caps are byte budgets. Any cap that cuts model- or tool-supplied text must
+go through `App\Context\Utf8::cut()`, not `substr()` — a byte offset can land
+inside a multi-byte character and produce a string `json_encode` refuses
+(`docs/design/UTF8_CONVERSION.md`).
+
 ## License
 
 [MIT](LICENSE) — © digitaladapt. Third-party notices in thirdparty-notices.

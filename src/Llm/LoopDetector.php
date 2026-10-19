@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Llm;
 
+use App\Context\Utf8;
+
 /**
  * Watches a growing stream of model output for degenerate repetition.
  *
@@ -156,7 +158,9 @@ final class LoopDetector
 
         $this->buffer .= $delta;
         if (strlen($this->buffer) > self::BUFFER_LIMIT) {
-            $this->buffer = substr($this->buffer, -self::BUFFER_LIMIT);
+            // Character-safe: a byte-offset trim can leave the buffer starting
+            // mid-character, which poisons every preview taken from it.
+            $this->buffer = Utf8::tail($this->buffer, self::BUFFER_LIMIT);
         }
 
         $this->sinceCheck += strlen($delta);
@@ -246,7 +250,7 @@ final class LoopDetector
                     periodChars: $p,
                     repeats: $repeats,
                     spanChars: $span,
-                    preview: substr($b, $len - $p, $p),
+                    preview: Utf8::cut(substr($b, $len - $p, $p), $p),
                 );
             }
         }
@@ -319,7 +323,11 @@ final class LoopDetector
                     periodChars: $period,
                     repeats: $repeats,
                     spanChars: $span,
-                    preview: substr($b, $candidates[$i], min($period, 120)),
+                    // The window is in bytes and may end inside a character:
+                    // cut() trims the split off rather than letting a preview
+                    // of 120 bytes or fewer slip past describe()'s 40-byte cap
+                    // while still being malformed.
+                    preview: Utf8::cut(substr($b, $candidates[$i], min($period, 120)), min($period, 120)),
                 );
             }
         }

@@ -7,6 +7,7 @@ namespace App\Chat;
 use App\Context\ContextExhaustedException;
 use App\Context\ShedPlan;
 use App\Context\TokenEstimate;
+use App\Context\Utf8;
 use App\Entity\ChatEventType;
 use App\Entity\ChatExchangeEvent;
 
@@ -132,7 +133,11 @@ final readonly class ChatContextWindow
             return $result;
         }
 
-        return substr($result, 0, $maxChars)."\n".self::TRUNCATED_MARKER;
+        // Byte budget, character-safe cut — see {@see Utf8::cut()}. The capped
+        // result is persisted into chat_exchange_event.payload before it is
+        // sent anywhere, so a split character here is a failed write, not a
+        // cosmetic blemish.
+        return Utf8::cut($result, $maxChars)."\n".self::TRUNCATED_MARKER;
     }
 
     /**
