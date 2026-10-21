@@ -487,11 +487,12 @@ any block to the tail was made — and §6.1/§6.3/§6.5 all record why that dir
 the wrong one.
 
 **Section C — batched shedding.** *(landed — see §9.6)*
-B2, run and chat: a sticky front (a frozen tail base carried in the checkpoint), batched
+B2, run and chat: a sticky front (a frozen tail base that outlives the turns), batched
 trims to the headroom target, and the count bound demoted to a stateless fallback for a
 caller with no base. The front is an index into a run's exchange list and a wire event id
-in chat, kept where the turn-to-turn progress already lives (`LoopState`,
-`ChatLoopState`), so no schema changed. One new knob, `TASKLOOM_CONTEXT_TRIM_TARGET_PCT`
+in chat. For a run it is kept with the turn-to-turn progress (`LoopState`) and no
+schema changed; in chat that reasoning did not hold and was corrected (§9.7) — it lives
+on the conversation (`chat.context_base`, `chat.context_batch`). One new knob, `TASKLOOM_CONTEXT_TRIM_TARGET_PCT`
 (default 50), documented in `.env.example`, `config/services.yaml` and both compose files
 alongside `TASKLOOM_WINDOW_TAIL_EXCHANGES` / `TASKLOOM_CHAT_WINDOW_TURNS`. The §7
 prefix-stability guard landed with it, at message granularity, as two unit suites
@@ -803,7 +804,44 @@ the front ever starts sliding again.
    and §6.6 follows it. (An earlier drafting of §9.5 attributed this to B2; corrected
    2026-10-14 — B2 is the window slide, this is the head.)
 
+### 9.7 Correction: chat's sticky front belonged to the conversation, not the exchange
+
+*(landed — the `fix/chat-sticky-front-scope` branch)*
+
+§9.6 kept chat's front in `ChatLoopState` — the exchange's checkpoint — "where the
+turn-to-turn progress already lives". That is true of a run: a run's whole life is one
+`Run` row, and its checkpoint is the right home. It is false of a conversation. Every
+message in chat is a **new `ChatExchange` with an empty checkpoint**, and answering it
+overwrites the checkpoint with `['status' => answered]`. So the front a trim established
+was written by the reply and destroyed moments later. The next message started with no
+anchor, the window fell back to its stateless count bound, slid its front forward, and
+re-prefilled the whole conversation.
+
+The practical consequence is that batching worked and bought nothing. Chat degraded
+exactly as it had before once a conversation outgrew its window — which matches the
+symptom reported from a long session (slowness arriving once the "trimming the oldest"
+notice starts, i.e. once the count bound first bites) far better than any configuration
+explanation. The run engine was never affected: one row, one checkpoint, the front
+persists exactly as designed.
+
+The fix stores the front on the conversation instead (`chat.context_base`,
+`chat.context_batch`; nullable and default false, so an existing chat simply has no
+anchor and behaves as before until its next forced trim). A wire event id is already
+scoped to the conversation, so it means the same position on the next message, which is
+what lets the anchor survive. `ChatLoopState` still *reads* the old keys so a checkpoint
+written by an older worker parses, but it no longer writes them.
+
+The lesson worth keeping: "where the turn-to-turn progress lives" is a question about
+scope, and the scope that matters is the one that outlives the thing being fitted. A run
+outlives its turns; a conversation outlives its exchanges.
+
+Guarded by `ChatContextWindowTest::testTheStickyFrontSurvivesIntoTheNextMessage`, which
+asserts both halves — the conversation ends a message holding a front, *and* the next
+message does not shed again. Either assertion alone passes while the bug is present, so
+the test is only load-bearing with both.
+
 ---
 
-*This is a proposal for discussion. No code has been changed; §8's sections are
-intended to be reviewed and approved before the first branch is cut.*
+*This is a proposal for discussion. §8's sections are intended to be reviewed and
+approved before a branch is cut; Sections B and C and the §9.7 correction have since
+landed, so treat this note as a record rather than a plan.*
