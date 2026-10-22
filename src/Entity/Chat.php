@@ -76,6 +76,35 @@ class Chat
     private ?\DateTimeImmutable $groundingAt = null;
 
     /**
+     * The wire event id this conversation's retained window front stands at, or
+     * null before its first forced shed (`docs/design/KV_CACHE.md` §6.2, B2).
+     *
+     * It lives here rather than in the exchange's checkpoint because this is
+     * the only scope that outlives a message. Every message in chat is a new
+     * `ChatExchange` with an empty checkpoint, so a front stored there was
+     * written by the reply and thrown away when the message was answered: the
+     * next message started from no anchor, the front slid forward on every
+     * message, and the whole conversation was re-prefilled each time — batched
+     * shedding that never got to batch. A wire event id belongs to the
+     * conversation anyway (events join to their exchange), so the same value
+     * means the same position on the next message.
+     */
+    #[ORM\Column(nullable: true)]
+    private ?int $contextBase = null;
+
+    /**
+     * Whether a forced shed has latched batched shedding on for this
+     * conversation — shed to the headroom target, not to "just fits", so one
+     * re-prefill buys a long stable stretch rather than another trim next
+     * message.
+     *
+     * Its scope is the conversation's for the same reason `contextBase`'s is:
+     * a latch that reset every message would batch exactly once.
+     */
+    #[ORM\Column(nullable: false, options: ['default' => false])]
+    private bool $contextBatch = false;
+
+    /**
      * The exchanges, in creation order.
      *
      * No `#[ORM\OrderBy]` here, deliberately: the attribute takes a *string*
@@ -150,6 +179,52 @@ class Chat
     public function regroundAt(\DateTimeImmutable $instant): void
     {
         $this->groundingAt = $instant;
+    }
+
+    /**
+     * The sticky shedding front: the wire event id this conversation's retained
+     * window begins at, or null while it has never been forced to shed.
+     */
+    public function getContextBase(): ?int
+    {
+        return $this->contextBase;
+    }
+
+    /**
+     * Whether a shed is currently latched for this conversation.
+     *
+     * Read by the engine to decide the *batch* half of its shedding plan: once
+     * a forced trim has happened, later fits shed to the headroom target rather
+     * than sliding a message at a time.
+     */
+    public function isContextBatched(): bool
+    {
+        return $this->contextBatch;
+    }
+
+    /**
+     * Record where the retained window now begins.
+     *
+     * Deliberately does *not* touch the conversation's timestamp: this is bookkeeping
+     * about how the window is fitted, not something said in the conversation,
+     * and a shed must not reorder the conversation list. `ChatEngine` touches
+     * the conversation when a turn is actually appended.
+     */
+    public function standContextFrontAt(?int $base): void
+    {
+        $this->contextBase = $base;
+    }
+
+    /**
+     * Latch batched shedding on for the rest of the conversation.
+     *
+     * One-way on purpose: the latch exists to stop a conversation from paying a
+     * re-prefill per message, and clearing it after a shed had bought headroom
+     * would put it straight back on the per-message path.
+     */
+    public function latchContextBatch(): void
+    {
+        $this->contextBatch = true;
     }
 
     /** @return Collection<int, ChatExchange> */

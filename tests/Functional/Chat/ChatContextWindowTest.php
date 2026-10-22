@@ -96,6 +96,56 @@ final class ChatContextWindowTest extends KernelTestCase
     }
 
     /**
+     * THE STICKY FRONT SURVIVES THE CONVERSATION, not just the exchange.
+     *
+     * A chat conversation outlives every exchange in it, and each message is a
+     * NEW exchange with an empty checkpoint. So the sticky front the batch
+     * shed is supposed to hold still was stored per exchange — written by the
+     * reply, then thrown away when the message ended — and the next message
+     * started with no anchor at all. The front therefore slid forward on every
+     * message, and every message re-prefilled the whole conversation: batching
+     * bought nothing in chat, which is exactly the B2 symptom it was meant to
+     * fix.
+     *
+     * This asserts the property the batch shed exists for: the second message
+     * of a long conversation is anchored where the first message left off, so
+     * the server's prefilled prefix is still in front of it.
+     */
+    public function testTheStickyFrontSurvivesIntoTheNextMessage(): void
+    {
+        $engine = $this->engineWithWindow(600);
+
+        $chat = $this->seedAnsweredConversation(turns: 8, bodyChars: 400);
+
+        $this->llm->expects(self::exactly(2))
+            ->method('chat')
+            ->willReturn(new LlmResponse('ok', 'stop', [], [], null, 5));
+
+        $first = $engine->ask($chat, str_repeat('q', 200), ChatOrigin::Web);
+        $engine->reply((int) $first->getId());
+
+        $firstTrim = $this->latestTrim($this->refresh($first));
+        self::assertNotNull($firstTrim, 'the first message must shed to establish a front');
+
+        $second = $engine->ask($chat, str_repeat('q', 200), ChatOrigin::Web);
+
+        // The anchor the first message ended holding. A conversation-scoped
+        // front means the second message starts from it rather than from the
+        // head of the transcript.
+        $anchored = $this->refreshChat($chat)->getContextBase();
+        self::assertIsInt($anchored, 'the first message must leave the conversation holding a front');
+        self::assertTrue($this->refreshChat($chat)->isContextBatched());
+
+        $engine->reply((int) $second->getId());
+
+        $secondTrim = $this->latestTrim($this->refresh($second));
+        self::assertNull(
+            $secondTrim,
+            'the second message must not shed again: the front the first message shed to is still standing, so nothing was forced',
+        );
+    }
+
+    /**
      * The newest turn is never optional — it is the question being answered.
      * When even head + newest turn cannot fit, the exchange fails *closed*
      * with a named reason, rather than flying at the provider to return a raw
@@ -461,6 +511,13 @@ final class ChatContextWindowTest extends KernelTestCase
         $this->em->refresh($exchange);
 
         return $exchange;
+    }
+
+    private function refreshChat(Chat $chat): Chat
+    {
+        $this->em->refresh($chat);
+
+        return $chat;
     }
 
     private function latestTrim(ChatExchange $exchange): ?ChatExchangeEvent

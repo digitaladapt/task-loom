@@ -19,12 +19,14 @@ use App\RunEngine\PendingToolTurn;
  * where the last one left off (SPEC §6: the next worker is a stranger, so
  * nothing here may require live objects).
  *
- * `contextBase` and `contextBatch` are this exchange's sticky shedding state
- * (docs/design/KV_CACHE.md §6.2): the wire event id the retained window's
- * front stands at until a trim forces it forward, and whether that trim sheds
- * a whole batch to the headroom target. They live here for the same reason the
- * run's do — "did the front move?" is a fact about the previous request — and
- * they are per-exchange because the exchange's turns are what grow together.
+ * `contextBase` and `contextBatch` were once this exchange's sticky shedding
+ * state (docs/design/KV_CACHE.md §6.2). They are *not* any more: the front
+ * belongs to the conversation that outlives it, because every message in chat
+ * is a new exchange with an empty checkpoint — so the front was discarded each
+ * time a message was answered and every message re-prefilled the conversation
+ * (`Chat::$contextBase`). They are still read here on reload so a checkpoint
+ * written by an older worker is not misread as "no state"; nothing writes them
+ * any more, and the values are ignored.
  *
  * @internal
  */
@@ -46,9 +48,9 @@ final class ChatLoopState
             rounds: (int) ($data['rounds'] ?? 0),
             roundLimit: max(0, (int) ($data['roundLimit'] ?? self::defaultRoundLimit())),
             pendingToolTurn: \is_array($pending) ? PendingToolTurn::fromArray($pending) : null,
-            // Null when unset, not 0: an exchange whose checkpoint predates
-            // the sticky base keeps the window's own stateless shape until its
-            // first forced trim, which is the old behavior exactly.
+            // Tolerated, not used: a checkpoint written before the front moved
+            // to the conversation may still carry these, and reading them keeps
+            // such a row parseable. The engine takes the front from the chat.
             contextBase: \is_int($data['contextBase'] ?? null) ? $data['contextBase'] : null,
             contextBatch: (bool) ($data['contextBatch'] ?? false),
         );
@@ -60,9 +62,12 @@ final class ChatLoopState
         /** The ceiling on those, `TASKLOOM_CHAT_TOOL_ROUNDS` at exchange start. */
         public int $roundLimit = 6,
         public ?PendingToolTurn $pendingToolTurn = null,
-        /** The wire event id the retained window's front stands at, or null before a first fit. */
+        /**
+         * @deprecated the front lives on the conversation ({@see \App\Entity\Chat::$contextBase});
+         *             read only so an older checkpoint parses, never written
+         */
         public ?int $contextBase = null,
-        /** Whether a forced trim has latched batched shedding on for this exchange. */
+        /** @deprecated as `contextBase`: the latch is the conversation's too */
         public bool $contextBatch = false,
     ) {
     }
@@ -107,8 +112,6 @@ final class ChatLoopState
             'rounds' => $this->rounds,
             'roundLimit' => $this->roundLimit,
             'pendingToolTurn' => $this->pendingToolTurn?->toArray(),
-            'contextBase' => $this->contextBase,
-            'contextBatch' => $this->contextBatch,
         ];
     }
 }

@@ -450,7 +450,7 @@ final readonly class ChatEngine
         $toolDescriptors = $this->prompts->toolsToOpenAi($tools);
 
         try {
-            $fit = $this->context->fit($this->events->findWireWindow($chat, $this->context->maxTurns()), $this->compileSystemMessage($chat), $toolDescriptors, new ShedPlan($state->contextBase, $state->contextBatch));
+            $fit = $this->context->fit($this->events->findWireWindow($chat, $this->context->maxTurns()), $this->compileSystemMessage($chat), $toolDescriptors, new ShedPlan($chat->getContextBase(), $chat->isContextBatched()));
         } catch (ContextExhaustedException $e) {
             // The same fail-closed shape a run has (SPEC §5.6): a conversation
             // whose head and turn being answered cannot fit is told so, with a
@@ -459,20 +459,30 @@ final readonly class ChatEngine
             return $this->failExchange($exchange, $e->errorClass, $e->getMessage());
         }
 
-        // Sticky shed base (docs/design/KV_CACHE.md §6.2): the front the
+        // Sticky shed front (docs/design/KV_CACHE.md §6.2): the front the
         // retained window now stands at becomes the next turn's anchor, so an
         // unforced fit keeps the same front and reuses the server's prefix
         // cache — the fix for B2, where the front used to slide every turn. A
-        // forced shed latches batched shedding on for the rest of the
-        // exchange, so a long conversation re-prefills its front once per shed
-        // rather than once per turn.
+        // forced shed latches batched shedding on, so a long conversation
+        // re-prefills its front once per shed rather than once per turn.
+        //
+        // Stored on the *conversation*, not in this exchange's checkpoint. It
+        // was in the checkpoint, on the reasoning that the front belongs where
+        // turn-to-turn progress lives — which is true of a run, whose whole
+        // life is one row, and false of a conversation, which is a sequence of
+        // exchanges each with its own empty checkpoint. Written there, the
+        // front was thrown away every time a message was answered: the next
+        // message began with no anchor, slid its front forward, and re-prefilled
+        // the whole conversation. Batching worked and bought nothing, and a
+        // conversation slowed down sharply the moment it outgrew the window.
+        // The id is a wire event id, already scoped to the conversation, so it
+        // means the same position on the next message.
         if (null !== $fit->contextBaseId) {
-            $state->contextBase = $fit->contextBaseId;
+            $chat->standContextFrontAt($fit->contextBaseId);
         }
         if ($fit->trimmed()) {
-            $state->contextBatch = true;
+            $chat->latchContextBatch();
         }
-        $exchange->setCheckpoint($state->toArray());
 
         $exchange->appendMachinery(ChatEventType::LlmRequest, [
             'turns' => \count($fit->messages) - 1, // minus the system message
@@ -534,6 +544,10 @@ final readonly class ChatEngine
                 $content,
             ));
 
+            // Answered, and the checkpoint disappears with it — which is
+            // exactly why the shed front cannot live here: this write is what
+            // used to throw the conversation's anchor away, leaving the next
+            // message to re-prefill from scratch.
             $exchange->setCheckpoint(['status' => ChatExchangeStatus::Answered->value]);
             $exchange->appendMachinery(ChatEventType::Checkpoint, ['status' => ChatExchangeStatus::Answered->value]);
             $exchange->markAnswered();
