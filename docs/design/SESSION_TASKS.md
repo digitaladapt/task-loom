@@ -760,6 +760,40 @@ therefore attach to **the session** — the chain — and not to a particular ta
 row, or a chat would lose its counterpart the next time the operator edits the
 objective. The one context is the session; a chat is just a way to reach it.
 
+### 8.3 The chat binding — landed
+
+`Chat.session_id` exists and is **nullable**, and that is a decision rather than
+an artefact of the migration: an ordinary conversation is the common case, and it
+must stay the cheap one. A bound chat renders `## Session` above the memory block
+(ChatEngine), the block itself coming from the session's own renderer so the two
+surfaces cannot drift about who she is or what she knows. An unbound chat
+compiles exactly what it compiled before sessions existed — the same prompt,
+byte for byte, which is the property that keeps its prefix cache intact
+(`KV_CACHE_POSITION_FINDINGS.md`). `ChatSessionBinderTest` asserts both halves,
+including that absence.
+
+The binding follows §8.2 by construction: `ChatSessionBinder` walks the chain to
+its live end on every read, so an approved edit to the objective re-points the
+conversation without anyone touching the chat, and the memory carried by
+`carryTo()` is the memory the chat then sees. Binding a **run** task is refused
+by name (`ChatBindingException`) rather than accepted and rendered as nothing; a
+chat that quietly answers as a stranger is worse than an error.
+
+**Unbinding is a supported end state.** Setting the subject back to "none" is a
+deliberate choice the human can make, not merely the absence of ever having
+chosen — the form offers it as a labelled option for that reason.
+
+Three things worth stating because they are the ways this could rot:
+
+- **The chain walk happens on read, not on write.** Denormalising the live
+task id into the chat would be faster and would go stale on the first approval —
+silently, since the pointer stays non-null and the page keeps saying "about a
+session".
+- **The store is reparented, the chat is not.** They are different facts about
+the same session, and only one of them survives by following the chain.
+- **A session that has never run says so by omission.** No slice line, no claim of
+a clean record.
+
 ---
 
 ## 9. Workspace — optional, and not task-loom's

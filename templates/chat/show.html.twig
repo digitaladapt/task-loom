@@ -17,6 +17,43 @@
 {% endfor %}
 
 {#
+    What this conversation is about, at the top, because it decides how every
+    reply below should be read (docs/design/SESSION_TASKS.md §8.2).
+
+    Bound: the session's name, linked to its page, and the fact that her memories
+    are in scope — the human should never have to wonder whether the thing
+    remembers, and the two surfaces have to agree about who she is.
+
+    Unbound: one line saying so, plus the control to change it. Deliberately
+    quiet — the ordinary chat is the common case and should not look like a
+    configuration form it failed to fill in.
+#}
+<section class="chat-subject" aria-labelledby="subject-heading">
+    <h2 id="subject-heading" class="visually-hidden">Subject</h2>
+
+    {% if session %}
+        <p>
+            About the session
+            <a href="{{ path('app_session_show', {id: session.id}) }}"><strong>{{ session.title }}</strong></a>
+            — her objective and memories are part of every reply here.
+        </p>
+        <details class="chat-subject-change">
+            <summary>Change subject</summary>
+            {{ _self.subject_form(chat, bindable_sessions, session.id) }}
+        </details>
+    {% else %}
+        <details class="chat-subject-change">
+            <summary>Make this conversation about a session</summary>
+            <p class="muted">
+                Then she answers from that session's objectives and memories
+                rather than as a fresh assistant — one context, reached by chat.
+            </p>
+            {{ _self.subject_form(chat, bindable_sessions, null) }}
+        </details>
+    {% endif %}
+</section>
+
+{#
     The transcript, rendered from the ledger. Each turn carries its speaker as
     a typed column (not a payload entry), so this loop is a plain read of the
     conversational events — which is the whole point of having no separate
@@ -164,3 +201,39 @@
 
 <p class="page-back"><a href="{{ path('app_chat_list') }}">← All conversations</a></p>
 {% endblock %}
+
+{#
+    The binding control, rendered once for both states.
+
+    `current` is the bound session's id or null, and the empty option is the way
+    back: "no session" is a deliberate state, not merely the absence of having
+    chosen one. Submitting an empty selection unbinds, which is why that option
+    is labelled rather than left blank.
+
+    One macro for both branches because the only difference between them is
+    which option is selected — two near-identical blocks would drift, and the one
+    that drifted would be the one nobody had bound a conversation to yet.
+
+    With no sessions to offer the select would be a control with a single
+    option, so the form is replaced by the reason. An operator staring at an
+    empty dropdown learns nothing from it.
+#}
+{% macro subject_form(chat, sessions, current) %}
+    {% if sessions is empty %}
+        <p class="muted">
+            There are no sessions yet — create one and it will appear here.
+        </p>
+    {% else %}
+        <form method="post" action="{{ path('app_chat_bind', {id: chat.id}) }}" class="chat-subject-form">
+            <input type="hidden" name="_token" value="{{ csrf_token('chat-bind-' ~ chat.id) }}">
+            <label for="session_id">Session</label>
+            <select name="session_id" id="session_id">
+                <option value=""{{ current is null ? ' selected' : '' }}>None — an ordinary conversation</option>
+                {% for session in sessions %}
+                    <option value="{{ session.id }}"{{ current == session.id ? ' selected' : '' }}>{{ session.title }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit">Save</button>
+        </form>
+    {% endif %}
+{% endmacro %}

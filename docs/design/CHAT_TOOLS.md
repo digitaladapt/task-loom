@@ -218,3 +218,12 @@ continuing would leave a person with nothing to read.
   validate-before-dispatch, the same per-call client, the same deliberate
   `server_error` for OpenAPI tools. A chat that needs a new executor means
   this design is wrong.
+- **No effect on a chat's toolbox, from binding it to a session.** A bound chat
+  gains the session's `## Session` header and its memory block, and nothing else:
+  the picker is still the picker, and the session's own harness tools
+  (`session_note`, `session_objective`, `session_declare`) are **not** reachable
+  from the conversation. Those exist to end a slice and are meaningless outside
+  one — a chat has no slice to declare, and offering the tools would invite a
+  write with no reader. Binding changes who she is answering *as*, not what she
+  can *do*; the two are separate decisions and stay separate (SESSION_TASKS.md
+  §8.3).
