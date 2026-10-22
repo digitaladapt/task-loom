@@ -112,6 +112,28 @@ final class TaskRepository extends ServiceEntityRepository
     }
 
     /**
+     * Whether this task or any version it replaces has run — the chain-scoped
+     * twin of {@see self::hasRuns()}.
+     *
+     * Approval needs this rather than the per-row question, because the
+     * successor is the continuation of the original and the original's run
+     * history is the successor's history (docs/design/SESSION_TASKS.md §8.2).
+     * Scoped to the chain and never beyond it: a draft approved over a task
+     * that never ran stays a record-less draft, because nothing has happened
+     * to it yet.
+     */
+    public function hasRunsInChain(Task $task): bool
+    {
+        for ($node = $task; null !== $node; $node = $node->getReplacementFor()) {
+            if ($this->hasRuns($node)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Archived tasks, oldest first — the dead records (SPEC §4.4).
      *
      * @return list<Task>

@@ -322,6 +322,22 @@ class Task
         $this->enabled = true;
     }
 
+    /**
+     * An approved replacement takes over the standing its original had: the
+     * original ran, so the successor's content is locked on arrival and its
+     * history lives on the original's rows (docs/design/SESSION_TASKS.md §8.2).
+     *
+     * This is deliberately not part of `approve()`: `hasRuns` is a cache of
+     * "a run row points here", and approval knows nothing about the runs
+     * table. The caller that swaps the rows
+     * ({@see \App\Admin\TaskAdminService::approveTask()}) has read it, and
+     * this is how it hands the fact over.
+     */
+    public function adoptStanding(bool $hasRuns): void
+    {
+        $this->hasRuns = $hasRuns;
+    }
+
     public function disable(): void
     {
         $this->enabled = false;

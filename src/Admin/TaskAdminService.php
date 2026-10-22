@@ -11,6 +11,7 @@ use App\Repository\TaskRepository;
 use App\Scheduler\ScheduleExpression;
 use App\Scheduler\ScheduleFormatException;
 use App\Session\SessionConstraintException;
+use App\Session\SessionMemoryStore;
 use App\StepModel\StepGraphException;
 use App\StepModel\StepGraphValidator;
 use Doctrine\ORM\EntityManagerInterface;
@@ -39,6 +40,7 @@ final class TaskAdminService
         private readonly StepGraphValidator $stepGraph,
         private readonly ScheduleExpression $scheduleExpression,
         private readonly EntityManagerInterface $em,
+        private readonly SessionMemoryStore $memory,
     ) {
     }
 
@@ -77,6 +79,28 @@ final class TaskAdminService
      * A is disabled, superseded, and archived. Either both rows change or
      * neither does (single flush, Doctrine transaction).
      *
+     * A session's continuity moves with the swap (docs/design/
+     * SESSION_TASKS.md §8.2). The successor is the same continuing entity under
+     * a new row, so it takes over two things an approval would otherwise
+     * silently drop:
+     *
+     * - **its memory** — for a session, the objective, the notes and the
+     *   revision history are moved onto the successor ({@see
+     *   SessionMemoryStore::carryTo()}), because `session_memory.task_id`
+     *   cascades: without the move, approving the operator's own edit would
+     *   hand the session an empty store and erase its history when the
+     *   original's row goes.
+     * - **its standing** — an approved replacement of a task that has run is
+     *   a record, so it adopts the chain's `hasRuns` rather than arriving as a
+     *   fresh draft with locked-down content and a `fresh` state.
+     *
+     * The runs stay on the version that produced them: the ledger is a record
+     * of what happened to a specific enabled task, and neither the successor
+     * nor the original should ever be able to rewrite it. Session state
+     * therefore walks the supersede chain instead ({@see
+     * SessionSliceEngine::activeState()}), which is what lets one session
+     * span several approved versions.
+     *
      * @throws TaskLifecycleException when the task cannot be approved
      */
     public function approveTask(int $taskId): Task
@@ -86,10 +110,25 @@ final class TaskAdminService
         $this->guardKind($task, 'approve');
         $this->guardStepGraph($task, 'approve');
         $this->guardSchedule($task, 'approve');
+
+        $original = $task->getReplacementFor();
+
         try {
             $task->approve();
         } catch (\LogicException $e) {
             throw new TaskLifecycleException($e->getMessage(), $e->getCode(), $e);
+        }
+
+        if (null !== $original) {
+            $task->adoptStanding($this->tasks->hasRunsInChain($original));
+
+            // Only a session has a memory store (§3.1). A run task's approval
+            // moves its standing and nothing else, and carryTo() rightly
+            // refuses a non-session — so ask only when there is something to
+            // move.
+            if (TaskKind::Session === $task->getKind()) {
+                $this->memory->carryTo($original, $task);
+            }
         }
 
         $this->em->flush();

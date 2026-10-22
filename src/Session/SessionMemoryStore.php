@@ -67,6 +67,53 @@ final readonly class SessionMemoryStore
     }
 
     /**
+     * Move a session's whole memory onto its approved successor
+     * (docs/design/SESSION_TASKS.md §8.2) — the one write that is not scoped by
+     * `task`, because it exists precisely to change that scope.
+     *
+     * **Moved, not copied.** The objective is a singleton per session, so a
+     * copy of it would leave two rows claiming to be "the" objective and
+     * two stores to trim; a session's memory is one object that follows the
+     * continuation, not a snapshot of an old version. The rows keep their
+     * ids, revisions, tiers and pins — the same memory, reachable from the
+     * new task — and so does every superseded text in the history, which is
+     * what makes a steer inspectable after a replacement.
+     *
+     * Idempotent and quiet by design: a session with no memory of its own
+     * has nothing to carry, and a successor that already holds rows (an
+     * approval that ran twice) is left exactly as it is rather than merged
+     * into — merging two stores is a decision nobody has made.
+     *
+     * Callers must stay inside the approval's transaction: the swap and the
+     * move are one act, and a successor enabled without its memory is the
+     * bug this exists to close.
+     */
+    public function carryTo(Task $from, Task $to): void
+    {
+        $this->guardWritable($to);
+
+        $fromId = $from->getId();
+        if (null === $fromId) {
+            return;
+        }
+
+        $memories = $this->memories->findAllFor($fromId);
+        if ([] === $memories) {
+            return;
+        }
+
+        if ($this->memories->hasRowsFor((int) $to->getId())) {
+            return;
+        }
+
+        foreach ($memories as $memory) {
+            $memory->reparent($to);
+        }
+
+        $this->em->flush();
+    }
+
+    /**
      * Set the session's objective — create it, or replace the existing one
      * (§3.2: change by replacement; last writer wins, visibly).
      *

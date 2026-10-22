@@ -172,6 +172,23 @@ class SessionMemory
     }
 
     /**
+     * Move this row onto another session — the approved successor of the one
+     * it was written for (docs/design/SESSION_TASKS.md §8.2).
+     *
+     * The only mutator of `task`, and reachable only from
+     * {@see App\Session\SessionMemoryStore::carryTo()}: "the session is the
+     * namespace" means re-namespacing is a reparent, and nothing else in the
+     * codebase should be able to do it. Text, revision, tier and pin stay
+     * untouched — this is the same memory under a new owner, not a new
+     * version of it.
+     */
+    public function reparent(Task $task): void
+    {
+        $this->task = $task;
+        $this->touch();
+    }
+
+    /**
      * Replace this row's text and provenance, bumping the revision. The
      * caller ({@see App\Session\SessionMemoryStore}) has already appended the
      * superseded text to the history — replacement is always recorded there,

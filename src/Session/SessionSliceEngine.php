@@ -101,7 +101,7 @@ final readonly class SessionSliceEngine
      */
     public function activeState(Task $task): SessionState
     {
-        $runs = $this->runs->findForTask($task);
+        $runs = $this->runs->findForChain($task);
 
         foreach ($runs as $run) {
             if (!$run->isTerminal()) {
@@ -113,7 +113,7 @@ final readonly class SessionSliceEngine
             return SessionState::Fresh;
         }
 
-        // Newest first (findForTask): the last slice's declaration decides —
+        // Newest first (findForChain): the last slice's declaration decides —
         // and when there is none, the policy the slice froze does
         // (docs/design/SESSION_ENDINGS.md §4): a succeeded, undeclared
         // slice under `continue` is the same owed-next-slice shape a
@@ -150,7 +150,7 @@ final readonly class SessionSliceEngine
      */
     public function lastSlice(Task $task): ?Run
     {
-        return $this->runs->findForTask($task)[0] ?? null;
+        return $this->runs->findForChain($task)[0] ?? null;
     }
 
     /**
@@ -159,7 +159,7 @@ final readonly class SessionSliceEngine
      */
     public function retryState(Task $task, ?int $now = null): ?SessionRetryState
     {
-        return $this->retry->assess($this->runs->findForTask($task), $now ?? time());
+        return $this->retry->assess($this->runs->findForChain($task), $now ?? time());
     }
 
     /**
@@ -187,7 +187,7 @@ final readonly class SessionSliceEngine
             return false;
         }
 
-        $retry = $this->retry->assess($this->runs->findForTask($task), time());
+        $retry = $this->retry->assess($this->runs->findForChain($task), time());
 
         return null !== $retry && $retry->due(time());
     }

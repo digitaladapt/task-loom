@@ -715,6 +715,51 @@ nothing in the design blocks it — and is recorded here as deferred, not reject
 the same posture DESIGN_CONSIDERATIONS §2.4 takes for `request_tool`. Revisit if
 a runaway session ever proves to be a real problem.
 
+### 8.2 Continuity across an approved replacement — settled
+
+A session outlives its task rows. An edit to an enabled session is a replacement
+draft (SPEC §4.4), and approving it swaps the rows: the original is disabled,
+superseded and archived, the successor is enabled. The session is the same
+continuing entity under a new row, so **the successor inherits the chain**, and
+everything above that derives state has to read the chain rather than the row.
+Three consequences, each of which was a live bug until closed:
+
+- **Run history is chain-scoped.** The ledger stays on the version that produced
+  it — a run is a record of one enabled task and no approval may rewrite it — so
+  "what has this session done?" walks the supersede chain
+  (`RunRepository::findForChain()`, ordered by run id across versions, which is
+  the true newest-first order because ids are monotonic; the walk stops at the
+  first version older than the first one to run). Asking only the task row made
+  an approved successor read `fresh` and lose its retry and endings history —
+  `activeState()`, `lastSlice()` and `retryState()` all moved to the chain.
+- **Standing carries over.** Approval reads the chain and the successor adopts
+  it (`TaskAdminService::approveTask()` → `Task::adoptStanding()`), so a
+  successor of a task that has run arrives as a **record**, not a fresh draft:
+  its content is locked on arrival and an edit to it is a replacement again.
+  Without this, approving one's own edit quietly re-opened the content of a
+  session that had already run.
+- **Memory moves with the swap.** `session_memory.task_id` cascades, so the
+  objective, the notes and every revision are reparented onto the successor in
+  the approval's own transaction (`SessionMemoryStore::carryTo()`), pins intact.
+  The alternative is not "the memory stays put": it is that approving the
+  operator's edit hands the session an empty store and erases its history when
+  the original's row is archived. The move is a reparent, not a copy — text,
+  revision, tier and pin are untouched, because it is the same memory under a new
+  owner — and it refuses rather than merges if the successor somehow already
+  holds rows (two stores merged is a decision nobody has made).
+
+**Landed 2026-10-22**, prompted by exactly this sequence: an operator approves a
+steering edit mid-life, and the session silently restarts its state. Session
+continuity is now a property of the chain, and `SessionContinuityTest` pins all
+three legs — state, standing, and the whole memory store, pins included.
+
+**What this implies for a chat surface.** Because state, standing and memory are
+all chain-scoped, "the session" has exactly one identity regardless of how many
+times its task row has been replaced. A conversation with a session should
+therefore attach to **the session** — the chain — and not to a particular task
+row, or a chat would lose its counterpart the next time the operator edits the
+objective. The one context is the session; a chat is just a way to reach it.
+
 ---
 
 ## 9. Workspace — optional, and not task-loom's

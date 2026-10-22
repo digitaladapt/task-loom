@@ -101,7 +101,7 @@ final class TaskAdminController extends AbstractController
     private function runGroups(Task $task): array
     {
         $groups = [];
-        foreach ($this->runs->findForTask($task) as $run) {
+        foreach ($this->runs->findForChain($task) as $run) {
             $groups[] = [
                 'run' => $run,
                 'children' => RunRole::Standalone === $run->getRole() ? [] : $this->runs->findChildren($run),

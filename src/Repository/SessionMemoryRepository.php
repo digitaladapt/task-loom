@@ -43,6 +43,36 @@ final class SessionMemoryRepository extends ServiceEntityRepository
     }
 
     /**
+     * Every memory row of one session — the whole store, for the one caller
+     * that moves it ({@see \App\Session\SessionMemoryStore::carryTo()}).
+     *
+     * @return list<SessionMemory>
+     */
+    public function findAllFor(int $taskId): array
+    {
+        return $this->createQueryBuilder('m')
+            ->where('m.task = :task')
+            ->setParameter('task', $taskId)
+            ->orderBy('m.id', \SortDirection::Ascending)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
+     * Whether a session holds any memory at all — the guard that keeps a
+     * carry from merging into a store that is already there.
+     */
+    public function hasRowsFor(int $taskId): bool
+    {
+        return $this->createQueryBuilder('m')
+            ->select('COUNT(m.id)')
+            ->where('m.task = :task')
+            ->setParameter('task', $taskId)
+            ->getQuery()
+            ->getSingleScalarResult() > 0;
+    }
+
+    /**
      * The session's notes, oldest first, optionally filtered to one tier.
      *
      * @return list<SessionMemory>
