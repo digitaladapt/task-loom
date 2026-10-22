@@ -304,6 +304,49 @@ final class ChatSessionBinderTest extends KernelTestCase
         );
     }
 
+    /**
+     * The status line is chain-scoped too, and that is not a detail.
+     *
+     * `findNewestForTask()` asks the row, so after an approved edit the successor
+     * has no runs of its own and the line simply disappears — the chat partner
+     * then says nothing about her work while the session page shows it finished.
+     * That is the same failure the continuity fix exists to prevent, one level up:
+     * state was made chain-scoped (§8.2) and this reads state.
+     *
+     * Worth its own test because it fails *quietly by omission*: an absent
+     * sentence looks like a session that has not run yet, not like a bug. The
+     * first version of this code had this bug, with a comment above it claiming
+     * the opposite.
+     */
+    public function testTheStatusLineSurvivesAnApprovedEdit(): void
+    {
+        $original = $this->makeSession('A session that will run and then be edited');
+        $chat = $this->bindChat($original);
+
+        $run = new Run($original);
+        $run->markStarted();
+        $run->markSucceeded();
+        $this->em->persist($run);
+        $this->em->flush();
+
+        self::assertStringContainsString(
+            'Its most recent slice succeeded',
+            $this->systemPrompt($this->askAndCapture($chat)),
+            'before the edit: the run happened and the chat knows it',
+        );
+
+        $successor = $original->createReplacementDraft(TaskAuthor::User);
+        $this->em->persist($successor);
+        $this->em->flush();
+        $this->approve((int) $successor->getId());
+
+        self::assertStringContainsString(
+            'Its most recent slice succeeded',
+            $this->systemPrompt($this->askAndCapture($chat)),
+            'after the edit: the ledger is still on the old row, and the session is still the one that ran',
+        );
+    }
+
     private function bindChat(?Task $session): Chat
     {
         $chat = new Chat('A conversation');

@@ -144,6 +144,26 @@ final class RunRepository extends ServiceEntityRepository
     }
 
     /**
+     * The newest top-level runs across a task and every version it replaces.
+     *
+     * The bounded twin of {@see findForChain()}, for a caller that wants "where
+     * does this stand?" rather than the history: the chat's one-line status
+     * ({@see \App\Chat\ChatEngine::lastSliceLine()}) reads a limit of one.
+     *
+     * Chain-scoped for the reason the whole continuity fix exists
+     * (docs/design/SESSION_TASKS.md §8.2): {@see findNewestForTask()} asks the
+     * row, so a session edited after it ran would read as though it had never
+     * run — and a chat partner who says "I have not started" about work the
+     * session page shows as finished is worse than one who says nothing.
+     *
+     * @return list<Run>
+     */
+    public function findNewestInChain(Task $task, int $limit): array
+    {
+        return \array_slice($this->findForChain($task), 0, $limit);
+    }
+
+    /**
      * The newest top-level runs of one task, newest first, bounded — the
      * history window the undeclared-streak walk reads
      * (docs/design/SESSION_ENDINGS.md §4): the streak feeds a count that

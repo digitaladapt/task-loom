@@ -871,7 +871,7 @@ final readonly class ChatEngine
      */
     private function lastSliceLine(Task $session): ?string
     {
-        $runs = $this->runs->findNewestForTask($session, 1);
+        $runs = $this->runs->findNewestInChain($session, 1);
         if ([] === $runs) {
             return null;
         }
