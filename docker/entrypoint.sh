@@ -91,6 +91,10 @@ TOOL_WORKERS="${TASKLOOM_TOOL_MAX_CONCURRENCY:-2}"
 WEB_ENABLED=1
 SCHEDULER_ENABLED="${TASKLOOM_SCHEDULER_ENABLED:-1}"
 SCHEDULE_INTERVAL="${TASKLOOM_SCHEDULE_INTERVAL:-60}"
+# The session heartbeat's beat. Deliberately shorter than the shortest retry
+# delay (TASKLOOM_SESSION_RETRY_BASE_DELAY, default 30s), so a retry that comes
+# due launches within a beat instead of waiting for the next round.
+SESSION_HEARTBEAT_INTERVAL="${TASKLOOM_SESSION_HEARTBEAT_INTERVAL:-10}"
 WORKER_TIME_LIMIT="${TASKLOOM_WORKER_TIME_LIMIT:-3600}"
 WORKER_MEMORY_LIMIT="${TASKLOOM_WORKER_MEMORY_LIMIT:-256M}"
 MIGRATE_ON_BOOT="${TASKLOOM_MIGRATE_ON_BOOT:-0}"
@@ -148,6 +152,7 @@ validate_memory() { # name value
 validate_uint TASKLOOM_LLM_MAX_CONCURRENCY "$LLM_WORKERS" 0
 validate_uint TASKLOOM_TOOL_MAX_CONCURRENCY "$TOOL_WORKERS" 0
 validate_uint TASKLOOM_SCHEDULE_INTERVAL "$SCHEDULE_INTERVAL" 1
+validate_uint TASKLOOM_SESSION_HEARTBEAT_INTERVAL "$SESSION_HEARTBEAT_INTERVAL" 1
 validate_uint TASKLOOM_WORKER_TIME_LIMIT "$WORKER_TIME_LIMIT" 1
 validate_uint TASKLOOM_SHUTDOWN_TIMEOUT "$SHUTDOWN_TIMEOUT" 0
 
@@ -355,6 +360,14 @@ TOOLS_CMD=(php bin/console messenger:consume tools
 # holds no message and its own loop is cheap; the shutdown path below stops
 # it cleanly (its signal handler finishes the current tick and exits 0).
 SCHEDULER_CMD=(php bin/console app:schedule:run --interval="$SCHEDULE_INTERVAL" --no-interaction)
+# The session heartbeat: the process that makes an idle session safe. The
+# requeue sweep runs only at boot, so a slice owed on a CLOCK — a retry's
+# backoff, an idle stretch before a session decides what to do next — has
+# nothing to wake it. This beats on a short interval, reconciles owed slices,
+# and republishes the alarm file /health reads. Like the scheduler: no
+# --time-limit/--memory-limit, its loop is cheap and holds no message, and its
+# signal handler finishes the current beat and exits 0.
+SESSION_HEARTBEAT_CMD=(php bin/console app:session:heartbeat --interval="$SESSION_HEARTBEAT_INTERVAL" --no-interaction)
 
 spawn() { # label cmd…
     local label="$1"
@@ -404,6 +417,18 @@ spawn_fleet() {
         spawn scheduler "${SCHEDULER_CMD[@]}"
     else
         log "scheduler disabled (TASKLOOM_SCHEDULER_ENABLED=0); scheduled tasks will not fire"
+    fi
+
+    # The heartbeat runs under the same ownership predicate as the boot sweep
+    # above: it reconciles sessions, and a fleet with no llm worker has no
+    # claims on them — a peer owns those lanes and runs its own heartbeat.
+    # Two beats reconciling at once would be harmless (the reconcile is
+    # idempotent and the engine refuses a second slice for a working session),
+    # but there is no reason to pay for it.
+    if [ "$LLM_WORKERS" -gt 0 ] && [ "$TOOL_WORKERS" -gt 0 ]; then
+        spawn heartbeat "${SESSION_HEARTBEAT_CMD[@]}"
+    else
+        log "session heartbeat not started (no full fleet here); a peer owns the session lanes"
     fi
 }
 
@@ -479,6 +504,7 @@ supervise() {
                 case "$label" in
                     llm-*) spawn "$label" "${LLM_CMD[@]}" ;;
                     scheduler) spawn "$label" "${SCHEDULER_CMD[@]}" ;;
+                    heartbeat) spawn "$label" "${SESSION_HEARTBEAT_CMD[@]}" ;;
                     *) spawn "$label" "${TOOLS_CMD[@]}" ;;
                 esac
                 ;;

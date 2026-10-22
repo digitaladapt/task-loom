@@ -135,6 +135,16 @@ x-taskloom-env: &taskloom-env
   TASKLOOM_SESSION_ENDINGS: ${TASKLOOM_SESSION_ENDINGS:-milestone,done,blocked}
   TASKLOOM_SESSION_UNDECLARED: ${TASKLOOM_SESSION_UNDECLARED:-stop}
   TASKLOOM_SESSION_MAX_UNDECLARED: ${TASKLOOM_SESSION_MAX_UNDECLARED:-3}
+  # Transient-failure retries: a slice that fails on a provider 5xx or a
+  # timeout backs off and tries again instead of stopping the session. Both
+  # ceilings (attempts, and the streak's age) turn a retry into a stop.
+  TASKLOOM_SESSION_RETRY_MAX_ATTEMPTS: ${TASKLOOM_SESSION_RETRY_MAX_ATTEMPTS:-5}
+  TASKLOOM_SESSION_RETRY_BASE_DELAY: ${TASKLOOM_SESSION_RETRY_BASE_DELAY:-30}
+  TASKLOOM_SESSION_RETRY_MAX_DELAY: ${TASKLOOM_SESSION_RETRY_MAX_DELAY:-900}
+  TASKLOOM_SESSION_RETRY_MAX_AGE: ${TASKLOOM_SESSION_RETRY_MAX_AGE:-3600}
+  # The heartbeat's beat. Shorter than the base retry delay so a due retry
+  # launches promptly rather than waiting for the next round.
+  TASKLOOM_SESSION_HEARTBEAT_INTERVAL: ${TASKLOOM_SESSION_HEARTBEAT_INTERVAL:-10}
   # Absolute URLs in non-HTTP contexts: must match the public-facing address.
   DEFAULT_URI: ${DEFAULT_URI:-http://localhost:8080}
   # SQLite (WAL) on the data volume; the lanes share this file.

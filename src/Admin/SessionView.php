@@ -51,6 +51,7 @@ final readonly class SessionView
         return \in_array($this->underlying, [
             SessionState::Fresh,
             SessionState::Owed,
+            SessionState::Retrying,
             SessionState::Blocked,
             SessionState::Stopped,
         ], true);

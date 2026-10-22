@@ -210,5 +210,109 @@ alert-and-continue only. Defensible; one value less.
 1. `continue` on budget exhaustion too? (Recommend: not yet — the loop-prone
    case, and it wants the ceiling first.)
 2. Ceiling now or next? (Recommend: next, not never.)
-3. `rest`: wanted eventually, or are `blocked` + alerts enough?
+3. `rest`: wanted eventually? (Settled in §9.5 — safe to add now that the heartbeat exists; it is no longer just a tidier `stop`.)
 4. Names: `endings` / `undeclared` are placeholders.
+
+## 9. Retries, idling, and where a stop is noticed (settled)
+
+This section records decisions taken after the draft, and the shape of the code
+that enforces them.
+
+### 9.1 A transient failure is retried, not parked
+
+`stopped` was the only outcome a broken slice had, and it waits for a human.
+That is right for an unbuildable constitution, an exhausted budget, or a model
+that cannot follow the declaration contract — none of those improve by waiting.
+It is wrong for the environment being briefly unavailable: a provider 5xx, a
+connection reset, a first-token or silence timeout. Parking a session because a
+provider blipped is a self-inflicted outage.
+
+`App\Session\SessionRetry` is the constitution. It is an **allowlist**
+(`ServerError`, `ServerTimeout`, `LlmError`, `LlmFirstTokenTimeout`,
+`LlmSilenceTimeout`) because a new error class must be deliberately admitted,
+never silently inherited. Notable refusals:
+
+- `budget_exceeded` / `context_exhausted` — terminal by construction; retrying
+  re-hits the same wall with backoff.
+- `llm_loop_detected` / `llm_duration_exceeded` — the guard fired because the
+  model misbehaved; retrying re-runs the misbehaviour.
+- null (unclassified) — if nothing in the taxonomy described it, assuming it
+  clears is how a loop of indistinguishable failures is born.
+
+Backoff is `base * 2^(attempts-1)`, capped: with the defaults, 30s, 1m, 2m, 4m,
+8m. It is anchored on the failed slice's already-persisted `finishedAt`, so the
+retry needs **no schema change** — the state is derived from committed rows,
+exactly as every other session state is.
+
+### 9.2 Bounded by construction — two ceilings, not one
+
+An attempt count alone is not enough: a long provider outage would keep the
+session retrying every 15 minutes indefinitely, and the *first* attempt in a
+newly-started container would look just as fresh as one that has been failing
+for a day. So there are two independent ceilings, enforced in the derivation
+itself (`SessionRetry::assess`), which no launch path can bypass:
+
+1. `maxAttempts` consecutive failures (default 5);
+2. `maxAgeSeconds` since the streak's **oldest** failure (default 1 hour).
+
+Once either is spent the session derives `stopped` and the alarm is raised. The
+streak is *consecutive*: a success, or a terminal failure, ends it, so an old
+blip does not spend this streak's budget. An operator resume is a deliberate
+act and starts a fresh streak.
+
+### 9.3 Where a stop is noticed: the container, not the UI
+
+Requirement: a session that has wedged must be visible at the level people
+actually monitor. A derived state in the database plus a line in the web UI is
+useless when nobody is looking at the UI.
+
+So a stopped session is published to a **sentinel file** that `/health` reads,
+and `/health` answers 503 — which makes Docker's HEALTHCHECK mark the container
+`unhealthy`, visible in `docker ps`, in compose, and to any external monitor.
+
+Two constraints shaped this:
+
+- **`/health` stays dependency-free (§8.4).** Its whole point is that a database
+  hiccup cannot kill the container, so the alarm cannot be a row. A file cannot
+  fail slowly, cannot deadlock, and its absence is unambiguous. It is the same
+  projection the entrypoint already uses for `$DATA_DIR/fleet-id`.
+- **`unhealthy` is preferred over shutdown.** A health check does not restart
+  anything — `restart: unless-stopped` reacts to exits, not health — so
+  `unhealthy` is a red light at the orchestration layer while in-flight work
+  continues, and the condition stays reversible: resume the session and the next
+  beat clears it. A hard exit is the bigger hammer, kept for "every slice will
+  fail, stop burning tokens".
+
+The sentinel lives in `var/`, **not** the data volume, because it belongs to
+this process's knowledge rather than the installation's: a restart is a fresh
+start, and the boot beat re-derives whether the condition still holds. If it
+does the light comes back within one beat; if a restart fixed it, the container
+comes up green instead of wearing a stale red light forever.
+
+`blocked` also raises it — the session said it needs a human. `paused` does not:
+that is the operator's own switch, and alarming on a deliberate decision trains
+people to ignore the light.
+
+### 9.4 The prerequisite this exposed: the sweep was boot-only
+
+`app:run:requeue` ran **only at container boot**. A session owed a slice on a
+*clock* — a retry's backoff, or an idle stretch — had nobody to notice when the
+clock came round, so it would sit in `owed`/`retrying` until the next restart.
+That is precisely the "unscheduled session" failure this work exists to
+eliminate, and it was already live for any lost launch.
+
+`app:session:heartbeat` closes it: it beats on an interval (default 30s, well
+under the shortest retry delay), calls the same idempotent reconcile the boot
+sweep does — launching an owed slice, and a retrying one only once its backoff
+has *elapsed* — and republishes the alarm. A beat never throws: a heartbeat that
+dies because one session's rows are malformed stops doing the other job it has,
+and a supervisor restart cannot fix a data problem.
+
+### 9.5 Idling
+
+The requirement was that a session may idle — the LLM not running at all — but
+must never be *unscheduled*. "Idling" and "stopped" are therefore different
+things, and the distinction is structural: an idle session still has a live
+heartbeat computing when it is next due. With the heartbeat running, `rest` is
+safe to add later as an ending that resolves to a due-time; without it, `rest`
+would just be a tidier name for `stop`.

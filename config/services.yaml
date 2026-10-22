@@ -73,6 +73,22 @@ parameters:
     TASKLOOM_SESSION_ENDINGS: 'milestone,done,blocked'
     TASKLOOM_SESSION_UNDECLARED: 'stop'
     TASKLOOM_SESSION_MAX_UNDECLARED: 3
+    # Session retries (docs/design/SESSION_ENDINGS.md §9): a slice
+    # that fails TRANSIENTLY — a provider 5xx, a connection reset, a
+    # first-token or silence timeout — is retried with exponential backoff
+    # instead of stopping the session and waiting for a human. Stops the
+    # self-inflicted outage where one provider blip parks a session until
+    # somebody notices. Two independent ceilings keep it from running away:
+    # MAX_ATTEMPTS bounds the streak, RETRY_MAX_AGE bounds its wall-clock
+    # life. Either one being spent turns the retry into a stop, and a stop
+    # raises the container alarm. Classes that are terminal by construction
+    # (budget_exceeded, context_exhausted) and stream cuts caused by the
+    # model misbehaving (loop, duration) are never retried — see
+    # App\Session\SessionRetry::RETRYABLE.
+    TASKLOOM_SESSION_RETRY_MAX_ATTEMPTS: 5
+    TASKLOOM_SESSION_RETRY_BASE_DELAY: 30
+    TASKLOOM_SESSION_RETRY_MAX_DELAY: 900
+    TASKLOOM_SESSION_RETRY_MAX_AGE: 3600
     TASKLOOM_STEP_BUDGET: 50
     TASKLOOM_TOOL_RETRIES: 2
     TASKLOOM_CIRCUIT_BREAKER: 3
@@ -316,6 +332,24 @@ services:
             $undeclared: '%env(default:TASKLOOM_SESSION_UNDECLARED:TASKLOOM_SESSION_UNDECLARED)%'
             $maxUndeclared: '%env(int:default:TASKLOOM_SESSION_MAX_UNDECLARED:TASKLOOM_SESSION_MAX_UNDECLARED)%'
 
+    # Transient-failure retries (see the knobs above). Separate from the
+    # endings constitution on purpose: that one decides what a settlement
+    # MEANS, this one decides what a failure COSTS. A slice engine holds both.
+    App\Session\SessionRetry:
+        arguments:
+            $maxAttempts: '%env(int:default:TASKLOOM_SESSION_RETRY_MAX_ATTEMPTS:TASKLOOM_SESSION_RETRY_MAX_ATTEMPTS)%'
+            $baseDelaySeconds: '%env(int:default:TASKLOOM_SESSION_RETRY_BASE_DELAY:TASKLOOM_SESSION_RETRY_BASE_DELAY)%'
+            $maxDelaySeconds: '%env(int:default:TASKLOOM_SESSION_RETRY_MAX_DELAY:TASKLOOM_SESSION_RETRY_MAX_DELAY)%'
+            $maxAgeSeconds: '%env(int:default:TASKLOOM_SESSION_RETRY_MAX_AGE:TASKLOOM_SESSION_RETRY_MAX_AGE)%'
+
+    # The session alarm: the file `/health` reads so a stopped session is
+    # visible as a container, not just as a row. Written by the heartbeat,
+    # read by the health controller — the filesystem is the channel, because
+    # /health must stay dependency-free (§8.4) and must not query the DB.
+    App\Session\SessionAlarm:
+        arguments:
+            $path: '%kernel.project_dir%/var/session-alarm.json'
+
     # The session slice engine (docs/design/SESSION_TASKS.md §8, build order
     # step 4): derives a session's state, creates slices, and launches the
     # next slice at settlement. Its budgets mirror the run engine's knobs —
@@ -331,6 +365,7 @@ services:
                 slice_budget: '%env(int:default:TASKLOOM_SESSION_SLICE_BUDGET:TASKLOOM_SESSION_SLICE_BUDGET)%'
                 tool_retries: '%env(int:default:TASKLOOM_TOOL_RETRIES:TASKLOOM_TOOL_RETRIES)%'
                 circuit_breaker: '%env(int:default:TASKLOOM_CIRCUIT_BREAKER:TASKLOOM_CIRCUIT_BREAKER)%'
+            $retry: '@App\Session\SessionRetry'
             $bus: '@messenger.default_bus'
 
     # The grounding block (SPEC §4.2 / §5.6). Same required deployment

@@ -23,13 +23,25 @@ namespace App\Session;
  *                 succeeded slice with no declaration. The next slice is due;
  *                 launched at settlement, and the requeue sweep re-derives it
  *                 after a lost dispatch.
+ *  - `retrying` — enabled, nothing in flight, and the last slice failed in a
+ *                 way that is worth another attempt (a provider 500, a
+ *                 connection reset, a first-token timeout). The next slice is
+ *                 owed on a backoff clock; it is NOT waiting for a human, and
+ *                 the sweep launches it when the delay elapses
+ *                 ({@see SessionRetry}). Distinct from `owed` because the
+ *                 launch is not yet due, and distinct from `stopped` because
+ *                 nobody needs to intervene. When the retry budget or its age
+ *                 ceiling is spent, this derives `stopped` again and the
+ *                 alarm fires.
  *  - `complete` — the last declaration was `done` (terminal);
  *  - `blocked`  — the last declaration was `blocked`; needs the operator;
  *  - `stopped`  — the last slice settled without a declaration in a way the
  *                 policy does NOT continue (an exhausted slice budget, a
- *                 failed turn, a tripped breaker, an empty message, or an
- *                 undeclared streak that hit its bound) — loud, and it waits
- *                 for a human;
+ *                 failed turn that is not retryable, a tripped breaker, an
+ *                 empty message, an undeclared streak that hit its bound, or
+ *                 a retry streak that spent its budget) — loud, and it waits
+ *                 for a human. This is the state that raises the container
+ *                 alarm ({@see SessionAlarm});
  *  - `paused`   — the task is disabled; the operator's switch. Derived
  *                 first: nothing launches while it is off.
  *
@@ -41,6 +53,7 @@ enum SessionState: string
     case Fresh = 'fresh';
     case Working = 'working';
     case Owed = 'owed';
+    case Retrying = 'retrying';
     case Complete = 'complete';
     case Blocked = 'blocked';
     case Stopped = 'stopped';
