@@ -10,6 +10,10 @@ use App\Entity\ChatExchange;
 use App\Entity\ChatExchangeEvent;
 use App\Entity\ErrorClass;
 use App\Entity\Participant;
+use App\Entity\Task;
+use App\Entity\TaskAuthor;
+use App\Entity\TaskKind;
+use App\Entity\ToolboxMode;
 use App\Entity\TurnRole;
 use App\Llm\LlmClientInterface;
 use App\Security\AdminUser;
@@ -258,6 +262,81 @@ final class ChatSurfaceTest extends WebTestCase
      * A conversation with one answered exchange, built directly so the surface
      * tests do not depend on the worker path they are not testing.
      */
+    /**
+     * The binding control over real HTTP, all four outcomes of one POST.
+     *
+     * The binder's own tests prove the resolution and the prompt; what they cannot
+     * prove is that a person operating the page gets told what happened. Every
+     * branch here ends in a redirect with a flash, which is the design: the picker
+     * is a form, and the answer to "did that take?" has to survive the redirect.
+     *
+     * `a run task` is the branch worth having most. It is refused, and refusing it
+     * is what keeps the binding from becoming a way to point a conversation at
+     * something that is not a session — which would render a header over nothing
+     * and read as a bug in the memory system rather than in the choice.
+     */
+    public function testBindingAConversationToASessionOverHttp(): void
+    {
+        $em = $this->em();
+
+        $chat = new Chat('A conversation to bind');
+        $em->persist($chat);
+
+        $session = new Task('The session it is about', 'brief', TaskKind::Session, ToolboxMode::Tags, [], TaskAuthor::User);
+        // Live, because that is what the picker offers: `findBindableSessions()`
+        // gates on enabled and not superseded, so a draft session would be missing
+        // from the select and this test would fail for the wrong reason.
+        $session->enable();
+        $em->persist($session);
+
+        $run = new Task('An ordinary run task', 'brief', TaskKind::Run, ToolboxMode::Tags, [], TaskAuthor::User);
+        $em->persist($run);
+
+        $em->flush();
+
+        $id = (int) $chat->getId();
+        $token = $this->bindToken($id);
+
+        $this->client->request('POST', '/chat/'.$id.'/session', ['_token' => $token, 'session_id' => (string) $session->getId()]);
+        self::assertResponseRedirects('/chat/'.$id);
+        $this->client->followRedirect();
+        self::assertStringContainsString('now about', $this->client->getResponse()->getContent() ?: '');
+
+        $em->clear();
+        self::assertSame((int) $session->getId(), (int) $em->getRepository(Chat::class)->find($id)?->getSession()?->getId(), 'the binding was saved');
+
+        // A run task is refused, and the refusal is spoken.
+        $this->client->request('POST', '/chat/'.$id.'/session', ['_token' => $token, 'session_id' => (string) $run->getId()]);
+        $this->client->followRedirect();
+        self::assertStringContainsString('only a session', $this->client->getResponse()->getContent() ?: '');
+
+        // Empty is unbind — a state to return to, not merely the absence of one.
+        $this->client->request('POST', '/chat/'.$id.'/session', ['_token' => $token, 'session_id' => '']);
+        $this->client->followRedirect();
+        self::assertStringContainsString('no longer about', $this->client->getResponse()->getContent() ?: '');
+
+        $em->clear();
+        self::assertNull($em->getRepository(Chat::class)->find($id)?->getSession(), 'and it took effect');
+    }
+
+    public function testTheBindingControlRefusesAForgedToken(): void
+    {
+        $chat = new Chat('A conversation nobody binds');
+        $this->em()->persist($chat);
+        $this->em()->flush();
+
+        $this->client->request('POST', '/chat/'.$chat->getId().'/session', ['_token' => 'not-the-token', 'session_id' => '1']);
+
+        self::assertResponseStatusCodeSame(403);
+    }
+
+    private function bindToken(int $chatId): string
+    {
+        $crawler = $this->client->request('GET', '/chat/'.$chatId);
+
+        return (string) $crawler->filter('form[action$="/session"] input[name="_token"]')->attr('value');
+    }
+
     private function seedConversation(string $said, string $replied): Chat
     {
         $em = $this->em();
