@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A transient failure retries instead of stopping the session, and a stop
+  is now visible as an unhealthy container rather than as a row nobody is
+  watching.** A session had exactly one outcome for a broken slice: `stopped`,
+  which waits for a human forever. That is the right answer for an unbuildable
+  constitution, an exhausted budget, or a model that cannot follow the
+  declaration contract — none of those improve by waiting. It is the wrong
+  answer for the environment being briefly unavailable, where parking a session
+  because a provider blipped is a self-inflicted outage.
+
+  **`retrying` is a new state, distinct from `owed` and from `stopped`**
+  (`App\Session\SessionRetry`, `App\Session\SessionRetryState`). A slice that
+  fails transiently is owed on a *backoff clock*: `base * 2^(attempts-1)`,
+  capped — with the defaults, 30s, 1m, 2m, 4m, 8m
+  (`TASKLOOM_SESSION_RETRY_BASE_DELAY` 30, `_MAX_DELAY` 900). It is an
+  **allowlist** (`ServerError`, `ServerTimeout`, `LlmError`,
+  `LlmFirstTokenTimeout`, `LlmSilenceTimeout`), so a new error class must be
+  deliberately admitted rather than silently inherited. Refused on purpose:
+  `budget_exceeded` / `context_exhausted` (terminal by construction — retrying
+  re-hits the same wall), `llm_loop_detected` / `llm_duration_exceeded` (the
+  guard fired because the model misbehaved, so retrying re-runs the
+  misbehaviour), and an unclassified failure (if nothing in the taxonomy
+  described it, assuming it clears is how a loop of indistinguishable failures
+  is born). The delay is anchored on the failed slice's already-persisted
+  `finishedAt`, so none of this needs a schema change: the state is derived from
+  committed rows, as every other session state is.
+
+  **Two independent ceilings, not one** (`TASKLOOM_SESSION_RETRY_MAX_ATTEMPTS`
+  5, `_MAX_AGE` 3600). An attempt count alone is not a bound: a long provider
+  outage would retry every 15 minutes indefinitely, and in a freshly-started
+  container the first attempt looks exactly as fresh as one a day old. So the
+  streak also ages out from its *oldest* failure. Either ceiling being spent
+  derives `stopped`, and the enforcement lives in the derivation itself, which
+  no launch path can bypass. The streak is *consecutive* — a success or a
+  terminal failure ends it, so an old blip does not spend this streak's budget.
+
+  **A stop raises a container alarm** (`App\Session\SessionAlarm`). The
+  requirement was that a wedged session be noticeable at the level people
+  actually monitor; a derived state plus a line in the web UI is useless when
+  nobody has the UI open. `/health` now answers **503** when any session is
+  `stopped` or `blocked`, so Docker's HEALTHCHECK marks the container
+  `unhealthy` — visible in `docker ps`, in compose, and to any external monitor.
+  It reports 503 rather than exiting: a health check does not restart anything
+  (`restart: unless-stopped` reacts to exits, not health), so the light comes on
+  while in-flight work continues and the condition stays reversible — resume the
+  session and the next beat clears it. `paused` deliberately does not raise it:
+  that is the operator's own switch, and alarming on a deliberate decision
+  trains people to ignore the alarm.
+
+  `/health` stays **dependency-free** (SPEC §8.4), which is what shaped the
+  mechanism: answering "is any session stopped?" from the database would put a
+  DB query behind the health check and hand a database hiccup the power to mark
+  the container unhealthy. So the heartbeat writes a **sentinel file** and
+  `/health` reads it — the same projection the entrypoint already uses for
+  `$DATA_DIR/fleet-id`. It lives in `var/`, not the data volume, because it is
+  this process's knowledge rather than the installation's: a restart is a fresh
+  start, and the boot beat re-derives whether the condition still holds.
+
 - **The LLM client streams, and a generation that "spins forever" now says
   why.** The client sent one blocking request and read the body at the end,
   so a model that never finished was a black box: at timeout there was
@@ -783,6 +840,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list is no longer rendered by default.
 
 ### Fixed
+
+- **A session owed a slice on a clock had nothing to wake it.** `app:run:requeue`
+  ran *only at container boot*, so any slice whose launch was lost waited for
+  the next restart — and a session owed on a *timing* rather than an event had
+  no waker at all. That is the "unscheduled session" failure this whole design
+  exists to eliminate, and it was already live for any lost dispatch, before
+  retries made it routine.
+
+  `app:session:heartbeat` closes it: it beats forever on a short interval
+  (`TASKLOOM_SESSION_HEARTBEAT_INTERVAL`, 10s in the container — deliberately
+  under the 30s base retry delay so a due retry launches within a beat rather
+  than waiting for the next round), runs the same idempotent reconcile the boot
+  sweep does, and republishes the alarm. A slice in `retrying` launches only
+  once its backoff has actually *elapsed* (`SessionSliceEngine::launchable()`),
+  which is the whole point of separating `retrying` from `owed`: the session is
+  owed a slice either way, but a retry that ignored its own backoff would hammer
+  a failing provider and burn slices. A beat never throws — one session's
+  malformed rows must not stop the heartbeat doing its other job, and a
+  supervisor restart cannot fix a data problem.
 
 - **A chat request can no longer be sent with no question in it.** Once a
   tool loop was under way, the newest turns were tool rounds and the question

@@ -77,10 +77,11 @@ final readonly class SessionPresenter
                 ? 'Paused mid-slice: the in-flight slice finishes on its own; no next slice launches until you enable it again.'
                 : 'A slice is in flight on the session lane; the next starts only if this one declares a milestone.',
             SessionState::Owed => 'The last slice settled owing more work — a declared milestone, or an undeclared continuation — and the next slice is due; it launches automatically. Resume exists to re-launch it if that dispatch was ever lost.',
+            SessionState::Retrying => 'The last slice failed for a transient reason (a provider error or a timeout) and a retry is scheduled with backoff — it launches automatically, no action needed. If the retries run out, the session stops and the container is reported unhealthy.',
             SessionState::Complete => 'The last slice declared done — the session is complete.'.
                 ' A done session is terminal: the work continues as a new session, or by approving a replacement.',
             SessionState::Blocked => 'The last slice declared blocked — it needs a human. Resume launches the next slice once you have done what it asked for.',
-            SessionState::Stopped => 'The last slice settled without a declaration, so the session stopped for a human — no retry happens by itself. Resume launches the next slice.',
+            SessionState::Stopped => 'The last slice settled without a declaration, or failed in a way a retry cannot fix, so the session stopped for a human — no retry happens by itself. This is what raises the container health alarm. Resume launches the next slice.',
             SessionState::Paused => 'The session is paused.',
         }.$last;
     }

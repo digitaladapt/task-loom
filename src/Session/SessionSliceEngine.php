@@ -73,6 +73,7 @@ final readonly class SessionSliceEngine
         private MessageBusInterface $bus,
         private array $budgets = [],
         private SessionEndings $endings = new SessionEndings(),
+        private SessionRetry $retry = new SessionRetry(),
     ) {
     }
 
@@ -123,12 +124,72 @@ final readonly class SessionSliceEngine
         // true for everything that broke.
         $last = $runs[0];
 
+        // A retryable failure is not "stopped" — it is owed on a clock. The
+        // retry assessment is bounded by construction ({@see SessionRetry}),
+        // so this cannot become an endless loop: once the budget or the age
+        // ceiling is spent it reports exhausted, and the `stopped` arm below
+        // takes over — which is what raises the container alarm.
+        $retry = $this->retry->assess($runs, time());
+
+        if (null !== $retry && !$retry->exhausted()) {
+            return SessionState::Retrying;
+        }
+
         return match ($last->getDeclarationOutcome()) {
             SessionDeclarationOutcome::Milestone => SessionState::Owed,
             SessionDeclarationOutcome::Done => SessionState::Complete,
             SessionDeclarationOutcome::Blocked => SessionState::Blocked,
             null => self::continuesUndeclared($last) ? SessionState::Owed : SessionState::Stopped,
         };
+    }
+
+    /**
+     * The session's newest slice, or null when none has run — what the UI and
+     * the alarm report. Top-level runs only (a slice is the session's own
+     * run), newest first, which is the order that makes [0] the answer.
+     */
+    public function lastSlice(Task $task): ?Run
+    {
+        return $this->runs->findForTask($task)[0] ?? null;
+    }
+
+    /**
+     * The session's retry condition, for the page and the alarm: null when the
+     * newest slice is not a retryable failure.
+     */
+    public function retryState(Task $task, ?int $now = null): ?SessionRetryState
+    {
+        return $this->retry->assess($this->runs->findForTask($task), $now ?? time());
+    }
+
+    /**
+     * Whether the sweep should launch a slice for this session on THIS pass.
+     *
+     * `owed` always launches. `retrying` launches only once the backoff
+     * delay has elapsed — that is the whole point of separating the two:
+     * the session is owed a slice either way, but a retry that ignores its
+     * own backoff would hammer a failing provider and burn slices.
+     *
+     * The `retrying` arm re-reads the assessment rather than trusting the
+     * state label, because the state says "retrying" whether the clock has
+     * come round or not, and the clock is the only thing that distinguishes
+     * a launch from a wait.
+     */
+    private function launchable(Task $task): bool
+    {
+        $state = $this->state($task);
+
+        if (SessionState::Owed === $state) {
+            return true;
+        }
+
+        if (SessionState::Retrying !== $state) {
+            return false;
+        }
+
+        $retry = $this->retry->assess($this->runs->findForTask($task), time());
+
+        return null !== $retry && $retry->due(time());
     }
 
     /**
@@ -216,7 +277,9 @@ final readonly class SessionSliceEngine
      * run). Converges to nothing: a launched slice flips the state to
      * `working`, and every other state owes nothing here — `fresh` sessions
      * wait for the operator's start, `blocked`/`stopped` wait for a human,
-     * `complete`/`paused` are terminal for this purpose.
+     * `complete`/`paused` are terminal for this purpose, and `retrying` is
+     * owed but not yet due (it is launchable, just not on every pass — see
+     * {@see self::launchable()}).
      *
      * @return list<SessionReconcile>
      */
@@ -229,7 +292,7 @@ final readonly class SessionSliceEngine
                 continue;
             }
 
-            if (SessionState::Owed !== $this->state($task)) {
+            if (!$this->launchable($task)) {
                 continue;
             }
 
@@ -264,7 +327,7 @@ final readonly class SessionSliceEngine
             return null;
         }
 
-        if (SessionState::Owed !== $this->state($task)) {
+        if (!$this->launchable($task)) {
             return null;
         }
 
