@@ -1,9 +1,19 @@
 # Session tasks — design note
 
+> **Superseded in direction — 2026-10-23.** A session exists because a context
+> could not persist between turns. `THE_STREAM.md` removes that premise: one
+> append-only stream per being, one context compiled from it, sliced only by a
+> bulk trim. §6–§8 below — the memory block as the carrier of continuity, the
+> declaration vocabulary and its endings, the slice launch/settle machine, and
+> the per-write caps sized for a note store — are answers to a problem that no
+> longer exists, and are to be **removed rather than ported**. Read this note
+> for how the parts work; read `THE_STREAM.md` for what survives.
+
 **Status:** agreed · **built** (all seven steps of §12 landed;
 `SESSION_TASKS.md` folded into SPEC §9/§5.6) · **Scope:** rewrote the `session` row of
 SPEC §9 and the deferred items it names; touches SPEC §4.1, §4.4, §5.6, §6.2,
 §13.4; adds a third lane to `CHAT_AND_CAPACITY.md` §4
+
 
 > **Revision 2 — 2026-10-08.** Revision 1 carried a `key` per note (reserved
 > keywords per session, hot/cold per key, a cap on keys). Review killed it,
