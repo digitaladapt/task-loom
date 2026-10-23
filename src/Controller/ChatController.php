@@ -5,17 +5,22 @@ declare(strict_types=1);
 namespace App\Controller;
 
 use App\Admin\ToolboxSelection;
+use App\Chat\ChatBindingException;
 use App\Chat\ChatEngine;
+use App\Chat\ChatSessionBinder;
 use App\Chat\ChatToolbox;
 use App\Entity\Chat;
 use App\Entity\ChatExchangeStatus;
 use App\Entity\ChatOrigin;
+use App\Entity\Task;
 use App\Entity\Tool;
 use App\Entity\ToolboxMode;
 use App\Repository\ChatExchangeEventRepository;
 use App\Repository\ChatExchangeRepository;
 use App\Repository\ChatRepository;
+use App\Repository\TaskRepository;
 use App\RunEngine\ToolboxResolver;
+use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -68,12 +73,24 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
 #[IsGranted('ROLE_ADMIN')]
 final class ChatController extends AbstractController
 {
+    /**
+     * How many sessions the binding `<select>` offers.
+     *
+     * A cap, not a page: the picker is for the session you are working on, and a
+     * list of every session ever created would be a worse control than a short
+     * one. Newest first, because the session you want is nearly always recent.
+     */
+    private const int BINDABLE_SESSIONS_LIMIT = 50;
+
     public function __construct(
         private readonly ChatEngine $engine,
         private readonly ChatRepository $chats,
         private readonly ChatExchangeRepository $exchanges,
         private readonly ChatExchangeEventRepository $events,
         private readonly ToolboxResolver $toolboxes,
+        private readonly ChatSessionBinder $sessions,
+        private readonly TaskRepository $tasks,
+        private readonly EntityManagerInterface $em,
     ) {
     }
 
@@ -148,6 +165,11 @@ final class ChatController extends AbstractController
             ? ChatToolbox::fromExchange($current)->forPicker()
             : ChatToolbox::none(ToolboxMode::Tags)->forPicker();
 
+        // Resolved, not read off the column: a binding made before an approved
+        // edit points at a row that is now archived, and the session it names is
+        // one row further along (`ChatSessionBinder`).
+        $session = $this->sessions->forChat($chat);
+
         return $this->render('chat/show.html.twig', [
             'chat' => $chat,
             'transcript' => $this->events->findTranscript($chat),
@@ -158,7 +180,87 @@ final class ChatController extends AbstractController
             'known_tags' => $this->knownTags(),
             'catalog_tools' => $this->catalogTools(),
             'toolbox_values' => $toolboxValues,
+            'session' => $session,
+            'bindable_sessions' => $this->bindableSessions(),
         ]);
+    }
+
+    /**
+     * Point this conversation at a session — the one context, reached by chat
+     * (docs/design/SESSION_TASKS.md §8.2).
+     *
+     * ## Why this is an explicit operator action and not a guess
+     *
+     * Nothing infers the subject from what the first message says. A conversation
+     * bound to the wrong session would answer confidently from another piece of
+     * work's memory, which is the failure mode with no visible symptom — the
+     * reply reads fine and is about the wrong thing. So the binding is something
+     * a person does, on a page that says what it is.
+     *
+     * ## Why POST, and why it may arrive while a reply is pending
+     *
+     * POST because it writes. It is *not* refused while a reply is pending, and
+     * that differs from `say()` on purpose: the toolbox is refused in that state
+     * because it freezes into the exchange that is running, so a late change
+     * would be a change that cannot take effect. The binding has no such problem
+     * — it affects the prompt compiled for the *next* reply, so accepting it now
+     * is accepting a change that will take effect exactly when it was promised
+     * to. The pending reply renders from the prompt it was given.
+     */
+    #[Route('/chat/{id}/session', name: 'app_chat_bind', methods: ['POST'], requirements: ['id' => '\\d+'])]
+    public function bindSession(Request $request, int $id): Response
+    {
+        $chat = $this->requireChat($id);
+
+        if (!$this->isCsrfTokenValid('chat-bind-'.$id, $request->request->getString('_token'))) {
+            throw $this->createAccessDeniedException('Invalid CSRF token.');
+        }
+
+        // Empty means unbind: back to the ordinary chat, which is a state worth
+        // being able to return to deliberately rather than only by never having
+        // bound in the first place.
+        $raw = trim($request->request->getString('session_id'));
+
+        if ('' === $raw) {
+            $this->sessions->bind($chat, null);
+            $this->em->flush();
+            $this->addFlash('success', 'This conversation is no longer about a session.');
+
+            return $this->redirectToRoute('app_chat_show', ['id' => $id]);
+        }
+
+        if (!ctype_digit($raw)) {
+            $this->addFlash('error', \sprintf('"%s" is not a task id.', $raw));
+
+            return $this->redirectToRoute('app_chat_show', ['id' => $id]);
+        }
+
+        $task = $this->tasks->find((int) $raw);
+        if (!$task instanceof Task) {
+            $this->addFlash('error', \sprintf('No task with id %s.', $raw));
+
+            return $this->redirectToRoute('app_chat_show', ['id' => $id]);
+        }
+
+        try {
+            $this->sessions->bind($chat, $task);
+        } catch (ChatBindingException $e) {
+            // Reported, not swallowed. The operator picked something that is not
+            // a session, and the reason is the useful part of the answer.
+            $this->addFlash('error', $e->getMessage());
+
+            return $this->redirectToRoute('app_chat_show', ['id' => $id]);
+        }
+
+        $this->em->flush();
+
+        $bound = $this->sessions->forChat($chat);
+        $this->addFlash('success', \sprintf(
+            'This conversation is now about \u{201c}%s\u{201d}. Her memories are part of the next reply.',
+            null !== $bound ? $bound->getTitle() : $raw,
+        ));
+
+        return $this->redirectToRoute('app_chat_show', ['id' => $id]);
     }
 
     #[Route('/chat/{id}/say', name: 'app_chat_say', methods: ['POST'], requirements: ['id' => '\d+'])]
@@ -216,6 +318,23 @@ final class ChatController extends AbstractController
      * silently dropped, because "I enabled the task tools" and "I typed
      * 'tsk-tools' and got nothing" should not look the same.
      */
+    /**
+     * The conversation with this id, or a 404.
+     *
+     * One place, because every route here opens with it and a page that 500s on
+     * an unknown id instead of 404ing is the sort of thing that gets noticed
+     * only in a log nobody reads.
+     */
+    private function requireChat(int $id): Chat
+    {
+        $chat = $this->chats->find($id);
+        if (!$chat instanceof Chat) {
+            throw new NotFoundHttpException(\sprintf('No conversation with id %d.', $id));
+        }
+
+        return $chat;
+    }
+
     private function resolve(ToolboxSelection $selection, Request $request): ChatToolbox
     {
         if ([] === $selection->declared) {
@@ -258,14 +377,16 @@ final class ChatController extends AbstractController
         return \sprintf('%s %s', $selection->mode->value, implode(', ', $quoted));
     }
 
-    private function requireChat(int $id): Chat
+    /**
+     * The live sessions the binding control offers — the query lives on the
+     * repository, which is where the "what counts as a live session" gates are
+     * stated once ({@see TaskRepository::findBindableSessions()}).
+     *
+     * @return list<Task>
+     */
+    private function bindableSessions(): array
     {
-        $chat = $this->chats->find($id);
-        if (!$chat instanceof Chat) {
-            throw new NotFoundHttpException(\sprintf('No conversation with id %d.', $id));
-        }
-
-        return $chat;
+        return $this->tasks->findBindableSessions(self::BINDABLE_SESSIONS_LIMIT);
     }
 
     /**

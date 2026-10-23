@@ -17,6 +17,7 @@ use App\Entity\ChatExchangeStatus;
 use App\Entity\ChatOrigin;
 use App\Entity\ErrorClass;
 use App\Entity\Participant;
+use App\Entity\Task;
 use App\Entity\Tool;
 use App\Llm\LlmClientInterface;
 use App\Llm\LlmRequestException;
@@ -25,11 +26,13 @@ use App\Message\ChatToolTurnMessage;
 use App\Repository\ChatExchangeEventRepository;
 use App\Repository\ChatExchangeRepository;
 use App\Repository\ChatRepository;
+use App\Repository\RunRepository;
 use App\RunEngine\PromptCompiler;
 use App\RunEngine\RunEngine;
 use App\RunEngine\ToolCallPrimitives;
 use App\RunEngine\ToolExecutionException;
 use App\RunEngine\ToolExecutorInterface;
+use App\Session\SessionMemoryRenderer;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\EntityNotFoundException;
 use Psr\Log\LoggerInterface;
@@ -129,6 +132,9 @@ final readonly class ChatEngine
         private ToolExecutorInterface $executor,
         private PromptCompiler $prompts,
         private ChatContextWindow $context,
+        private ChatSessionBinder $sessions,
+        private SessionMemoryRenderer $memory,
+        private RunRepository $runs,
         private ?MessageBusInterface $bus = null,
     ) {
     }
@@ -793,7 +799,91 @@ final readonly class ChatEngine
             $hasTools ? self::SYSTEM_PREAMBLE_WITH_TOOLS : self::SYSTEM_PREAMBLE,
             $this->roster->render(),
             "## Grounding\n\n".$this->grounding->forNow($anchor)->render(),
+            $this->sessionContext($chat),
         ]);
+    }
+
+    /**
+     * The session block: what this conversation is about, and what she knows.
+     *
+     * Empty string for the ordinary chat, and that is the common path — a
+     * conversation with no subject must compile byte-for-byte what it compiled
+     * before sessions existed, because a prefix cache is reused up to the first
+     * changed byte and a stray header would cost every ordinary chat its whole
+     * cache for no information (docs/design/KV_CACHE_POSITION_FINDINGS.md).
+     *
+     * ## Why the memory block, rendered by the session's own renderer
+     *
+     * Because this is the whole point of the binding: one context, reached two
+     * ways. The human typing in this chat is talking to the agent whose
+     * objective and notes the slices run with, so the prompt has to carry *that*
+     * — and it carries it through {@see SessionMemoryRenderer}, the same
+     * renderer `ContextWindow::buildMessages()` uses for a slice. Two renderers
+     * would mean two answers to "what does she currently know", which is the
+     * one thing this feature exists to prevent.
+     *
+     * Rendered live, not frozen, and deliberately: a session's memory is
+     * *supposed* to be current — an operator note written a minute ago must
+     * reach the next reply, which is exactly why §2 notes the block is rebuilt
+     * from the store on every request. The cost is the one §5.6 already accepts
+     * for a slice: a changed memory block moves the prefix. It changes when the
+     * session learns something, which is the one occasion the prompt *should*
+     * change.
+     *
+     * ## Why the history line
+     *
+     * A chat partner who cannot say what she has been doing is either lying by
+     * omission or has no idea, and the human cannot tell which. The state and
+     * the last slice's outcome come from the derived state the session page
+     * shows, so the chat and the page cannot disagree about her status.
+     */
+    private function sessionContext(Chat $chat): string
+    {
+        $session = $this->sessions->forChat($chat);
+        if (null === $session) {
+            return '';
+        }
+
+        $line = \sprintf(
+            "## Session\n\nYou are the session \"%s\", which is a continuing piece of work rather than this conversation: its slices run on their own schedule, and this chat is the human reaching you between them. Answer as yourself, with what you know of it.",
+            $session->getTitle(),
+        );
+
+        // Last slice outcome, when there is one. Absent before the first slice,
+        // which is the honest thing to say rather than claiming a clean record.
+        $last = $this->lastSliceLine($session);
+        if (null !== $last) {
+            $line .= "\n\n".$last;
+        }
+
+        $memory = $this->memory->render($session);
+
+        return null === $memory ? $line : $line."\n\n".$memory;
+    }
+
+    /**
+     * One sentence on where this session stands, or null before it has run.
+     *
+     * Reads the run history through the chain rather than the row, for the same
+     * reason everything above the swap does (§8.2): a session that has been
+     * edited must not read as though it had never run. The newest top-level run's
+     * status is the fact a human asks for first, so it is the fact stated.
+     */
+    private function lastSliceLine(Task $session): ?string
+    {
+        $runs = $this->runs->findNewestInChain($session, 1);
+        if ([] === $runs) {
+            return null;
+        }
+
+        $run = $runs[0];
+        $when = $run->getStartedAt()?->format('Y-m-d H:i') ?? 'unknown';
+
+        return \sprintf(
+            'Its most recent slice %s (%s).',
+            $run->getStatus()->value,
+            $when,
+        );
     }
 
     /**

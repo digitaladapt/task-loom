@@ -112,6 +112,55 @@ final class TaskRepository extends ServiceEntityRepository
     }
 
     /**
+     * The live end of a supersede chain: the version that is current now.
+     *
+     * A stored reference into a session can only hold the row it was written
+     * against, and that row is archived as soon as its successor is approved
+     * (SPEC §4.4, SESSION_TASKS.md §8.2). Following `supersededBy` from there
+     * reaches the version that is actually the session today — the same object,
+     * under a newer row — so a caller that stored an id years ago still names
+     * the right session.
+     *
+     * Terminates because the chain is acyclic by construction: a successor is
+     * created from a live row and a superseded row is never re-enabled
+     * ({@see Task::enable()}), so approval cannot produce a cycle. A pending
+     * replacement draft is not the live end and is not followed — the original
+     * is still the enabled task while the human decides.
+     */
+    public function liveEndOfChain(Task $task): Task
+    {
+        $node = $task;
+
+        while (null !== $next = $node->getSupersededBy()) {
+            $node = $next;
+        }
+
+        return $node;
+    }
+
+    /**
+     * Whether this task or any version it replaces has run — the chain-scoped
+     * twin of {@see self::hasRuns()}.
+     *
+     * Approval needs this rather than the per-row question, because the
+     * successor is the continuation of the original and the original's run
+     * history is the successor's history (docs/design/SESSION_TASKS.md §8.2).
+     * Scoped to the chain and never beyond it: a draft approved over a task
+     * that never ran stays a record-less draft, because nothing has happened
+     * to it yet.
+     */
+    public function hasRunsInChain(Task $task): bool
+    {
+        for ($node = $task; null !== $node; $node = $node->getReplacementFor()) {
+            if ($this->hasRuns($node)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Archived tasks, oldest first — the dead records (SPEC §4.4).
      *
      * @return list<Task>
@@ -142,6 +191,35 @@ final class TaskRepository extends ServiceEntityRepository
             ->andWhere('t.supersededBy IS NULL')
             ->setParameter('kind', TaskKind::Session)
             ->orderBy('t.id', \SortDirection::Ascending)
+            ->getQuery()->getResult();
+    }
+
+    /**
+     * Live sessions, newest first, capped — the choices a chat's binding offers.
+     *
+     * The same gates as {@see self::findEnabledSessions()} (enabled, live,
+     * unsuperseded, a session), with two differences that belong to the caller
+     * rather than to the sweep: newest first, because "the session you are working
+     * on" is nearly always recent, and capped, because this feeds a `<select>`
+     * rather than a work queue that must be complete.
+     *
+     * A separate method rather than a parameter on `findEnabledSessions()`: that
+     * one is the slice engine's and the heartbeat's, both of which walk *all* of
+     * it in a stable order, and a limit or a reversed sort added for a dropdown
+     * would be a change to their behaviour made for a page they never look at.
+     *
+     * @return list<Task>
+     */
+    public function findBindableSessions(int $limit): array
+    {
+        return $this->createQueryBuilder('t')
+            ->where('t.kind = :kind')
+            ->andWhere('t.enabled = true')
+            ->andWhere('t.archivedAt IS NULL')
+            ->andWhere('t.supersededBy IS NULL')
+            ->setParameter('kind', TaskKind::Session)
+            ->orderBy('t.id', \SortDirection::Descending)
+            ->setMaxResults($limit)
             ->getQuery()->getResult();
     }
 

@@ -48,6 +48,7 @@ final class ScheduleGateTest extends KernelTestCase
             $container->get(\App\StepModel\StepGraphValidator::class),
             new \App\Scheduler\ScheduleExpression(),
             $this->em,
+            $container->get(\App\Session\SessionMemoryStore::class),
         );
 
         $this->crud = new TaskCrud(

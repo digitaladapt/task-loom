@@ -46,6 +46,34 @@ class Chat
     #[ORM\Column(length: 200)]
     private string $title;
 
+    /**
+     * The session this conversation is *about*, or null for an ordinary chat
+     * (docs/design/SESSION_TASKS.md §8.2).
+     *
+     * A chat is a way to reach the one context, not a second context. Binding it
+     * to a session is what makes that true: the conversation's prompt carries
+     * the session's `## Memories` block, so the human is talking to the same mind
+     * the slices run with rather than to a stranger with better manners.
+     *
+     * ## Not a foreign key to "the session"
+     *
+     * There is no session table to point at. A session is a chain of task rows —
+     * each approved edit swaps in a successor and archives the original
+     * (§8.2) — so this column stores whichever version was current at binding
+     * time and the reading side follows the chain to its live end. Storing the
+     * live end directly would be the same value with none of the durability: the
+     * next approved edit would leave it pointing at an archived row.
+     *
+     * ## Nullable, and deliberately so
+     *
+     * Most conversations are not about a session, and that has to stay the easy
+     * case. A null here means exactly what it meant before this column existed:
+     * a chat with no session memory, no session subject, and no assumptions.
+     */
+    #[ORM\ManyToOne(targetEntity: Task::class)]
+    #[ORM\JoinColumn(name: 'session_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
+    private ?Task $session = null;
+
     #[ORM\Column(type: 'datetimetz_immutable')]
     private \DateTimeImmutable $createdAt;
 
@@ -129,6 +157,36 @@ class Chat
     public function getId(): ?int
     {
         return $this->id;
+    }
+
+    /**
+     * The session this conversation is about, as it was when bound, or null.
+     *
+     * Callers that need "which session is this, now?" go through
+     * {@see App\Chat\ChatSessionBinder}, which follows the chain to the live
+     * end — not this accessor, which reports the version the column holds.
+     */
+    public function getSession(): ?Task
+    {
+        return $this->session;
+    }
+
+    /**
+     * Bind this conversation to a session, or unbind it with null.
+     *
+     * The one mutator, and reachable only from {@see App\Chat\ChatSessionBinder}
+     * for the same reason {@see SessionMemory::reparent()} has one caller: what a
+     * conversation is about is a claim about the world, and every write to it
+     * should pass the check that the thing claimed exists and is a session.
+     *
+     * Deliberately does not re-title the conversation or touch the transcript.
+     * Binding changes what the next reply is compiled against, never what was
+     * already said — a chat that rewrote its own history to match its new
+     * subject would make the transcript unreadable and its summary a lie.
+     */
+    public function bindSession(?Task $session): void
+    {
+        $this->session = $session;
     }
 
     public function getTitle(): string
