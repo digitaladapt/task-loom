@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Admin;
 
+use App\Context\Utf8;
 use App\Entity\Run;
 use App\Entity\RunEvent;
 use App\Entity\RunEventType;
@@ -77,11 +78,18 @@ final readonly class TranscriptEntry
                     break;
 
                 case RunEventType::ToolResult:
-                    $detail = $payload['detail'] ?? $payload['content'] ?? '';
+                    // The ledger now keeps a tool result whole and the window
+                    // caps it at render (docs/design/THE_STREAM.md §2.3), so
+                    // this transcript is the one place holding the untruncated
+                    // blob — a 100 KB result in a <pre> is a page that takes
+                    // seconds to lay out. Bound the *view*, not the record: the
+                    // marker says how much was withheld, so a reader who wants
+                    // the rest knows it is there and can go to the ledger.
+                    $detail = self::scalar($payload['detail'] ?? $payload['content'] ?? '', '');
                     $entries[] = new self(
                         'tool',
                         'Tool',
-                        \sprintf('%s → %s', self::scalar($payload['tool'] ?? null, '?'), self::scalar($detail, '')),
+                        \sprintf('%s → %s', self::scalar($payload['tool'] ?? null, '?'), self::excerpt($detail)),
                         null !== $event->getErrorClass(),
                     );
                     break;
@@ -113,5 +121,19 @@ final readonly class TranscriptEntry
     private static function scalar(mixed $value, string $fallback): string
     {
         return \is_scalar($value) ? (string) $value : $fallback;
+    }
+
+    /**
+     * A tool result is unbounded since the cap moved to render time, so the
+     * transcript shows an opening excerpt and says plainly how much it left
+     * out. Character-safe for the same reason every other cut is.
+     */
+    private static function excerpt(string $text, int $max = 2000): string
+    {
+        if (\strlen($text) <= $max) {
+            return $text;
+        }
+
+        return Utf8::cut($text, $max).sprintf('\n…[%d more bytes in the ledger]', \strlen($text) - $max);
     }
 }
