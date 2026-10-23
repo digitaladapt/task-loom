@@ -26,8 +26,11 @@ Two halves, one symptom.
   Mem0's retrieve → inject → extract loop; LiteLLM middleware that stores and
   injects around any model).
 - **Read side (auto-inject).** What should ride into the next request should
-  simply *be there*, not be fetched by a tool call. Sessions already have this
-  half (`## Memories`, §7); chat does not.
+  simply *be there*, not be fetched by a tool call. Sessions have this half
+  (`## Memories`, §7), and since #90 so does a chat **bound to a session** — a
+  conversation reaching her is reaching the same context, memory included. An
+  unbound chat still does not, and that is a decision (§7), not a gap left
+  open by accident.
 
 **The constraint that shapes everything.** One LLM request at a time,
 locally: llama.cpp with `parallel=1` *rejects outright* any request that
@@ -267,9 +270,20 @@ Route, per item, by the survive-the-session test. Mechanics:
   notes capped at `TASKLOOM_SESSION_HOT`, cold retained, pins exempt,
   `TASKLOOM_SESSION_MAX_MEMORY_PCT` backstop, pins always ride so the worst
   case degrades to today's block, never to silence).
-- **Chat: the gap.** `ChatContextWindow::fit()` takes the system message and
-  tool descriptors only. Add a memory block input at assembly, same bounds,
-  same role convention as sessions (assistant, SESSION_TASKS §14 #4).
+- **Chat: exists when bound, absent when not — deliberately.** A chat bound to
+  a session carries that session's `## Session` header and its `## Memories`
+  block, rendered by the same `SessionMemoryRenderer` a slice uses, so the two
+  surfaces cannot drift about who she is or what she knows (SESSION_TASKS §8.3,
+  landed in #90). An **unbound** chat compiles exactly what it compiled before
+  sessions existed — byte for byte, which is what keeps its prefix cache intact
+  (`KV_CACHE_POSITION_FINDINGS.md`). That absence is asserted by a test, not
+  assumed: adding the block everywhere would re-prefill every ordinary
+  conversation and nobody would notice until the bill arrived.
+
+  So the gap this bullet described is closed *for the bound case*, and the
+  remaining seam is not in chat at all — it is what an unbound chat should see
+  from the *persistent* store (§6), which is the clerk's question, not this
+  one.
 - **Relevance, when stores grow: procedural, not a model.** Mention-match of
   the existing key vocabulary (key names and recorded aliases already carry
   the semantics — `pref:email`, `project:work-warp`) plus recency plus pins.
@@ -308,7 +322,11 @@ Restated, because the design is built around it:
    (Lean: reuse — it is the same writer; the ledger event carries the audit.)
 3. Emitted-items cap and overflow policy (Lean: 5; overflow dropped with an
    event, or forced cold).
-4. Chat block role/placement — assistant, per house precedent?
+4. ~~Chat block role/placement~~ — **settled by the build** (#90): the
+   `## Memories` block rides the `assistant` role, after the head and before
+   the kept exchanges, exactly as SESSION_TASKS §14 #4 leaned. Not a separate
+   chat block at all — a bound chat reuses the session's own renderer, so
+   there is one block definition and one place to change it.
 5. Does the pre-filter ship ahead of the seams? It is the only mechanism
    that needs nothing new from the model or the lanes — pure capacity win.
 6. Clerk cadence defaults and the operator knob's name.
