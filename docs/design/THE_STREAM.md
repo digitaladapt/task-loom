@@ -186,3 +186,38 @@ declare and nothing to silently fail to declare.
 
 Steps 1–3 are where the invariant either holds or quietly does not. A prefix
 test (§2.3) belongs with step 3, not later.
+---
+
+## 5. Where the build order stands
+
+Kept here rather than in a commit message, because the steps are not
+independent: 2 and the test for 3 land first precisely to make 1's continuity
+meaningful.
+
+| step | state |
+|---|---|
+| 1. stream table + `LoopState` reading its tail | **landed** (`377cc81`) — `stream_event`, `StreamWriter`, `StreamWindow`; the checkpoint no longer carries exchanges |
+| 2. cap at render, not at write | **landed** (`7ff0f71`, `1a16af1`) |
+| 2b. the prefix test §2.3 asks for | **landed** — `ContextWindowAppendOnlyTest` |
+| 3. head + watermark on the being | **not started** — `promptHead` is still compiled per run and `contextBase` still dies with it |
+| 4. drop `stepBudget` as an ending | not started |
+| 5. ring the chain; heartbeat on being-level owed turns | not started |
+
+### Two things learned while landing step 1
+
+**`LoopState::$exchanges` could not simply be deleted.** §2.1 says it becomes a
+window onto the tail, and it does — but only *inside* `RunGraph`, which folds
+the rows into exchanges once and passes them on. The name is gone rather than
+kept as an alias, because two names for one value is how the drift this
+document exists to prevent starts.
+
+**Chat's transcript is the shape the stream must fit, not the reverse.** A chat
+row is multi-role (`Participant` × `ChatEventType`, with `toWireMessages()`
+rendering one row as several messages and classifications like
+`startsWireUnit`), whereas §2.1's `role` is one of three strings. A chat turn
+also carries provenance the stream has no field for — `origin`, and the frozen
+toolbox declaration that records what the model could see. None of that is a
+reason to widen the stream: it is a reason to land step 1 for runs **alone**
+while the chat read path is still serving live conversations, and to decide the
+chat write path as its own step with its own reader moved in the same commit.
+Chat does not write to the stream yet.
