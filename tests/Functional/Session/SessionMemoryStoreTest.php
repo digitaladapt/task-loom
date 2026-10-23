@@ -43,6 +43,7 @@ final class SessionMemoryStoreTest extends KernelTestCase
         $this->em->createQuery('DELETE FROM App\Entity\SessionMemoryRevision')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\SessionMemory')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\RunEvent')->execute();
+        $this->em->createQuery('DELETE FROM App\Entity\StreamEvent')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\Run')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\Task')->execute();
         $this->em->flush();

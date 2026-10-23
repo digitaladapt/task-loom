@@ -8,9 +8,8 @@ use App\Session\SessionEndings;
 use App\Session\SessionUndeclared;
 
 /**
- * Mutable loop state for one run: budgets, the accumulating exchange
- * window, circuit-breaker failure streaks, the compiled prompt head, and
- * the in-flight tool turn.
+ * Mutable loop state for one run: budgets, circuit-breaker failure streaks,
+ * the compiled prompt head, and the in-flight tool turn.
  *
  * Persisted (as JSON) in Run.checkpoint at every checkpoint boundary
  * (SPEC §5.5): the delivery unit of the async engine is one LLM turn or one
@@ -18,13 +17,21 @@ use App\Session\SessionUndeclared;
  * the row — the next worker is a stranger (SPEC §6). Nothing here may
  * require live objects: entities, services, closures stay out.
  *
- * The prompt head is stored too, not recompiled per turn: it contains the
- * grounding block (date/time), and the run's constitution must not drift
+ * ## The transcript is not in here (docs/design/THE_STREAM.md §2.1)
+ *
+ * This class used to carry `exchanges`, the accumulating window of every turn
+ * the run had taken — which made the run's checkpoint the only copy of the
+ * conversation, and made continuity across runs impossible by construction: a
+ * new run built a new LoopState and started empty. The transcript now lives in
+ * `stream_event` and is read back by query
+ * ({@see \App\Stream\StreamWriter::latest()}), so a slice boundary is not a
+ * memory boundary. The checkpoint keeps the counters and the head, and nothing
+ * here needs to be big.
+ *
+ * The prompt head is still stored rather than recompiled per turn: it contains
+ * the grounding block (date/time), and the run's constitution must not drift
  * across turns of the same run (SPEC §4.1) — a run straddling midnight
  * still finishes under the date it started with.
- *
- * `exchanges` entries are the ContextWindow exchange shape:
- * {assistant: {content, toolCalls}, toolResults: list<{toolCallId, content}>}.
  *
  * `contextBase` and `contextBatch` are the run's sticky shedding state
  * (docs/design/KV_CACHE.md §6.2): the index the retained window's front stands
@@ -32,14 +39,14 @@ use App\Session\SessionUndeclared;
  * to the headroom target. They live here, not in the window, because "did the
  * front move?" is a fact about the previous request — the window sees only
  * this one — so the state has to travel with the run's progress in the
- * checkpoint.
+ * checkpoint. The index is into the stream's tail, counted the same way every
+ * request counts it: position within the rows the window was given.
  *
  * @internal
  */
 final class LoopState
 {
     /**
-     * @param list<array<string, mixed>>               $exchanges
      * @param array<string, int>                       $failureCounts
      * @param array{system: string, user: string}|null $promptHead
      */
@@ -48,7 +55,6 @@ final class LoopState
         public int $stepBudget = 50,
         public int $toolRetries = 2,
         public int $circuitBreakerThreshold = 3,
-        public array $exchanges = [],
         public array $failureCounts = [],
         public ?array $promptHead = null,
         public ?PendingToolTurn $pendingToolTurn = null,
@@ -75,16 +81,6 @@ final class LoopState
                 toolRetries: $toolRetries,
                 circuitBreakerThreshold: $circuitBreakerThreshold,
             );
-        }
-
-        $exchanges = [];
-        $rawExchanges = $checkpoint['exchanges'] ?? [];
-        if (\is_array($rawExchanges)) {
-            foreach ($rawExchanges as $exchange) {
-                if (\is_array($exchange)) {
-                    $exchanges[] = $exchange;
-                }
-            }
         }
 
         $failureCounts = [];
@@ -115,7 +111,6 @@ final class LoopState
             stepBudget: (int) ($checkpoint['stepBudget'] ?? $stepBudget),
             toolRetries: (int) ($checkpoint['toolRetries'] ?? $toolRetries),
             circuitBreakerThreshold: (int) ($checkpoint['circuitBreakerThreshold'] ?? $circuitBreakerThreshold),
-            exchanges: $exchanges,
             failureCounts: $failureCounts,
             promptHead: $promptHead,
             pendingToolTurn: $pending,
@@ -147,7 +142,6 @@ final class LoopState
             'stepBudget' => $this->stepBudget,
             'toolRetries' => $this->toolRetries,
             'circuitBreakerThreshold' => $this->circuitBreakerThreshold,
-            'exchanges' => $this->exchanges,
             'failureCounts' => $this->failureCounts,
             'promptHead' => $this->promptHead,
             'pendingToolTurn' => $this->pendingToolTurn?->toArray(),

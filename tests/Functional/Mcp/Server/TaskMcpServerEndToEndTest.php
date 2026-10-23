@@ -53,6 +53,7 @@ final class TaskMcpServerEndToEndTest extends WebTestCase
         $em = static::getContainer()->get('doctrine')->getManager();
         $em->createQuery('DELETE FROM App\Entity\ToolCall')->execute();
         $em->createQuery('DELETE FROM App\Entity\RunEvent')->execute();
+        $em->createQuery('DELETE FROM App\Entity\StreamEvent')->execute();
         $em->createQuery('DELETE FROM App\Entity\Run')->execute();
         $em->createQuery('DELETE FROM App\Entity\Task')->execute();
         $em->flush();

@@ -348,6 +348,20 @@ final readonly class ContextWindow
 
         $assistant = $exchange['assistant'] ?? null;
         if (\is_array($assistant)) {
+            // An operator message is the one exchange whose content is not
+            // hers (docs/design/THE_STREAM.md §2.1): it goes on the `user`
+            // side, because a message addressed to her that renders as her own
+            // turn tells the model it said something it did not. It carries no
+            // tool calls — a human message never announces a round.
+            if (true === ($exchange['userSide'] ?? false)) {
+                $messages[] = [
+                    'role' => 'user',
+                    'content' => \is_string($assistant['content'] ?? null) ? $assistant['content'] : '',
+                ];
+
+                return $messages;
+            }
+
             // Never re-send prior reasoning (SPEC §5.6).
             $assistantMessage = [
                 'role' => 'assistant',
