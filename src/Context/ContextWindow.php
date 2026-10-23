@@ -101,8 +101,17 @@ final readonly class ContextWindow
     /**
      * Cap a tool result to max_tool_output_percentage of the context limit.
      *
-     * Data, not instructions: the stored value is whatever the server
-     * returned; this is only about what goes back to the model.
+     * Data, not instructions: the stored value is whatever the server returned,
+     * whole, and this is only about what goes back to the model. Callers are
+     * therefore rendering, not recording — appending a capped result to the
+     * ledger would make the record a lossy copy of what the tool said, and would
+     * leave a later compaction turn with nothing to summarise from
+     * (docs/design/THE_STREAM.md §2.3).
+     *
+     * The basis is the context limit and the knob, both frozen for the life of
+     * the window. Do not derive it from the retained size or the trim target: a
+     * cap that moved would re-render the same row differently as history grew,
+     * which changes the sent prefix and costs a full re-prefill for nothing.
      */
     public function capToolResult(string $result): string
     {
@@ -363,10 +372,24 @@ final readonly class ContextWindow
             if (!\is_array($result)) {
                 continue;
             }
+
+            // Capped here, at render, and not at write (docs/design/THE_STREAM.md
+            // §2.3). The event carries whatever the server returned, whole; this
+            // is the one place that decides how much of it the model sees. The
+            // distinction matters because a cap applied at write destroys the
+            // record of what the tool actually said — the ledger is then a
+            // lossy copy of the world, and a later compaction turn has nothing
+            // left to summarise from.
+            //
+            // The basis is the frozen limit and the knob, never the retained
+            // size or the trim target: a cap that moved with either would
+            // render the same stored row differently as the context grew,
+            // which makes the sent prefix change for no reason and throws away
+            // the server's prefill — the one thing B2 exists to protect.
             $messages[] = [
                 'role' => 'tool',
                 'tool_call_id' => $result['toolCallId'],
-                'content' => $result['content'],
+                'content' => $this->capToolResult((string) ($result['content'] ?? '')),
             ];
         }
 

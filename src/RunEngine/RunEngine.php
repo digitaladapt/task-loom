@@ -1254,12 +1254,17 @@ final class RunEngine
                 ];
             }
 
-            $cappedContent = $this->context->capToolResult($payload['content'] ?? '');
+            // Stored whole; the window caps it at render
+            // ({@see \App\Context\ContextWindow::capToolResult}). The model sees
+            // the capped view this turn either way, so nothing about the
+            // request changes — what changes is that the ledger keeps the
+            // result rather than a prefix of it.
+            $content = (string) ($payload['content'] ?? '');
 
             $this->appendEvent(
                 $run,
                 RunEventType::ToolResult,
-                ['tool' => $toolName, 'content' => $cappedContent, 'isError' => false, 'toolCallId' => $callId],
+                ['tool' => $toolName, 'content' => $content, 'isError' => false, 'toolCallId' => $callId],
                 attemptNo: $attempt,
                 durationMs: (int) ($payload['durationMs'] ?? 0),
             );
@@ -1268,7 +1273,13 @@ final class RunEngine
             // Success clears the tool's circuit-breaker streak.
             unset($state->failureCounts[$this->failureKey($toolName, ErrorClass::ServerError)]);
 
-            return ['toolCallId' => $callId, 'content' => $cappedContent];
+            // What goes back to the model this turn is the same capped view it
+            // would get from the window on the next one, so the live request and
+            // the replayed one agree byte for byte — and agree again after a
+            // restart, when the exchange is rebuilt from these events. Returning
+            // the store's whole result here while rendering it capped later
+            // would be a one-turn difference in the same conversation.
+            return ['toolCallId' => $callId, 'content' => $this->context->capToolResult($content)];
         }
     }
 
@@ -1346,20 +1357,18 @@ final class RunEngine
             ];
         }
 
-        // The same result cap as the MCP side: whatever a harness tool
-        // returns is bounded before it is recorded or sent back.
-        $cappedContent = $this->context->capToolResult($content);
-
+        // Stored whole, as on the MCP side: the bound is a rendering decision
+        // and lives in the window, not in the ledger.
         $this->appendEvent(
             $run,
             RunEventType::ToolResult,
-            ['tool' => $toolName, 'content' => $cappedContent, 'isError' => false, 'origin' => 'harness', 'attempt' => 1, 'toolCallId' => $callId],
+            ['tool' => $toolName, 'content' => $content, 'isError' => false, 'origin' => 'harness', 'attempt' => 1, 'toolCallId' => $callId],
             attemptNo: 1,
             durationMs: (int) round((microtime(true) - $start) * 1000),
         );
         $this->em->flush();
 
-        return ['toolCallId' => $callId, 'content' => $cappedContent];
+        return ['toolCallId' => $callId, 'content' => $this->context->capToolResult($content)];
     }
 
     /**

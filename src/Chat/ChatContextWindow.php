@@ -133,10 +133,13 @@ final readonly class ChatContextWindow
             return $result;
         }
 
-        // Byte budget, character-safe cut — see {@see Utf8::cut()}. The capped
-        // result is persisted into chat_exchange_event.payload before it is
-        // sent anywhere, so a split character here is a failed write, not a
-        // cosmetic blemish.
+        // Byte budget, character-safe cut — see {@see Utf8::cut()}.
+        //
+        // The cut is character-safe for the render, not for a write: this text
+        // does not go into chat_exchange_event.payload (the event carries the
+        // result whole), it goes onto the wire. A split character here would
+        // therefore corrupt the request body rather than a column — same
+        // failure, different victim, and Utf8::cut() is what rules it out.
         return Utf8::cut($result, $maxChars)."\n".self::TRUNCATED_MARKER;
     }
 
@@ -197,7 +200,7 @@ final readonly class ChatContextWindow
         $costs = [];
         $rendered = [];
         foreach ($units as $index => $unit) {
-            $messages = self::renderUnit($unit);
+            $messages = $this->renderUnit($unit);
             $rendered[$index] = $messages;
             $costs[$index] = $this->tokensFor(self::messagesChars($messages));
         }
@@ -455,12 +458,33 @@ final readonly class ChatContextWindow
      *
      * @return list<array<string, mixed>>
      */
-    private static function renderUnit(array $unit): array
+    private function renderUnit(array $unit): array
     {
         $messages = [];
 
         foreach ($unit as $row) {
             foreach ($row->toWireMessages() as $message) {
+                // A tool result is stored whole and capped here, at render
+                // (docs/design/THE_STREAM.md §2.3). Two reasons it belongs at this
+                // point rather than at write:
+                //
+                // - The ledger keeps what the tool actually said. A write-time
+                //   cap makes the record a lossy copy, and the results large
+                //   enough to need a cap are exactly the ones a later
+                //   compaction turn would want to read.
+                // - This is also where each unit is *priced* for shedding, so a
+                //   cap applied downstream of the price would charge the window
+                //   for bytes the endpoint never receives — shedding a turn to
+                //   make room for text that was never going to be sent.
+                //
+                // The basis is the frozen limit and the knob, never the retained
+                // size: a cap that moved with the context would re-render the
+                // same row differently as history grew, changing the sent prefix
+                // and paying a full re-prefill for nothing.
+                if ('tool' === ($message['role'] ?? null) && \is_string($message['content'] ?? null)) {
+                    $message['content'] = $this->capToolResult($message['content']);
+                }
+
                 $messages[] = $message;
             }
         }
