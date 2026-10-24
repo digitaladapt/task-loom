@@ -289,9 +289,10 @@ meaningful.
 | 1. stream table + `LoopState` reading its tail | **landed** (`377cc81`) — `stream_event`, `StreamWriter`, `StreamWindow`; the checkpoint no longer carries exchanges |
 | 2. cap at render, not at write | **landed** (`7ff0f71`, `1a16af1`) |
 | 2b. the prefix test §2.3 asks for | **landed** — `ContextWindowAppendOnlyTest` |
-| 3. head + watermark on the being | **landed** — `being`, per-task head key (incl. the grounding anchor, §2.7(a)), persistent watermark; (b) still a prerequisite for step 5 |
+| 3. head + watermark on the being | **landed** — `being`, per-task head key (incl. the grounding anchor, §2.7(a)), persistent watermark |
+| 3b. the seq race §2.7(b) | **landed** — `BEGIN IMMEDIATE` via `SqliteWriteLockConnection`, busy timeout alongside WAL. Closed by taking the lock early; the retry §2.7(b) proposed cannot be written against a closed EntityManager |
 | 4. drop `stepBudget` as an ending | not started |
-| 5. ring the chain; heartbeat on being-level owed turns | not started |
+| 5. ring the chain; heartbeat on being-level owed turns | **unblocked** — 3b was its last prerequisite |
 
 ### Two things learned while landing step 1
 
