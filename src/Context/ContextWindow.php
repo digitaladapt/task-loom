@@ -222,10 +222,17 @@ final readonly class ContextWindow
         }
 
         // The front: a plan's sticky base when one is supplied, else the
-        // stateless newest-N bound. `base` is clamped into the list, and the
-        // newest-N slice rides on top of it so an oversized base (a
-        // checkpoint from before a knob change) still yields a bounded,
-        // well-formed window rather than every exchange ever seen.
+        // stateless newest-N bound.
+        //
+        // `base` is clamped to `count - 1`, not `count`, and that boundary is
+        // the point: `count` slices off everything and yields an *empty* wire
+        // context, which is never a valid answer. That is exactly what a
+        // watermark outliving the stream it indexes produces — a rebuilt
+        // database, or a being whose trim was recorded against a transcript a
+        // later process no longer has. The failure is silent: the model simply
+        // sees no history. At `count - 1` the worst case keeps the newest
+        // exchange, which is the loop's resume point anyway.
+        //
         // Without a plan: the stateless newest-N bound, whose front advances
         // every turn once full (B2 — preserved for callers that pass no plan).
         // With a plan: every exchange from the sticky base forward, kept whole
@@ -233,7 +240,7 @@ final readonly class ContextWindow
         // the retained set grows append-only (docs/design/KV_CACHE.md §6.2).
         $candidates = null === $plan
             ? \array_slice($exchanges, -$this->windowTailExchanges)
-            : \array_slice($exchanges, max(0, min($plan->base ?? 0, \count($exchanges))));
+            : \array_slice($exchanges, max(0, \min($plan->base ?? 0, \count($exchanges) - 1)));
 
         // Price each candidate once, oldest first, so the shed loop below is
         // arithmetic rather than repeated encoding.

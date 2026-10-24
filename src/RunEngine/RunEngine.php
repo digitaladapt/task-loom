@@ -106,6 +106,13 @@ final class RunEngine
     private readonly StreamWriter $stream;
 
     /**
+     * The being's durable facts — her frozen heads and her trim watermark
+     * (THE_STREAM.md §2.2). Injected so a test can watch the freeze happen
+     * rather than infer it from a second run's prompt.
+     */
+    private readonly BeingStore $beings;
+
+    /**
      * How long an execution claim is honored before another worker may take
      * it over (a dead worker must not wedge a run forever). Bounds the
      * worst-case turn duration by construction: keep it comfortably above
@@ -146,6 +153,7 @@ final class RunEngine
         private readonly ?SessionToolRunner $sessionToolRunner = null,
         private readonly ?SessionSliceEngine $slices = null,
         ?StreamWriter $stream = null,
+        ?BeingStore $beings = null,
     ) {
         // Defaulted rather than required, because the writer needs only the
         // EntityManager this engine already holds: a caller that wires a run by
@@ -153,6 +161,9 @@ final class RunEngine
         // used to mean "no transcript", which is not a state that can be
         // allowed — a turn with nowhere to land is a lost turn.
         $this->stream = $stream ?? new StreamWriter($em);
+        // Same reasoning as the writer: the being is one row, and a hand-wired
+        // engine asking for her durable facts should not need the container.
+        $this->beings = $beings ?? new BeingStore($em);
     }
 
     /**
@@ -595,11 +606,16 @@ final class RunEngine
         $run = new Run($task);
         $run->setToolboxSnapshot(ToolboxSnapshot::fromDefinitions($tools));
 
+        $watermark = $this->beings->watermark($this->beings->current());
+
         $state = new LoopState(
             stepBudget: $this->budgets['step_budget'] ?? 50,
             toolRetries: $this->budgets['tool_retries'] ?? 2,
             circuitBreakerThreshold: $this->budgets['circuit_breaker'] ?? 3,
-            promptHead: $this->prompts->compile($task, $tools),
+            promptHead: $this->headFor($task, $tools),
+            // A new run starts where her attention already is, not at the start.
+            contextBase: $watermark['base'],
+            contextBatch: $watermark['batch'],
         );
         $run->setCheckpoint($state->toCheckpoint());
 
@@ -657,7 +673,7 @@ final class RunEngine
         // run's constitution does not move (SPEC §4.1), even mid-run, even
         // if the tool was renamed, re-schematized, or deleted in between.
         $tools = ToolboxSnapshot::toDefinitions($run->getToolboxSnapshot());
-        $state->promptHead ??= $this->prompts->compile($run->getTask(), $tools);
+        $state->promptHead ??= $this->headFor($run->getTask(), $tools);
 
         // The tool definitions travel on the same request as the messages,
         // so the budget has to see both: the window is asked to fit the
@@ -902,7 +918,10 @@ final class RunEngine
             // and an assistant row carrying results of its own has no such
             // reading (its own `tool_calls` and `toolResults` are two halves
             // of one exchange, which is a shape nothing downstream produces).
+            $being = $this->beings->current();
+
             $this->stream->append(
+                $being,
                 StreamAuthor::Being,
                 StreamRole::Assistant,
                 $pending->assistantContent ?? '',
@@ -913,6 +932,7 @@ final class RunEngine
 
             if ([] !== $pending->results) {
                 $this->stream->append(
+                    $being,
                     StreamAuthor::Being,
                     StreamRole::Tool,
                     '',
@@ -1545,22 +1565,48 @@ final class RunEngine
      */
     private function streamExchanges(): array
     {
-        return StreamWindow::toExchanges($this->stream->latest(self::STREAM_ROW_WINDOW));
+        return StreamWindow::toExchanges(
+            $this->stream->latest($this->beings->current(), self::STREAM_ROW_WINDOW),
+        );
     }
 
     /**
      * Rebuild the loop state for a run: the checkpoint first (the run's own
      * history wins — including its budgets), configured values only as
      * fallback for runs that predate checkpointed budgets.
+     *
+     * ## The watermark is the one field the being can override
+     *
+     * Every other field here is a fact about *this run*, so the checkpoint is
+     * authoritative. The trim watermark is not: it is a fact about her
+     * attention, and the checkpoint copy is a snapshot of it taken at the last
+     * turn. Another run may have advanced it since — turns are sequential per
+     * being (§2.5), so a run resuming after a sibling finished would otherwise
+     * start behind the front and re-prefill a prefix it had already paid for.
+     *
+     * Reconciled by taking the further-along value, never the older one: §2.3's
+     * invariant is that the front does not move backwards. A checkpoint that
+     * has *overshot* the being's (mid-turn, before that turn's own trim was
+     * written) keeps its own — it is describing the request in flight.
      */
     private function stateFor(Run $run): LoopState
     {
-        return LoopState::fromCheckpoint(
+        $state = LoopState::fromCheckpoint(
             $run->getCheckpoint(),
             $this->budgets['step_budget'] ?? 50,
             $this->budgets['tool_retries'] ?? 2,
             $this->budgets['circuit_breaker'] ?? 3,
         );
+
+        $watermark = $this->beings->watermark($this->beings->current());
+        $state->contextBase = match (true) {
+            null === $watermark['base'] => $state->contextBase,
+            null === $state->contextBase => $watermark['base'],
+            default => max($state->contextBase, $watermark['base']),
+        };
+        $state->contextBatch = $state->contextBatch || $watermark['batch'];
+
+        return $state;
     }
 
     /**
@@ -1744,6 +1790,15 @@ final class RunEngine
      * forced trim, and latching keeps the choice a property of the run rather
      * than of a live environment read. A run that never trims keeps the empty
      * base (null) and the window's own stateless bound, which is the old shape.
+     *
+     * ## Why it is written to the being, not just the checkpoint
+     *
+     * Both. The checkpoint copy keeps the run's own turns consistent even if
+     * the process dies before the flush below; the being's copy is what makes
+     * the *next* run start where this one's attention ended, which is the whole
+     * point of step 3 (THE_STREAM.md §2.2). The invariant §2.3 asks for is
+     * enforced here: the front never moves backwards past what the model has
+     * been shown, so the prefix it prefilled still exists on the next turn.
      */
     private function advanceContextBase(LoopState $state, ContextWindowResult $fit, int $candidateCount): void
     {
@@ -1753,6 +1808,42 @@ final class RunEngine
 
         $state->contextBase = $candidateCount - $fit->keptExchanges;
         $state->contextBatch = true;
+
+        $this->beings->advanceWatermark($this->beings->current(), $state->contextBase, true);
+    }
+
+    /**
+     * The run's frozen prompt head, compiled once per (task, kind) and then
+     * reused for every turn that follows — including turns in later runs.
+     *
+     * ## The part of the prompt this does *not* freeze
+     *
+     * Step and final-consumer heads are compiled per run by
+     * {@see RunGraph::createChild()}, deliberately. Their heads embed the
+     * declared outputs of the steps they depend on (SPEC §13.4), so freezing one
+     * would freeze stale inputs — the child would summarise a sibling's first
+     * attempt forever. They therefore stay exactly as they are: per-run, per
+     * child, compiled against that child's dependencies.
+     *
+     * What freezes is the head of an ordinary run: a task's title, brief,
+     * toolbox and completion contract, none of which change between two runs of
+     * the same task. That is the majority of turns for a session or a repeatedly
+     * scheduled task, and it is the head that used to be recompiled identically
+     * on every single run.
+     *
+     * @param list<ToolDefinition> $tools
+     *
+     * @return array{system: string, user: string}
+     */
+    private function headFor(Task $task, array $tools): array
+    {
+        $being = $this->beings->current();
+
+        return $this->beings->head(
+            $being,
+            $this->beings->headKey($task, 'run'),
+            fn (): array => $this->prompts->compile($task, $tools),
+        );
     }
 
     /**

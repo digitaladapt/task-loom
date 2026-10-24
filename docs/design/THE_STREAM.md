@@ -147,6 +147,59 @@ ordering, and "the turn already in the air finishes, then yours is next" *is*
 an ordering. A turn compiled its message before you spoke, and cannot be
 un-compiled without forking the stream.
 
+### 2.7 Two blockers found while starting step 3
+
+Both were found before any code moved. (a) is answered below and in the code;
+(b) remains open and is a prerequisite for step 5.
+
+**(a) One head cannot serve several tasks — and §2.2 assumes it can.**
+
+The head is not decoration: it carries `## Task` (the title), the role note,
+the `## Inputs` block, and the completion text. It is *task-specific by
+construction*. But the stream it sits in front of is global, and
+`TaskScheduler` loops `findRunnable()`, so more than one task can be due in the
+same tick. A being-level singleton head would either (i) freeze the first task
+that ever ran and serve it to every other task forever, or (ii) be recompiled
+whenever the due task changes — which is the per-run compile we are trying to
+remove, just renamed.
+
+**Resolved by keying the head on the task, not by choosing the single slot §2.2
+described.** `being.heads` is a map, and `BeingStore::headKey()` is
+`kind:taskId`. A head is then frozen once *per task per kind* rather than once
+per being — which is what "compiled once" has to mean when the compile is a
+function of the task. The stream stays one stream, and the neighbourhood argument
+in §2.5 is unaffected: her continuity is the stream, not the head.
+
+That also settles the second half of the question. §2.2 was written as if "the
+being" and "the run" were the only two aggregates; "the task" is the third, and
+it is the one holding the content. It does not need a new aggregate, only a
+name in the key.
+
+**A second input turned out to matter: the grounding instant.** A session's
+grounding is anchored rather than live (KV_CACHE.md §6.5) so that a slice's head
+stays byte-identical across a session and only breaks when the day turns. Frozen
+under a key without the anchor, the first slice ever compiled would be replayed
+to every later slice — a session resumed tomorrow would be told today's date
+forever, and nothing would ever raise a trim to correct it. So the key carries
+the instant too, and the day boundary produces a new head exactly as it produced
+a new compile before. Anchoring bought one cache break a day; a key that ignored
+the anchor spends it once and then lies.
+**(b) `StreamWriter` can hand out the same `seq` twice under `--parallel 2`.**
+
+`nextSeq()` is `SELECT MAX(seq)+1` in a statement separate from the `INSERT`.
+The old docblock argued that SQLite serialises writers so this could not be
+lost between statements. It can, and it was reproduced: two connections read
+`MAX(seq) = 1`, both decide `2`, the first commits, the second dies on
+`UNIQUE_STREAM_EVENT_SEQ`. No silent corruption — the constraint does its
+job — but a turn is lost to a constraint violation.
+
+The fix cannot live in `StreamWriter`, because the collision only surfaces at
+flush and the writer deliberately does not own the flush. It belongs with the
+nexus that owns it — the dispatcher — as a bounded re-read-and-retry. It is a
+**hard prerequisite for step 5**: ringing the chain makes concurrent
+turns against one stream the normal case rather than the two-worker edge it is
+today.
+
 ---
 
 ## 3. What falls away
@@ -179,8 +232,9 @@ declare and nothing to silently fail to declare.
    depends on turns outliving a run. Checkpoint stops carrying exchanges.
 2. **Cap at render, not at write.** Small, and it is a prerequisite for phase
    2 having anything to compact. Also the first half of §2.3's invariant.
-3. **Head + watermark on the being.** Freeze the head; persist the base. Kills
-   B4 and makes the batching amortise.
+3. **Head + watermark on the being.** Freeze the head; persist the base. Makes
+   the batching amortise. (B4 — the *slice* variant — was already killed at the
+   task level by the grounding anchor, `KV_CACHE.md` §6.5; see §2.2's note.)
 4. **Drop `stepBudget` as an ending.**
 5. **Ring the chain**, and point the heartbeat at being-level owed turns.
 
@@ -199,7 +253,7 @@ meaningful.
 | 1. stream table + `LoopState` reading its tail | **landed** (`377cc81`) — `stream_event`, `StreamWriter`, `StreamWindow`; the checkpoint no longer carries exchanges |
 | 2. cap at render, not at write | **landed** (`7ff0f71`, `1a16af1`) |
 | 2b. the prefix test §2.3 asks for | **landed** — `ContextWindowAppendOnlyTest` |
-| 3. head + watermark on the being | **not started** — `promptHead` is still compiled per run and `contextBase` still dies with it |
+| 3. head + watermark on the being | **landed** — `being`, per-task head key (incl. the grounding anchor, §2.7(a)), persistent watermark; (b) still a prerequisite for step 5 |
 | 4. drop `stepBudget` as an ending | not started |
 | 5. ring the chain; heartbeat on being-level owed turns | not started |
 

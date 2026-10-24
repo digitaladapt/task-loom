@@ -46,7 +46,7 @@ use Doctrine\ORM\Mapping as ORM;
  */
 #[ORM\Entity]
 #[ORM\Table(name: 'stream_event')]
-#[ORM\UniqueConstraint(name: 'UNIQ_STREAM_EVENT_SEQ', columns: ['seq'])]
+#[ORM\UniqueConstraint(name: 'UNIQ_STREAM_EVENT_BEING_SEQ', columns: ['being_id', 'seq'])]
 #[ORM\Index(name: 'IDX_STREAM_EVENT_RUN', columns: ['run_id'])]
 #[ORM\Index(name: 'IDX_STREAM_EVENT_EXCHANGE', columns: ['exchange_id'])]
 class StreamEvent
@@ -55,6 +55,23 @@ class StreamEvent
     #[ORM\GeneratedValue]
     #[ORM\Column]
     private ?int $id = null; // @phpstan-ignore property.unusedType (Doctrine assigns the generated id)
+
+    /**
+     * The stream this row belongs to (THE_STREAM.md §2.2).
+     *
+     * Ownership, unlike `run` and `exchange` below, which are provenance. A row
+     * without a being is not addressable: `seq` is only meaningful inside one
+     * being's number line, which is why the uniqueness constraint is
+     * `(being_id, seq)` rather than `seq`.
+     *
+     * `CASCADE` where the provenance columns use `SET NULL`: deleting a being
+     * deletes her stream, because a stream is what a being is. There is no
+     * version of this row that means anything with the being gone, whereas a
+     * row whose *run* is gone is still a turn she had.
+     */
+    #[ORM\ManyToOne(targetEntity: Being::class)]
+    #[ORM\JoinColumn(name: 'being_id', referencedColumnName: 'id', nullable: false, onDelete: 'CASCADE')]
+    private ?Being $being = null;
 
     /**
      * Position in the stream. Strictly increasing, contiguous, assigned on
@@ -131,6 +148,17 @@ class StreamEvent
     public function getId(): ?int
     {
         return $this->id;
+    }
+
+    public function getBeing(): ?Being
+    {
+        return $this->being;
+    }
+
+    /** @internal assigned on append, before the seq it scopes */
+    public function assignToBeing(Being $being): void
+    {
+        $this->being = $being;
     }
 
     public function getSeq(): int
