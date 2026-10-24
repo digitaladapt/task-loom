@@ -149,8 +149,9 @@ un-compiled without forking the stream.
 
 ### 2.7 Two blockers found while starting step 3
 
-Both were found before any code moved. (a) is answered below and in the code;
-(b) remains open and is a prerequisite for step 5.
+Both were found before any code moved, and both are now answered — (a) in the
+head's key (§2.2), (b) in the connection rather than in the caller the original
+plan named. (b) was a prerequisite for step 5 and is closed.
 
 **(a) One head cannot serve several tasks — and §2.2 assumes it can.**
 
@@ -188,17 +189,52 @@ the anchor spends it once and then lies.
 
 `nextSeq()` is `SELECT MAX(seq)+1` in a statement separate from the `INSERT`.
 The old docblock argued that SQLite serialises writers so this could not be
-lost between statements. It can, and it was reproduced: two connections read
+lost between statements. It can be, and it was: two connections read
 `MAX(seq) = 1`, both decide `2`, the first commits, the second dies on
-`UNIQUE_STREAM_EVENT_SEQ`. No silent corruption — the constraint does its
-job — but a turn is lost to a constraint violation.
+`UNIQUE_STREAM_EVENT_SEQ`. No silent corruption — the constraint does its job —
+but a turn is lost to a constraint violation.
 
-The fix cannot live in `StreamWriter`, because the collision only surfaces at
-flush and the writer deliberately does not own the flush. It belongs with the
-nexus that owns it — the dispatcher — as a bounded re-read-and-retry. It is a
-**hard prerequisite for step 5**: ringing the chain makes concurrent
-turns against one stream the normal case rather than the two-worker edge it is
-today.
+**Resolved by taking the write lock earlier, which is not the shape originally
+proposed here.** The plan was a bounded re-read-and-retry in the dispatcher.
+That does not work, and the reason is mechanical rather than a matter of taste:
+`UnitOfWork::commit()` runs the whole flush inside
+`try { … } finally { if (! $successful) { $this->em->close(); … } }`. *Any*
+failed flush closes the EntityManager, so a constraint violation leaves the
+retry with a closed EM — and the `finally` has already rolled back, taking the
+turn's checkpoint and the run's claim with it. The retry would have to
+reconstruct the turn, not re-execute one statement.
+
+The actual fix is in the connection, not in a caller:
+**`App\Doctrine\SqliteWriteLockConnection`** begins transactions with
+`BEGIN IMMEDIATE`, so the write lock is taken *before* the read rather than
+upgraded into a deadlock at the insert. A second writer now blocks at `BEGIN`,
+where `PRAGMA busy_timeout` makes it wait, and when it proceeds it reads a
+table that already contains the first writer's row.
+
+Measured with real OS processes (`php bin/seq-race-repro.php <mode> <workers>`,
+one process per worker, each doing read-`MAX`-then-insert; the script exits
+non-zero when a worker is lost, so it can be asserted against):
+
+| workers | mode | runs | ok | lost | contiguous |
+|---|---|---|---|---|---|
+| 5 | deferred (before) | 3 | 2–3 of 5 | 2–3 | yes |
+| 5 | immediate (after) | 3 | 5 of 5 | 0 | yes |
+| 12 | deferred (before) | 5 | 5 of 12 | 7 | yes |
+| 12 | immediate (after) | 5 | 12 of 12 | 0 | yes |
+
+Two things that table says which are easy to miss. First, `contiguous=yes` in
+the deferred rows: the constraint did its job, so the damage was always a lost
+turn rather than a corrupted stream — which is why this looked survivable for
+as long as it did. Second, the loss rate *rose* with worker count, so "two
+workers is the edge case" was backwards: the more workers, the worse it gets,
+which is precisely the direction step 5 pushes.
+
+This remains a **hard prerequisite for step 5**, and it is now satisfied.
+Contention is queued rather than removed: a writer holding the transaction past
+`busy_timeout` still fails, correctly. That timeout is 5s and a turn's
+transaction is a handful of rows, so the margin is wide — but it is a margin,
+not an absence of contention, and a long transaction introduced later would
+erode it.
 
 ---
 
@@ -253,9 +289,10 @@ meaningful.
 | 1. stream table + `LoopState` reading its tail | **landed** (`377cc81`) — `stream_event`, `StreamWriter`, `StreamWindow`; the checkpoint no longer carries exchanges |
 | 2. cap at render, not at write | **landed** (`7ff0f71`, `1a16af1`) |
 | 2b. the prefix test §2.3 asks for | **landed** — `ContextWindowAppendOnlyTest` |
-| 3. head + watermark on the being | **landed** — `being`, per-task head key (incl. the grounding anchor, §2.7(a)), persistent watermark; (b) still a prerequisite for step 5 |
+| 3. head + watermark on the being | **landed** — `being`, per-task head key (incl. the grounding anchor, §2.7(a)), persistent watermark |
+| 3b. the seq race §2.7(b) | **landed** — `BEGIN IMMEDIATE` via `SqliteWriteLockConnection`, busy timeout alongside WAL. Closed by taking the lock early; the retry §2.7(b) proposed cannot be written against a closed EntityManager |
 | 4. drop `stepBudget` as an ending | not started |
-| 5. ring the chain; heartbeat on being-level owed turns | not started |
+| 5. ring the chain; heartbeat on being-level owed turns | **unblocked** — 3b was its last prerequisite |
 
 ### Two things learned while landing step 1
 
