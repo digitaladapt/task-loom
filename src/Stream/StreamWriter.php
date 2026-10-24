@@ -36,7 +36,7 @@ use Doctrine\ORM\EntityManagerInterface;
  * anywhere else: the table is the stream, and a cached counter is one more
  * thing that can disagree with it.
  *
- * ## KNOWN RACE: two writers can be handed the same seq (THE_STREAM.md §2.7)
+ * ## The seq race, and where it was actually fixed (THE_STREAM.md §2.7(b))
  *
  * This docblock used to claim that "SQLite serialises writers anyway, so the
  * read-then-write is not a race a caller can lose between statements". **That
@@ -47,15 +47,24 @@ use Doctrine\ORM\EntityManagerInterface;
  * statements issued from two processes — and `app:run:work --parallel 2` is
  * two processes.
  *
- * It cannot be fixed in here, and that is the point worth recording: the
- * collision is only detected when the row is flushed, and this class
- * deliberately does not own the flush — the caller does, so the row commits
- * with the work it describes ({@see append()}). The re-read-and-retry has to
- * live wherever the flush lives. Until it does, a parallel fleet can lose a
- * turn to a constraint violation.
+ * It is fixed, but not here, and the reason the fix is not here is worth
+ * recording because the obvious version of it does not work either. Retrying
+ * at the flush site is impossible: `UnitOfWork::commit()` wraps the whole flush
+ * in `try { ... } finally { if (! $successful) { $this->em->close(); } }`, so any
+ * failed flush — including a constraint violation — closes the EntityManager.
+ * The retry would need a closed EM, and the rollback has already discarded the
+ * turn's checkpoint and the run's claim.
  *
- * Sequence numbering `nextSeq()` via `MAX(seq)` is still the right *read*; what
- * is missing is a write path that survives losing the race for the number.
+ * So the race is closed by *not losing it* rather than by retrying: the SQLite
+ * connection begins `BEGIN IMMEDIATE`, taking the write lock before the read
+ * instead of upgrading into a deadlock at the insert. See
+ * {@see \App\Doctrine\SqliteWriteLockConnection}, and THE_STREAM.md §2.7(b) for
+ * the measurements (5 workers: 2–3 lost per run before, 0 after).
+ *
+ * `nextSeq()` via `MAX(seq)` is still the right read. What makes it correct is
+ * that the caller's transaction is already a write transaction when it runs —
+ * so a second writer cannot be reading the same maximum. Any future caller that
+ * reads a seq *outside* a transaction gets the old bug back.
  *
  * ## Why the caller does not flush
  *
