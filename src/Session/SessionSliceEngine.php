@@ -13,9 +13,11 @@ use App\Entity\RunStatus;
 use App\Entity\RunTrigger;
 use App\Entity\SessionDeclarationOutcome;
 use App\Entity\Task;
+use App\Entity\ToolDefinition;
 use App\Message\SessionTurnMessage;
 use App\Repository\RunRepository;
 use App\Repository\TaskRepository;
+use App\RunEngine\BeingStore;
 use App\RunEngine\LoopState;
 use App\RunEngine\PromptCompiler;
 use App\RunEngine\ToolboxResolutionException;
@@ -61,6 +63,14 @@ use Symfony\Component\Messenger\MessageBusInterface;
 final readonly class SessionSliceEngine
 {
     /**
+     * The being whose watermark and frozen heads this engine shares with
+     * RunEngine. Declared rather than promoted because the constructor has
+     * to be able to default it: `readonly` forbids the `??=` that a
+     * promoted nullable property would need.
+     */
+    private BeingStore $beings;
+
+    /**
      * @param array<string, int> $budgets slice_budget, tool_retries, circuit_breaker
      */
     public function __construct(
@@ -74,7 +84,11 @@ final readonly class SessionSliceEngine
         private array $budgets = [],
         private SessionEndings $endings = new SessionEndings(),
         private SessionRetry $retry = new SessionRetry(),
+        ?BeingStore $beings = null,
     ) {
+        // Same defaulted-collaborator pattern as RunEngine: the being is one
+        // row and this engine already holds the EntityManager for it.
+        $this->beings = $beings ?? new BeingStore($em);
     }
 
     /**
@@ -345,6 +359,40 @@ final readonly class SessionSliceEngine
     }
 
     /**
+     * The slice's frozen prompt head.
+     *
+     * This is the head step 3 exists for. A session's slices are, by
+     * construction, the same task over and over — same title, same brief,
+     * same toolbox, same declaration contract — and the only thing that used
+     * to differ between two slices in one deployment day was the clock inside
+     * the grounding block, which `$groundingAt` already pins. So every slice
+     * was compiling a byte-identical head it had compiled the slice before.
+     *
+     * Frozen under its own key rather than the ordinary run's: the completion
+     * text differs (a declaration, not a deliverable), and a session sharing a
+     * head with a plain run of the same task would give one of them the wrong
+     * contract (THE_STREAM.md §2.2).
+     *
+     * `$groundingAt` is read here, not from the being, on purpose: the anchor
+     * is the session's (`Task::groundingAt`), and it is what makes two slices
+     * in one day compile the same bytes.
+     *
+     * @param list<ToolDefinition> $tools
+     *
+     * @return array{system: string, user: string}
+     */
+    private function headFor(Task $task, array $tools, ?\DateTimeImmutable $groundingAt): array
+    {
+        $being = $this->beings->current();
+
+        return $this->beings->head(
+            $being,
+            $this->beings->headKey($task, 'slice', $groundingAt),
+            fn (): array => $this->prompts->compileForSlice($task, $tools, $this->endings, $groundingAt),
+        );
+    }
+
+    /**
      * Launch the owed slice outside a settlement: its own transaction, with
      * the first turn dispatched inside it (row and carrier commit
      * together — no window for a crash to fall into). A constitution that
@@ -404,7 +452,7 @@ final readonly class SessionSliceEngine
                 stepBudget: $this->budgets['slice_budget'] ?? 25,
                 toolRetries: $this->budgets['tool_retries'] ?? 2,
                 circuitBreakerThreshold: $this->budgets['circuit_breaker'] ?? 3,
-                promptHead: $this->prompts->compileForSlice($task, $tools, $this->endings, $groundingAt),
+                promptHead: $this->headFor($task, $tools, $groundingAt),
                 // The endings policy is constitution, frozen per slice
                 // (docs/design/SESSION_ENDINGS.md §2): the settlement's
                 // judgment — and the streak it counts — read it from the

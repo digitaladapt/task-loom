@@ -122,8 +122,15 @@ final class ContextWindowShedPlanTest extends TestCase
 
     /**
      * A base past the end of the list is clamped, so a stale checkpoint cannot
-     * empty the window: the newest-N slice still applies and the newest
-     * exchange always travels.
+     * empty the window: the newest exchange always travels.
+     *
+     * This guard exists because the assertions here used to say `0` kept and
+     * two messages — the prompt head alone — while the name and this docblock
+     * said the opposite. The code agreed with the assertions, so a being whose
+     * `contextBase` outlived her transcript (a rebuilt database, a reloaded
+     * fixture) resumed with no history at all and no trim flag to show it. The
+     * shed loop already refuses to drop the newest exchange, so clamping to
+     * `count - 1` is the same invariant applied to a base from elsewhere.
      */
     public function testAnOverlargeBaseIsClampedAndTheWindowIsNeverEmpty(): void
     {
@@ -131,9 +138,9 @@ final class ContextWindowShedPlanTest extends TestCase
 
         $fit = $window->buildMessages(['system' => 'S', 'user' => 'U'], $this->exchanges(3), [], null, new ShedPlan(99));
 
-        self::assertSame(0, $fit->keptExchanges);
+        self::assertSame(1, $fit->keptExchanges);
         self::assertFalse($fit->trimmed());
-        self::assertCount(2, $fit->messages);
+        self::assertCount(4, $fit->messages, 'the head plus the clamped-to newest exchange');
     }
 
     /**

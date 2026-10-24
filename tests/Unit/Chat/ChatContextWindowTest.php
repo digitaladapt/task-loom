@@ -27,6 +27,79 @@ use PHPUnit\Framework\TestCase;
  */
 final class ChatContextWindowTest extends TestCase
 {
+    /**
+     * THE STORED ROW IS WHOLE, AND EVERY RENDER OF IT IS THE SAME.
+     *
+     * A tool result is written to the ledger as the server returned it and
+     * capped only on the way out to the model (docs/design/THE_STREAM.md §2.3).
+     * Two things follow, and both used to be broken when the cap was applied at
+     * write time and the live turn was then served the *uncapped* result:
+     *
+     * - The model saw a bigger result on the turn it ran than on the next turn,
+     *   which re-rendered from the stored copy. Same conversation, two different
+     *   requests — a changed prefix and a full re-prefill for nothing.
+     * - The base id anchors made a later turn look like growth it was not.
+     *
+     * So: render the same oversized result at several points in a growing
+     * transcript and require the capped text to be identical every time.
+     */
+    public function testTheSameStoredToolResultRendersIdenticallyAsHistoryGrows(): void
+    {
+        $window = new ChatContextWindow(contextLimitTokens: 100_000, windowTurns: 100);
+
+        // 100k tokens × 3.5 chars × 15% ≈ 52.5k chars of cap; this is well past
+        // it, so every rendering below is a genuine truncation.
+        $oversized = str_repeat('z', 120_000);
+        $round = $this->round('big', $oversized);
+
+        $rendered = [];
+        foreach ([1, 5, 20] as $padding) {
+            $turns = [$this->turn('question')];
+            for ($i = 0; $i < $padding; ++$i) {
+                $turns[] = $this->turn('filler '.$i);
+            }
+            $turns = [...$turns, ...$round];
+
+            $fit = $window->fit(new ChatWireWindow($turns), 'SYS');
+
+            $rendered[] = $this->toolResultContent($fit->messages);
+        }
+
+        self::assertCount(1, array_unique($rendered), 'one stored row, one rendering — history size must not change the cap');
+        self::assertStringContainsString('[truncated — tool result capped]', $rendered[0]);
+        self::assertLessThan(120_000, \strlen($rendered[0]), 'the oversized result really was capped');
+    }
+
+    /**
+     * The ledger keeps what the tool said. Storing a capped copy would make the
+     * record a lossy one, and the results big enough to need a cap are exactly
+     * the ones a later compaction turn would want to read.
+     */
+    public function testTheCapAppliesToTheRenderingAndNotTheStoredPayload(): void
+    {
+        $window = new ChatContextWindow(contextLimitTokens: 1000, maxToolOutputPct: 15.0);
+
+        $stored = str_repeat('x', 100 * 1024);
+        $event = $this->toolResult('call-1', $stored);
+
+        $fit = $window->fit(new ChatWireWindow([$this->turn('q'), $this->toolCall('call-1'), $event]), 'SYS');
+
+        self::assertSame($stored, $event->getPayload()['content'], 'the payload is the server\'s result, whole');
+        self::assertLessThan(\strlen($stored), \strlen($this->toolResultContent($fit->messages)));
+    }
+
+    /** @param list<array<string, mixed>> $messages */
+    private function toolResultContent(array $messages): string
+    {
+        foreach ($messages as $message) {
+            if ('tool' === ($message['role'] ?? null)) {
+                return (string) $message['content'];
+            }
+        }
+
+        self::fail('the fit carried no tool message');
+    }
+
     public function testCapsToolResultToBudget(): void
     {
         $window = new ChatContextWindow(contextLimitTokens: 1000, maxToolOutputPct: 15.0);
@@ -130,7 +203,11 @@ final class ChatContextWindowTest extends TestCase
         // (~700 chars); each round ~201 tokens (a ~700-char result plus the
         // call arguments). Two rounds cannot share the budget with the
         // question; the question is what stays.
-        $window = new ChatContextWindow(contextLimitTokens: 600, windowTurns: 100);
+        //
+        // The cap is pinned high so these fixtures reach the shedding this test
+        // is about: at the default 15% the 700-char results cap to ~315 bytes,
+        // both rounds fit beside the question, and nothing is shed at all.
+        $window = new ChatContextWindow(contextLimitTokens: 600, windowTurns: 100, maxToolOutputPct: 100.0);
 
         $fit = $window->fit(new ChatWireWindow([
             $this->turn(str_repeat('q', 700)),
@@ -234,7 +311,11 @@ final class ChatContextWindowTest extends TestCase
     {
         // The newest round alone fits (head ~1 + ~201 tokens); the question
         // (~429 tokens) pushes the pair over the 600-token limit.
-        $window = new ChatContextWindow(contextLimitTokens: 600, windowTurns: 100);
+        //
+        // The cap is pinned high for the same reason as the test above: this
+        // asserts the fail-closed floor, so the fixtures have to overflow, and
+        // the default cap would shrink them until they fit.
+        $window = new ChatContextWindow(contextLimitTokens: 600, windowTurns: 100, maxToolOutputPct: 100.0);
 
         $this->expectException(ContextExhaustedException::class);
         $this->expectExceptionMessage('question');

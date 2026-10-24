@@ -81,7 +81,11 @@ final class ChatContextWindowShedPlanTest extends TestCase
      */
     public function testTheQuestionSurvivesABatchShedBehindNewerRounds(): void
     {
-        $window = new ChatContextWindow(contextLimitTokens: 1000, windowTurns: 100, contextTrimTargetPct: 50.0);
+        // The cap is pinned high so it does not touch these fixtures: what is
+        // under test is which rounds a batch shed takes, not how much of a
+        // result survives to be shed. At the default 15% a 1500-char result
+        // caps to ~525 bytes and the transcript never overflows at all.
+        $window = new ChatContextWindow(contextLimitTokens: 1000, windowTurns: 100, contextTrimTargetPct: 50.0, maxToolOutputPct: 100.0);
 
         // [Q1] [round] [Q2 ← the question] [round] [round] ...
         $rows = [

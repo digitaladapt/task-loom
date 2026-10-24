@@ -18,6 +18,7 @@ use App\Entity\ToolboxMode;
 use App\Llm\LlmClientInterface;
 use App\Llm\LlmResponse;
 use App\Repository\RunRepository;
+use App\RunEngine\BeingStore;
 use App\RunEngine\LoopState;
 use App\RunEngine\PromptCompiler;
 use App\RunEngine\RunEngine;
@@ -61,6 +62,7 @@ final class RunEngineSheddingSmokeTest extends KernelTestCase
         $this->em = static::getContainer()->get('doctrine')->getManager();
         $this->em->createQuery('DELETE FROM App\Entity\ToolCall')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\RunEvent')->execute();
+        $this->em->createQuery('DELETE FROM App\Entity\StreamEvent')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\Run')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\Tool')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\McpServer')->execute();
@@ -212,6 +214,15 @@ final class RunEngineSheddingSmokeTest extends KernelTestCase
     {
         $this->em->createQuery('DELETE FROM App\Entity\ToolCall')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\RunEvent')->execute();
+        $this->em->createQuery('DELETE FROM App\Entity\StreamEvent')->execute();
+
+        // Her watermark indexes into the transcript this fixture just emptied.
+        // Left behind, the run would start at a front past the end of a stream
+        // that no longer exists - and because a shed is only raised when the
+        // retained set *exceeds* the budget, no trim would ever fire and the
+        // count under test would be silently zero.
+        $beings = static::getContainer()->get(BeingStore::class);
+        $beings->reset($beings->current());
         $this->em->createQuery('DELETE FROM App\Entity\Run')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\Tool')->execute();
         $this->em->createQuery('DELETE FROM App\Entity\McpServer')->execute();

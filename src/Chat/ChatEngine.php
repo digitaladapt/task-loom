@@ -724,16 +724,16 @@ final readonly class ChatEngine
             return ['toolCallId' => $callId, 'content' => $feedback];
         }
 
-        $capped = $this->capToolResult((string) ($payload['content'] ?? ''));
-
+        // Stored whole; the window caps it at render
+        // ({@see ChatContextWindow::capToolResult}).
         $exchange->appendMachinery(
             ChatEventType::ToolResult,
-            ['tool' => $toolName, 'content' => $capped, 'isError' => false, 'toolCallId' => $callId],
+            ['tool' => $toolName, 'content' => (string) ($payload['content'] ?? ''), 'isError' => false, 'toolCallId' => $callId],
             durationMs: (int) ($payload['durationMs'] ?? 0),
         );
         $this->em->flush();
 
-        return ['toolCallId' => $callId, 'content' => $capped];
+        return ['toolCallId' => $callId, 'content' => $this->capToolResult((string) ($payload['content'] ?? ''))];
     }
 
     /**

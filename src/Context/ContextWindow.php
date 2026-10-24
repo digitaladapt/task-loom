@@ -101,8 +101,17 @@ final readonly class ContextWindow
     /**
      * Cap a tool result to max_tool_output_percentage of the context limit.
      *
-     * Data, not instructions: the stored value is whatever the server
-     * returned; this is only about what goes back to the model.
+     * Data, not instructions: the stored value is whatever the server returned,
+     * whole, and this is only about what goes back to the model. Callers are
+     * therefore rendering, not recording — appending a capped result to the
+     * ledger would make the record a lossy copy of what the tool said, and would
+     * leave a later compaction turn with nothing to summarise from
+     * (docs/design/THE_STREAM.md §2.3).
+     *
+     * The basis is the context limit and the knob, both frozen for the life of
+     * the window. Do not derive it from the retained size or the trim target: a
+     * cap that moved would re-render the same row differently as history grew,
+     * which changes the sent prefix and costs a full re-prefill for nothing.
      */
     public function capToolResult(string $result): string
     {
@@ -213,10 +222,17 @@ final readonly class ContextWindow
         }
 
         // The front: a plan's sticky base when one is supplied, else the
-        // stateless newest-N bound. `base` is clamped into the list, and the
-        // newest-N slice rides on top of it so an oversized base (a
-        // checkpoint from before a knob change) still yields a bounded,
-        // well-formed window rather than every exchange ever seen.
+        // stateless newest-N bound.
+        //
+        // `base` is clamped to `count - 1`, not `count`, and that boundary is
+        // the point: `count` slices off everything and yields an *empty* wire
+        // context, which is never a valid answer. That is exactly what a
+        // watermark outliving the stream it indexes produces — a rebuilt
+        // database, or a being whose trim was recorded against a transcript a
+        // later process no longer has. The failure is silent: the model simply
+        // sees no history. At `count - 1` the worst case keeps the newest
+        // exchange, which is the loop's resume point anyway.
+        //
         // Without a plan: the stateless newest-N bound, whose front advances
         // every turn once full (B2 — preserved for callers that pass no plan).
         // With a plan: every exchange from the sticky base forward, kept whole
@@ -224,7 +240,7 @@ final readonly class ContextWindow
         // the retained set grows append-only (docs/design/KV_CACHE.md §6.2).
         $candidates = null === $plan
             ? \array_slice($exchanges, -$this->windowTailExchanges)
-            : \array_slice($exchanges, max(0, min($plan->base ?? 0, \count($exchanges))));
+            : \array_slice($exchanges, max(0, \min($plan->base ?? 0, \count($exchanges) - 1)));
 
         // Price each candidate once, oldest first, so the shed loop below is
         // arithmetic rather than repeated encoding.
@@ -339,6 +355,20 @@ final readonly class ContextWindow
 
         $assistant = $exchange['assistant'] ?? null;
         if (\is_array($assistant)) {
+            // An operator message is the one exchange whose content is not
+            // hers (docs/design/THE_STREAM.md §2.1): it goes on the `user`
+            // side, because a message addressed to her that renders as her own
+            // turn tells the model it said something it did not. It carries no
+            // tool calls — a human message never announces a round.
+            if (true === ($exchange['userSide'] ?? false)) {
+                $messages[] = [
+                    'role' => 'user',
+                    'content' => \is_string($assistant['content'] ?? null) ? $assistant['content'] : '',
+                ];
+
+                return $messages;
+            }
+
             // Never re-send prior reasoning (SPEC §5.6).
             $assistantMessage = [
                 'role' => 'assistant',
@@ -363,10 +393,24 @@ final readonly class ContextWindow
             if (!\is_array($result)) {
                 continue;
             }
+
+            // Capped here, at render, and not at write (docs/design/THE_STREAM.md
+            // §2.3). The event carries whatever the server returned, whole; this
+            // is the one place that decides how much of it the model sees. The
+            // distinction matters because a cap applied at write destroys the
+            // record of what the tool actually said — the ledger is then a
+            // lossy copy of the world, and a later compaction turn has nothing
+            // left to summarise from.
+            //
+            // The basis is the frozen limit and the knob, never the retained
+            // size or the trim target: a cap that moved with either would
+            // render the same stored row differently as the context grew,
+            // which makes the sent prefix change for no reason and throws away
+            // the server's prefill — the one thing B2 exists to protect.
             $messages[] = [
                 'role' => 'tool',
                 'tool_call_id' => $result['toolCallId'],
-                'content' => $result['content'],
+                'content' => $this->capToolResult((string) ($result['content'] ?? '')),
             ];
         }
 

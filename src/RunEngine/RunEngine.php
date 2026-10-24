@@ -14,6 +14,8 @@ use App\Entity\RunEvent;
 use App\Entity\RunEventType;
 use App\Entity\RunStatus;
 use App\Entity\SessionDeclarationOutcome;
+use App\Entity\StreamAuthor;
+use App\Entity\StreamRole;
 use App\Entity\Task;
 use App\Entity\TaskKind;
 use App\Entity\Tool;
@@ -33,6 +35,8 @@ use App\Session\SessionSliceEngine;
 use App\Session\SessionTool;
 use App\Session\SessionToolRunner;
 use App\Session\SessionUndeclared;
+use App\Stream\StreamWindow;
+use App\Stream\StreamWriter;
 use App\Toolbox\ToolSchemaValidator;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\EntityNotFoundException;
@@ -89,6 +93,26 @@ use Symfony\Component\Messenger\MessageBusInterface;
 final class RunEngine
 {
     /**
+     * How far back the transcript read reaches when compiling a request.
+     *
+     * A read guard, not a trim: the window keeps a bounded number of exchanges
+     * (a trim that mattered the moment the budget was hit), so the newest few
+     * hundred rows always contain everything it could keep. Without it, every
+     * request would fetch the entire stream to throw most of it away — fine for
+     * a run, ruinous for a being that never ends.
+     */
+    private const STREAM_ROW_WINDOW = 2000;
+
+    private readonly StreamWriter $stream;
+
+    /**
+     * The being's durable facts — her frozen heads and her trim watermark
+     * (THE_STREAM.md §2.2). Injected so a test can watch the freeze happen
+     * rather than infer it from a second run's prompt.
+     */
+    private readonly BeingStore $beings;
+
+    /**
      * How long an execution claim is honored before another worker may take
      * it over (a dead worker must not wedge a run forever). Bounds the
      * worst-case turn duration by construction: keep it comfortably above
@@ -128,7 +152,18 @@ final class RunEngine
         private readonly ?SessionMemoryRenderer $sessionMemory = null,
         private readonly ?SessionToolRunner $sessionToolRunner = null,
         private readonly ?SessionSliceEngine $slices = null,
+        ?StreamWriter $stream = null,
+        ?BeingStore $beings = null,
     ) {
+        // Defaulted rather than required, because the writer needs only the
+        // EntityManager this engine already holds: a caller that wires a run by
+        // hand should not have to know the transcript exists. Leaving it out
+        // used to mean "no transcript", which is not a state that can be
+        // allowed — a turn with nowhere to land is a lost turn.
+        $this->stream = $stream ?? new StreamWriter($em);
+        // Same reasoning as the writer: the being is one row, and a hand-wired
+        // engine asking for her durable facts should not need the container.
+        $this->beings = $beings ?? new BeingStore($em);
     }
 
     /**
@@ -571,11 +606,16 @@ final class RunEngine
         $run = new Run($task);
         $run->setToolboxSnapshot(ToolboxSnapshot::fromDefinitions($tools));
 
+        $watermark = $this->beings->watermark($this->beings->current());
+
         $state = new LoopState(
             stepBudget: $this->budgets['step_budget'] ?? 50,
             toolRetries: $this->budgets['tool_retries'] ?? 2,
             circuitBreakerThreshold: $this->budgets['circuit_breaker'] ?? 3,
-            promptHead: $this->prompts->compile($task, $tools),
+            promptHead: $this->headFor($task, $tools),
+            // A new run starts where her attention already is, not at the start.
+            contextBase: $watermark['base'],
+            contextBatch: $watermark['batch'],
         );
         $run->setCheckpoint($state->toCheckpoint());
 
@@ -625,7 +665,7 @@ final class RunEngine
 
         $this->appendEvent($run, RunEventType::LlmRequest, [
             'step' => $step,
-            'exchangesSoFar' => \count($state->exchanges),
+            'exchangesSoFar' => \count($this->streamExchanges()),
         ]);
         $this->em->flush();
 
@@ -633,7 +673,7 @@ final class RunEngine
         // run's constitution does not move (SPEC §4.1), even mid-run, even
         // if the tool was renamed, re-schematized, or deleted in between.
         $tools = ToolboxSnapshot::toDefinitions($run->getToolboxSnapshot());
-        $state->promptHead ??= $this->prompts->compile($run->getTask(), $tools);
+        $state->promptHead ??= $this->headFor($run->getTask(), $tools);
 
         // The tool definitions travel on the same request as the messages,
         // so the budget has to see both: the window is asked to fit the
@@ -643,8 +683,9 @@ final class RunEngine
         $toolDescriptors = $this->prompts->toolsToOpenAi($tools);
 
         try {
-            $fit = $this->context->buildMessages($state->promptHead, $state->exchanges, $toolDescriptors, $this->sessionMemoryBlockFor($run), new ShedPlan($state->contextBase, $state->contextBatch));
-            $this->advanceContextBase($state, $fit);
+            $exchanges = $this->streamExchanges();
+            $fit = $this->context->buildMessages($state->promptHead, $exchanges, $toolDescriptors, $this->sessionMemoryBlockFor($run), new ShedPlan($state->contextBase, $state->contextBatch));
+            $this->advanceContextBase($state, $fit, \count($exchanges));
             $this->recordTrim($run, $state, $fit);
             $response = $this->llm->chat($fit->messages, $toolDescriptors);
         } catch (ContextExhaustedException $e) {
@@ -864,13 +905,43 @@ final class RunEngine
         // itself and the next LLM turn's message commit together.
         $nextStep = $state->step + 1;
         $this->commitTurn(function () use ($run, $state, $pending): void {
-            $state->exchanges[] = [
-                'assistant' => [
-                    'content' => $pending->assistantContent,
-                    'toolCalls' => $pending->calls,
-                ],
-                'toolResults' => $pending->results,
-            ];
+            // One append path for every writer (docs/design/THE_STREAM.md
+            // §2.1). The rows are the transcript now; the checkpoint below no
+            // longer carries it, so these writes are the only copy and they
+            // land in the same transaction as the turn that produced them.
+            //
+            // Two rows, because the wire protocol's exchange is two messages:
+            // the assistant turn announcing its calls, then the tool turn
+            // answering them. Folding both onto one row would be a shorter
+            // table and a longer lie — the reassembly in {@see StreamWindow}
+            // reads a `tool` row as "these results answer the call above",
+            // and an assistant row carrying results of its own has no such
+            // reading (its own `tool_calls` and `toolResults` are two halves
+            // of one exchange, which is a shape nothing downstream produces).
+            $being = $this->beings->current();
+
+            $this->stream->append(
+                $being,
+                StreamAuthor::Being,
+                StreamRole::Assistant,
+                $pending->assistantContent ?? '',
+                $pending->calls,
+                [],
+                run: $run,
+            );
+
+            if ([] !== $pending->results) {
+                $this->stream->append(
+                    $being,
+                    StreamAuthor::Being,
+                    StreamRole::Tool,
+                    '',
+                    [],
+                    $pending->results,
+                    run: $run,
+                );
+            }
+
             $state->pendingToolTurn = null;
 
             // Checkpoint: every exchange persisted before the next request (§5.5).
@@ -1254,12 +1325,17 @@ final class RunEngine
                 ];
             }
 
-            $cappedContent = $this->context->capToolResult($payload['content'] ?? '');
+            // Stored whole; the window caps it at render
+            // ({@see \App\Context\ContextWindow::capToolResult}). The model sees
+            // the capped view this turn either way, so nothing about the
+            // request changes — what changes is that the ledger keeps the
+            // result rather than a prefix of it.
+            $content = (string) ($payload['content'] ?? '');
 
             $this->appendEvent(
                 $run,
                 RunEventType::ToolResult,
-                ['tool' => $toolName, 'content' => $cappedContent, 'isError' => false, 'toolCallId' => $callId],
+                ['tool' => $toolName, 'content' => $content, 'isError' => false, 'toolCallId' => $callId],
                 attemptNo: $attempt,
                 durationMs: (int) ($payload['durationMs'] ?? 0),
             );
@@ -1268,7 +1344,13 @@ final class RunEngine
             // Success clears the tool's circuit-breaker streak.
             unset($state->failureCounts[$this->failureKey($toolName, ErrorClass::ServerError)]);
 
-            return ['toolCallId' => $callId, 'content' => $cappedContent];
+            // What goes back to the model this turn is the same capped view it
+            // would get from the window on the next one, so the live request and
+            // the replayed one agree byte for byte — and agree again after a
+            // restart, when the exchange is rebuilt from these events. Returning
+            // the store's whole result here while rendering it capped later
+            // would be a one-turn difference in the same conversation.
+            return ['toolCallId' => $callId, 'content' => $this->context->capToolResult($content)];
         }
     }
 
@@ -1346,20 +1428,18 @@ final class RunEngine
             ];
         }
 
-        // The same result cap as the MCP side: whatever a harness tool
-        // returns is bounded before it is recorded or sent back.
-        $cappedContent = $this->context->capToolResult($content);
-
+        // Stored whole, as on the MCP side: the bound is a rendering decision
+        // and lives in the window, not in the ledger.
         $this->appendEvent(
             $run,
             RunEventType::ToolResult,
-            ['tool' => $toolName, 'content' => $cappedContent, 'isError' => false, 'origin' => 'harness', 'attempt' => 1, 'toolCallId' => $callId],
+            ['tool' => $toolName, 'content' => $content, 'isError' => false, 'origin' => 'harness', 'attempt' => 1, 'toolCallId' => $callId],
             attemptNo: 1,
             durationMs: (int) round((microtime(true) - $start) * 1000),
         );
         $this->em->flush();
 
-        return ['toolCallId' => $callId, 'content' => $cappedContent];
+        return ['toolCallId' => $callId, 'content' => $this->context->capToolResult($content)];
     }
 
     /**
@@ -1468,18 +1548,65 @@ final class RunEngine
     }
 
     /**
+     * The transcript as the context compiler wants it: the stream's tail,
+     * folded into exchange windows (docs/design/THE_STREAM.md §2.1).
+     *
+     * This is the read that replaced `$state->exchanges`. The window is a view
+     * onto the stream rather than a copy carried between turns, which is what
+     * lets a turn outlive the run that wrote it — and, eventually, the only
+     * thing that makes a slice boundary invisible.
+     *
+     * The bound is a read guard, not a trim: a stream that ends can only need
+     * as many rows as the window could possibly keep, and asking for the whole
+     * history to then throw most of it away is how a long-lived being turns one
+     * request into a full-table scan.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function streamExchanges(): array
+    {
+        return StreamWindow::toExchanges(
+            $this->stream->latest($this->beings->current(), self::STREAM_ROW_WINDOW),
+        );
+    }
+
+    /**
      * Rebuild the loop state for a run: the checkpoint first (the run's own
      * history wins — including its budgets), configured values only as
      * fallback for runs that predate checkpointed budgets.
+     *
+     * ## The watermark is the one field the being can override
+     *
+     * Every other field here is a fact about *this run*, so the checkpoint is
+     * authoritative. The trim watermark is not: it is a fact about her
+     * attention, and the checkpoint copy is a snapshot of it taken at the last
+     * turn. Another run may have advanced it since — turns are sequential per
+     * being (§2.5), so a run resuming after a sibling finished would otherwise
+     * start behind the front and re-prefill a prefix it had already paid for.
+     *
+     * Reconciled by taking the further-along value, never the older one: §2.3's
+     * invariant is that the front does not move backwards. A checkpoint that
+     * has *overshot* the being's (mid-turn, before that turn's own trim was
+     * written) keeps its own — it is describing the request in flight.
      */
     private function stateFor(Run $run): LoopState
     {
-        return LoopState::fromCheckpoint(
+        $state = LoopState::fromCheckpoint(
             $run->getCheckpoint(),
             $this->budgets['step_budget'] ?? 50,
             $this->budgets['tool_retries'] ?? 2,
             $this->budgets['circuit_breaker'] ?? 3,
         );
+
+        $watermark = $this->beings->watermark($this->beings->current());
+        $state->contextBase = match (true) {
+            null === $watermark['base'] => $state->contextBase,
+            null === $state->contextBase => $watermark['base'],
+            default => max($state->contextBase, $watermark['base']),
+        };
+        $state->contextBatch = $state->contextBatch || $watermark['batch'];
+
+        return $state;
     }
 
     /**
@@ -1663,15 +1790,60 @@ final class RunEngine
      * forced trim, and latching keeps the choice a property of the run rather
      * than of a live environment read. A run that never trims keeps the empty
      * base (null) and the window's own stateless bound, which is the old shape.
+     *
+     * ## Why it is written to the being, not just the checkpoint
+     *
+     * Both. The checkpoint copy keeps the run's own turns consistent even if
+     * the process dies before the flush below; the being's copy is what makes
+     * the *next* run start where this one's attention ended, which is the whole
+     * point of step 3 (THE_STREAM.md §2.2). The invariant §2.3 asks for is
+     * enforced here: the front never moves backwards past what the model has
+     * been shown, so the prefix it prefilled still exists on the next turn.
      */
-    private function advanceContextBase(LoopState $state, ContextWindowResult $fit): void
+    private function advanceContextBase(LoopState $state, ContextWindowResult $fit, int $candidateCount): void
     {
         if (!$fit->trimmed()) {
             return;
         }
 
-        $state->contextBase = \count($state->exchanges) - $fit->keptExchanges;
+        $state->contextBase = $candidateCount - $fit->keptExchanges;
         $state->contextBatch = true;
+
+        $this->beings->advanceWatermark($this->beings->current(), $state->contextBase, true);
+    }
+
+    /**
+     * The run's frozen prompt head, compiled once per (task, kind) and then
+     * reused for every turn that follows — including turns in later runs.
+     *
+     * ## The part of the prompt this does *not* freeze
+     *
+     * Step and final-consumer heads are compiled per run by
+     * {@see RunGraph::createChild()}, deliberately. Their heads embed the
+     * declared outputs of the steps they depend on (SPEC §13.4), so freezing one
+     * would freeze stale inputs — the child would summarise a sibling's first
+     * attempt forever. They therefore stay exactly as they are: per-run, per
+     * child, compiled against that child's dependencies.
+     *
+     * What freezes is the head of an ordinary run: a task's title, brief,
+     * toolbox and completion contract, none of which change between two runs of
+     * the same task. That is the majority of turns for a session or a repeatedly
+     * scheduled task, and it is the head that used to be recompiled identically
+     * on every single run.
+     *
+     * @param list<ToolDefinition> $tools
+     *
+     * @return array{system: string, user: string}
+     */
+    private function headFor(Task $task, array $tools): array
+    {
+        $being = $this->beings->current();
+
+        return $this->beings->head(
+            $being,
+            $this->beings->headKey($task, 'run'),
+            fn (): array => $this->prompts->compile($task, $tools),
+        );
     }
 
     /**

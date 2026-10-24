@@ -6,6 +6,7 @@ namespace App\Twig;
 
 use App\Admin\JsonPresenter;
 use App\Admin\MarkdownRenderer;
+use App\Context\Utf8;
 use App\Observability\CspNonce;
 use App\Scheduler\SchedulePreset;
 use Twig\Attribute\AsTwigFilter;
@@ -69,11 +70,41 @@ final readonly class AdminExtension
      * so it is shown once rather than twice-escaped (see JsonPresenter).
      *
      * Display only: it never touches what the model is sent.
+     *
+     * Bounded, because a payload is no longer bounded upstream. Tool results are
+     * stored whole and capped at render (docs/design/THE_STREAM.md §2.3), so a
+     * single `ToolResult` event can carry megabytes — and this filter runs for
+     * every event on the page, in a `<details>` the browser still lays out. The
+     * server pays `json_encode` and the escape across the whole thing, and the
+     * page ships it, collapsed or not.
+     *
+     * So: so cap the *display*, and say how much was withheld so the ledger is
+     * still findable. Truncating the encoded form can leave invalid JSON, which
+     * is acceptable here for the same reason it is unacceptable in a column —
+     * this is a human-readable rendering, not something anything parses.
      */
     #[AsTwigFilter('pretty_json', isSafe: ['html'])]
     public function prettyJson(mixed $value): string
     {
-        return htmlspecialchars($this->json->pretty($value), \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
+        return htmlspecialchars(self::excerpt($this->json->pretty($value)), \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
+    }
+
+    /**
+     * How much of one payload the run page renders. Generous enough that an
+     * ordinary payload is untouched; small enough that a page of them is.
+     */
+    private const int PAYLOAD_VIEW_CHARS = 20_000;
+
+    private static function excerpt(string $text): string
+    {
+        if (\strlen($text) <= self::PAYLOAD_VIEW_CHARS) {
+            return $text;
+        }
+
+        // Character-safe: a byte cut mid-sequence would be the same failed
+        // escape this class is careful about, and Utf8::cut is the shared rule.
+        return Utf8::cut($text, self::PAYLOAD_VIEW_CHARS)
+            .sprintf("\n…[%d more bytes not rendered — full payload in the ledger]", \strlen($text) - self::PAYLOAD_VIEW_CHARS);
     }
 
     /**

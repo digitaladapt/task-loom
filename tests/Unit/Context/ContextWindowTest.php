@@ -153,7 +153,13 @@ final class ContextWindowTest extends TestCase
     {
         // 1000 tokens ≈ 3500 chars. Head is 2 chars; each exchange ~1500
         // chars (~429 tokens), so two fit and the third does not.
-        $window = new ContextWindow(contextLimitTokens: 1000, maxToolOutputPct: 15.0, windowTailExchanges: 10);
+        //
+        // maxToolOutputPct is pinned high so the cap does not touch these
+        // fixtures: this test is about shedding, and the sizes above are the
+        // budget it is reasoning about. Leaving the default 15% in place would
+        // silently cap a 1500-char result to ~525 bytes, and the shed this is
+        // asserting on would never happen. The cap has its own tests.
+        $window = new ContextWindow(contextLimitTokens: 1000, maxToolOutputPct: 100.0, windowTailExchanges: 10);
 
         $fit = $window->buildMessages(['system' => 'S', 'user' => 'U'], [
             $this->exchange('c_old', str_repeat('a', 1500)),
